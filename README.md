@@ -2175,32 +2175,53 @@ Copyright © 2025 Mikhail Deynekin. All rights reserved.
 
 ---
 
-## 🚀 Getting Started Now
+## 🚀 Quick Start & Deployment
 
-```
+Get started in under a minute. This example uses the essential parameters for a security audit.
+
+```powershell
+# Download and execute the security analyzer
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/paulmann/1st-RDPMon/main/1st-RdpMonSecurityAnalyzer.ps1" `
-  -OutFile "1st-RdpMonSecurityAnalyzer.ps1"
+    -OutFile "1st-RdpMonSecurityAnalyzer.ps1"
 
+# Enable script execution (if needed)
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
 
+# Run a comprehensive analysis with HTML report
 .\1st-RdpMonSecurityAnalyzer.ps1 `
-  -DbPath "C:\Path\To\RdpMon.db" `
-  -AutoInstallLiteDb `
-  -OutputFormat Html `
-  -ExportPath "rdp_security_report.html"
+    -DbPath "C:\Logs\RdpMon.db" `
+    -AutoInstallLiteDb `
+    -OutputFormat Html `
+    -ExportPath "Rdp_Security_Audit_Report.html"
 ```
 
-## ⭐ Like This Tool?
-
-Please star this repository on GitHub!
-
-## 🤝 Questions?
-
-- 📧 Email: [mid1977@gmail.com](mailto:mid1977@gmail.com)
-- 🐛 Report Issues: [GitHub Issues](https://github.com/paulmann/1st-RDPMon/issues)
+> **Note:** Run PowerShell as Administrator for full system access. Use `-Help` parameter to see all advanced options.
 
 ---
 
-**Version 1.0.0** | December 2025 | Enterprise Ready ✓
+## ⭐ Support the Project
 
-*Transform RDP Monitoring into Security Intelligence*
+If this tool has made your security auditing easier or helped secure your systems, please consider giving it a star on GitHub. It helps others discover the project and motivates further development.
+
+[![GitHub Stars](https://img.shields.io/github/stars/paulmann/1st-RDPMon?style=social)](https://github.com/paulmann/1st-RDPMon/stargazers)
+
+---
+
+## 📬 Connect & Contribute
+
+We welcome feedback, questions, and contributions to make this tool better for everyone.
+
+| Channel | Purpose | Link |
+| :--- | :--- | :--- |
+| **🐛 Issues** | Report bugs, request features, or ask questions. | [GitHub Issues](https://github.com/paulmann/1st-RDPMon/issues) |
+| **📧 Email** | For direct, private, or sensitive inquiries. | [mid1977@gmail.com](mailto:m@deynekin.ru) |
+| **💡 Suggestion** | Have an idea? Open an issue with the `enhancement` label. | [Open Suggestion](https://github.com/paulmann/1st-RDPMon/issues/new?labels=enhancement) |
+
+**Before reporting an issue**, please check the existing issues to avoid duplicates.
+
+---
+
+**v1.0.0** • **December 2025** • **`Enterprise-Ready`** • **`Active`**  
+**Transform RDP Monitoring into Actionable Security Intelligence.**
+
+© 2025 Paulmann. This project is released under its respective [License](LICENSE).
