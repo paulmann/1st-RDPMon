@@ -1802,7 +1802,6 @@ powershell -ExecutionPolicy Bypass -File "1st-RdpMonSecurityAnalyzer.ps1" `
 # - Execution timing for each phase
 ```
 
-```markdown
 ## 14.3 Health Check Script
 
 ```
