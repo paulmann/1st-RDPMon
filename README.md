@@ -2175,8 +2175,6 @@ Copyright © 2025 Mikhail Deynekin. All rights reserved.
 
 ---
 
-<div align="center">
-
 ## 🚀 Getting Started Now
 
 ```
@@ -2202,8 +2200,6 @@ Please star this repository on GitHub!
 - 🐛 Report Issues: [GitHub Issues](https://github.com/paulmann/1st-RDPMon/issues)
 
 ---
-
-</div>
 
 **Version 1.0.0** | December 2025 | Enterprise Ready ✓
 
