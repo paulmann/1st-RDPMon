@@ -2214,7 +2214,7 @@ We welcome feedback, questions, and contributions to make this tool better for e
 | Channel | Purpose | Link |
 | :--- | :--- | :--- |
 | **🐛 Issues** | Report bugs, request features, or ask questions. | [GitHub Issues](https://github.com/paulmann/1st-RDPMon/issues) |
-| **📧 Email** | For direct, private, or sensitive inquiries. | [mid1977@gmail.com](mailto:m@deynekin.ru) |
+| **📧 Email** | For direct, private, or sensitive inquiries. | [m@deynekin.com](mailto:m@deynekin.com) |
 | **💡 Suggestion** | Have an idea? Open an issue with the `enhancement` label. | [Open Suggestion](https://github.com/paulmann/1st-RDPMon/issues/new?labels=enhancement) |
 
 **Before reporting an issue**, please check the existing issues to avoid duplicates.
