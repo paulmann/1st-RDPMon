@@ -2151,7 +2151,7 @@ This project is licensed under the **MIT License**.
 Copyright © 2025 Mikhail Deynekin. All rights reserved.
 
 **Author**: Mikhail Deynekin
-- Email: [mid1977@gmail.com](mailto:mid1977@gmail.com)
+- Email: [m@deynekin.com](mailto:m@deynekin.com)
 - Website: [https://deynekin.com](https://deynekin.com)
 - GitHub: [https://github.com/paulmann](https://github.com/paulmann)
 
