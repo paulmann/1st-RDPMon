@@ -1853,8 +1853,6 @@ function Test-RdpMonAnalyzerHealth {
 Test-RdpMonAnalyzerHealth
 ```
 
----
-
 ## 15. Performance Optimization
 
 ### 15.1 Large Database Handling
