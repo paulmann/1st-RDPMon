@@ -2203,6 +2203,8 @@ Please star this repository on GitHub!
 
 ---
 
+</div>
+
 **Version 1.0.0** | December 2025 | Enterprise Ready ✓
 
 *Transform RDP Monitoring into Security Intelligence*
