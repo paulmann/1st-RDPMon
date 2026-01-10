@@ -199,8 +199,19 @@ powershell -ExecutionPolicy Bypass
 # Go to the directory containing the script
 cd "C:\Path\To\Script"
 
-# Or download script first
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/paulmann/1st-RDPMon/main/1st-RdpMonSecurityAnalyzer.ps1" -OutFile "1st-RdpMonSecurityAnalyzer.ps1"
+# And download 1st-RDPMon
+$TargetPath = ".\1st-RDPMon"; $ZipUrl = "https://github.com/paulmann/1st-RDPMon/archive/refs/heads/main.zip"; $ZipPath = "$TargetPath-main.zip"
+
+if(Test-Path $TargetPath){Remove-Item $TargetPath -Recurse -Force}
+Invoke-WebRequest $ZipUrl -OutFile $ZipPath; Expand-Archive $ZipPath -DestinationPath . -Force; Remove-Item $ZipPath; Rename-Item (Get-ChildItem -Directory "*1st-RDPMon*"|Select -First 1).FullName $TargetPath
+
+$Files = (Get-ChildItem $TargetPath -Recurse -File).Count; Write-Host "✅ Done: $TargetPath ($Files files)" -ForegroundColor Green
+
+# Verify & Show Help
+$Analyzer = Get-ChildItem $TargetPath -Recurse -Filter "1st-RdpMonSecurityAnalyzer.ps1" | Select -First 1
+if($Analyzer){ Write-Host "`n📋 HELP:" -ForegroundColor Cyan; . $Analyzer.FullName -? }
+else { Write-Host "`nℹ️  Analyzer script not found. Check: Get-ChildItem $TargetPath -Recurse *.ps1" -ForegroundColor Yellow }
+cd .\1st-RDPMon\
 ```
 
 **Step 4: Verify LiteDB Availability**
