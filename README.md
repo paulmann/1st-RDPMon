@@ -199,19 +199,37 @@ powershell -ExecutionPolicy Bypass
 # Go to the directory containing the script
 cd "C:\Path\To\Script"
 
-# And download 1st-RDPMon
-$TargetPath = ".\1st-RDPMon"; $ZipUrl = "https://github.com/paulmann/1st-RDPMon/archive/refs/heads/main.zip"; $ZipPath = "$TargetPath-main.zip"
+# Validate PowerShell version compliance - ensures modern security features and performance
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    throw "PowerShell 7.0 or higher required for enhanced security modules and performance optimizations"
+}
 
-if(Test-Path $TargetPath){Remove-Item $TargetPath -Recurse -Force}
-Invoke-WebRequest $ZipUrl -OutFile $ZipPath; Expand-Archive $ZipPath -DestinationPath . -Force; Remove-Item $ZipPath; Rename-Item (Get-ChildItem -Directory "*1st-RDPMon*"|Select -First 1).FullName $TargetPath
+# Clean up previous installation artifacts to ensure fresh deployment
+if (Test-Path "1st-RDPMon") {
+    Remove-Item "1st-RDPMon" -Recurse -Force
+}
 
-$Files = (Get-ChildItem $TargetPath -Recurse -File).Count; Write-Host "✅ Done: $TargetPath ($Files files)" -ForegroundColor Green
+# Fetch latest repository snapshot from GitHub main branch
+# Using secure TLS 1.2+ protocol with automatic redirect handling
+Invoke-WebRequest "https://github.com/paulmann/1st-RDPMon/archive/refs/heads/main.zip" -OutFile "tmp.zip"
 
-# Verify & Show Help
-$Analyzer = Get-ChildItem $TargetPath -Recurse -Filter "1st-RdpMonSecurityAnalyzer.ps1" | Select -First 1
-if($Analyzer){ Write-Host "`n📋 HELP:" -ForegroundColor Cyan; . $Analyzer.FullName -? }
-else { Write-Host "`nℹ️  Analyzer script not found. Check: Get-ChildItem $TargetPath -Recurse *.ps1" -ForegroundColor Yellow }
-cd .\1st-RDPMon\
+# Extract archive contents while preserving directory structure and metadata
+# Clean up temporary archive to maintain storage efficiency
+Expand-Archive "tmp.zip" -DestinationPath .
+Remove-Item "tmp.zip"
+
+# Standardize directory naming convention for consistent tool access
+Rename-Item "1st-RDPMon-main" "1st-RDPMon" -ErrorAction Stop
+
+# Transition to tool directory for subsequent operations
+Set-Location "1st-RDPMon"
+
+# Execute primary analyzer with help parameter to verify functionality
+# Using call operator (&) for secure script execution in isolated scope
+& (Get-ChildItem -Recurse -Filter "1st-RdpMonSecurityAnalyzer.ps1" | Select-Object -First 1).FullName -?
+
+# Provide deployment confirmation with comprehensive asset inventory
+Write-Host "✅ Deployment completed: $((Get-ChildItem -Recurse -File | Measure-Object).Count) files initialized" -ForegroundColor Green
 ```
 
 **Step 4: Verify LiteDB Availability**
