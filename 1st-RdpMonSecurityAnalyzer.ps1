@@ -3287,41 +3287,47 @@ function Export-Results {
 				}
 				
 				if ($FilePath) {
-					Write-DebugStep -Phase "ExportResults" -Message "Saving HTML report to: $FilePath" -Type 'Progress' -Data @{
-						TargetPath = $FilePath
-						Directory  = Split-Path -Path $FilePath -Parent
-						FileName   = Split-Path -Path $FilePath -Leaf
-					}
-					
-					# Ensure directory exists
-					$TargetPath = $ExportPath  # или как у тебя называется переменная
-
-					if (-not [System.IO.Path]::IsPathRooted($TargetPath)) {
-					    $TargetPath = Join-Path (Get-Location).Path $TargetPath
+					# Resolve to absolute path — handles plain filenames like 'report.html'
+					# passed from the current working directory
+					$absolutePath = if ([System.IO.Path]::IsPathRooted($FilePath)) {
+						$FilePath
+					} else {
+						Join-Path -Path (Get-Location).Path -ChildPath $FilePath
 					}
 
-					$Directory = Split-Path -Parent $TargetPath
-
-					if (-not [string]::IsNullOrWhiteSpace($Directory) -and -not (Test-Path $Directory)) {
-					    New-Item -ItemType Directory -Path $Directory -Force | Out-Null
+					Write-DebugStep -Phase 'ExportResults' -Message "Saving HTML report to: $absolutePath" -Type 'Progress' -Data @{
+						TargetPath = $absolutePath
+						Directory  = Split-Path -Path $absolutePath -Parent
+						FileName   = Split-Path -Path $absolutePath -Leaf
 					}
 
-					$Content | Set-Content -Path $TargetPath -Encoding UTF8
-					
-					# Save the file
-					Write-DebugStep -Phase "ExportResults" -Message "Writing HTML content to file" -Type 'Progress'
-					$output | Out-File -FilePath $FilePath -Encoding UTF8 -Force
-					
-					# Verify file was created
-					if (Test-Path -Path $FilePath) {
-						$fileInfo = Get-Item -Path $FilePath
-						Write-DebugStep -Phase "ExportResults" -Message "HTML report saved successfully" -Type 'Complete' -Data @{
+					# Create parent directory if it doesn't exist yet
+					# (safely skipped when writing to an existing or root-level path)
+					$targetDir = Split-Path -Path $absolutePath -Parent
+					if (-not [string]::IsNullOrWhiteSpace($targetDir) -and
+						-not (Test-Path -Path $targetDir -PathType Container)) {
+						Write-DebugStep -Phase 'ExportResults' -Message "Creating output directory: $targetDir" -Type 'Progress'
+						New-Item -ItemType Directory -Path $targetDir -Force -ErrorAction Stop | Out-Null
+					}
+
+					# Write the generated HTML to disk
+					Write-DebugStep -Phase 'ExportResults' -Message 'Writing HTML content to file' -Type 'Progress'
+					$output | Out-File -FilePath $absolutePath -Encoding UTF8 -Force -ErrorAction Stop
+
+					# Verify the file was actually created and report its size
+					if (Test-Path -Path $absolutePath -PathType Leaf) {
+						$fileInfo = Get-Item -Path $absolutePath
+						Write-DebugStep -Phase 'ExportResults' -Message 'HTML report saved successfully' -Type 'Complete' -Data @{
 							FileSize = "$([math]::Round($fileInfo.Length / 1KB, 2)) KB"
 							FullPath = $fileInfo.FullName
 						}
-					}
-					else {
-						Write-DebugStep -Phase "ExportResults" -Message "WARNING: File not created at expected location" -Type 'Warning' -Data @{ ExpectedPath = $FilePath }
+					} else {
+						# Should not normally reach here given -ErrorAction Stop above,
+						# but kept as a defensive guard
+						Write-DebugStep -Phase 'ExportResults' -Message 'WARNING: File not found after write — check permissions' -Type 'Warning' -Data @{
+							ExpectedPath = $absolutePath
+						}
+						throw "HTML report was not created at: $absolutePath"
 					}
 				}
 			}
