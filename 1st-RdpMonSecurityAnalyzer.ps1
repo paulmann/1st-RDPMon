@@ -191,18 +191,23 @@ param(
 	[ValidateRange(0, [int]::MaxValue)]
 	[int]$MinFails = 0,
 
-	# Start date/time filter (local time)
-	[Parameter()]
-	[datetime]$From = [datetime]::MinValue,
+        # Start date/time filter (local time)
+        [Parameter()]
+        [datetime]$From = [datetime]::MinValue,
 
-	# End date/time filter (local time)
-	[Parameter()]
-	[datetime]$To = [datetime]::MaxValue,
+        # End date/time filter (local time)
+        [Parameter()]
+        [datetime]$To = [datetime]::MaxValue,
 
-	# Output format: Table, List, Json, Csv, Xml, Html, Text, Yaml, Markdown, Object
-	[Parameter()]
-	[ValidateSet('Table', 'List', 'Json', 'Csv', 'Xml', 'Html', 'Text', 'Yaml', 'Markdown', 'Object')]
-	[string]$OutputFormat = 'Table',
+        # Filter by IP address (single IPv4/IPv6 or string key in Addr._id)
+        [Parameter()]
+        [ValidatePattern('^[0-9a-fA-F\.:]+$')]
+        [string]$IpAddress,
+
+        # Output format: Table, List, Json, Csv, Xml, Html, Text, Yaml, Markdown, Object
+        [Parameter()]
+        [ValidateSet('Table', 'List', 'Json', 'Csv', 'Xml', 'Html', 'Text', 'Yaml', 'Markdown', 'Object')]
+        [string]$OutputFormat = 'Table',
 
 	# Export results to specified file path
 	[Parameter()]
@@ -2142,21 +2147,50 @@ function Process-RdpMonAddrData {
 		foreach ($record in $Data) {
 			$recordIndex++
 			
-			# Skip records with null IP immediately - they're useless for reporting
-			if ([string]::IsNullOrEmpty($record.IP)) {
-				$skippedNoIP++
-				if ($skippedNoIP -le 5) {
-					# Log first 5 skipped records
-					Write-DebugStep -Phase "ProcessAddrData" -Message "Skipping record with null IP" -Type 'Progress' -Data @{
-						Index  = $recordIndex
-						Record = $record
-					}
-				}
-				continue
-			}
-			
-			$ip = $record.IP
-			
+            # Skip records with null IP immediately
+            if ([string]::IsNullOrEmpty($record.IP)) {
+                $skippedNoIP++
+                if ($skippedNoIP -le 5) {
+                    Write-DebugStep -Phase "ProcessAddrData" -Message "Skipping record with null IP" -Type 'Progress' -Data @{
+                        Index  = $recordIndex
+                        Record = $record
+                    }
+                }
+                continue
+            }
+            
+            # Raw IP from record 
+            $rawIp = $record.IP
+            $ip    = ($rawIp -as [string]).Trim('"').Trim()
+
+            if ($IpAddress) {
+                Write-DebugStep -Phase "ProcessAddrData" -Message "IP filter check for record $recordIndex" -Type 'Info' -Data @{
+                    IpAddressParam = $IpAddress
+                    RawRecordIP    = $rawIp
+                    NormalizedIP   = $ip
+                }
+
+                $pattern = "*$IpAddress*"
+
+                if ($ip -notlike $pattern) {
+                    $filteredCount++
+                    Write-DebugStep -Phase "ProcessAddrData" -Message "Record $recordIndex skipped by IP filter" -Type 'Progress' -Data @{
+                        IpAddressParam = $IpAddress
+                        RawRecordIP    = $rawIp
+                        NormalizedIP   = $ip
+                        Pattern        = $pattern
+                    }
+                    continue
+                }
+
+                Write-DebugStep -Phase "ProcessAddrData" -Message "Record $recordIndex PASSED IP filter" -Type 'Progress' -Data @{
+                    IpAddressParam = $IpAddress
+                    RawRecordIP    = $rawIp
+                    NormalizedIP   = $ip
+                    Pattern        = $pattern
+                }
+            }
+
 			# Log first few valid records for debugging
 			if ($recordIndex -le 3) {
 				Write-DebugStep -Phase "ProcessAddrData" -Message "Processing valid record $recordIndex" -Type 'Progress' -Data @{
