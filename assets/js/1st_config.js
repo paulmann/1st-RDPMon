@@ -17,7 +17,7 @@ const ipServicesMap = [
     { value: 'iphey', label: 'IPhey.com', url: 'https://iphey.com/ip/{IP}' },
     { value: 'iphub', label: 'IPHub.info', url: 'https://iphub.info/?ip={IP}' },
     { value: 'ipinfo', label: 'IPinfo.io', url: 'https://ipinfo.io/{IP}' },
-    { value: 'iplocation', label: 'IPLocation.io', url: 'https://iplocation.io/ip-location/{IP}' },
+    { value: 'iplocation', label: 'IPLocation.io', url: 'https://iplocation.io/ip-whois-lookup/{IP}' },
     { value: 'ip2location', label: 'IP2Location', url: 'https://www.ip2location.com/demo/{IP}' },
     { value: 'lacnic', label: 'LACNIC (Latin America)', url: 'https://rdap.lacnic.net/rdap/ip/{IP}' },
     { value: 'netlas', label: 'Netlas.io', url: 'https://netlas.io/search?q={IP}' },
