@@ -5,6 +5,7 @@
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
 
+using System.Text.Json;
 using RdpAudit.Core.Config;
 using RdpAudit.Core.Models;
 using RdpAudit.Service.Alerts;
@@ -198,8 +199,9 @@ public class AlertRuleTests
 	[Fact]
 	public async Task OffHoursLogin_OutsideBusinessHours_ReturnsAlert()
 	{
+		// Timezone-stable: explicitly evaluate against UTC. 02:00 UTC is outside 09:00-18:00 UTC.
 		RawEvent evt = Logon(4624, logonType: 10);
-		evt.TimeUtc = DateTime.SpecifyKind(DateTime.Today.AddHours(2), DateTimeKind.Utc);
+		evt.TimeUtc = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddHours(2), DateTimeKind.Utc);
 		var ctx = new MockAlertContext(new RdpAuditOptions
 		{
 			Alerts = new AlertOptions
@@ -207,10 +209,29 @@ public class AlertRuleTests
 				OffHoursAlertEnabled = true,
 				BusinessHoursStart = TimeSpan.FromHours(9),
 				BusinessHoursEnd = TimeSpan.FromHours(18),
+				OffHoursTimeZoneId = "UTC",
 			},
 		});
 		Alert? alert = await new OffHoursLoginRule().EvaluateAsync(evt, ctx, default);
 		Assert.NotNull(alert);
+	}
+
+	[Fact]
+	public async Task OffHoursLogin_InsideBusinessHours_ReturnsNull()
+	{
+		RawEvent evt = Logon(4624, logonType: 10);
+		evt.TimeUtc = DateTime.SpecifyKind(DateTime.UtcNow.Date.AddHours(12), DateTimeKind.Utc);
+		var ctx = new MockAlertContext(new RdpAuditOptions
+		{
+			Alerts = new AlertOptions
+			{
+				OffHoursAlertEnabled = true,
+				BusinessHoursStart = TimeSpan.FromHours(9),
+				BusinessHoursEnd = TimeSpan.FromHours(18),
+				OffHoursTimeZoneId = "UTC",
+			},
+		});
+		Assert.Null(await new OffHoursLoginRule().EvaluateAsync(evt, ctx, default));
 	}
 
 	[Fact]
@@ -331,5 +352,177 @@ public class AlertRuleTests
 		var ctx = new MockAlertContext();
 		Alert? alert = await new LsassAccessRule().EvaluateAsync(evt, ctx, default);
 		Assert.NotNull(alert);
+	}
+
+	[Fact]
+	public async Task LsassAccess_HighBitMaskOnLsassWithoutSensitive_ReturnsNull()
+	{
+		// 0x100000 has none of 0x10/0x20/0x08 sensitive bits set; substring "0x10" used to match it incorrectly.
+		RawEvent evt = Logon(4656);
+		evt.ObjectName = "\\Device\\HarddiskVolume1\\Windows\\System32\\lsass.exe";
+		evt.AccessMask = "0x100000";
+		evt.Details = "{\"ProcessName\":\"C:\\\\Tools\\\\mimikatz.exe\"}";
+		var ctx = new MockAlertContext();
+		Assert.Null(await new LsassAccessRule().EvaluateAsync(evt, ctx, default));
+	}
+
+	[Fact]
+	public async Task LsassAccess_OnlyVmReadFlag_ReturnsAlert()
+	{
+		// 0x10 alone is exactly PROCESS_VM_READ — sensitive.
+		RawEvent evt = Logon(4656);
+		evt.ObjectName = "\\Device\\HarddiskVolume1\\Windows\\System32\\lsass.exe";
+		evt.AccessMask = "0x10";
+		evt.Details = "{\"ProcessName\":\"C:\\\\Tools\\\\mimikatz.exe\"}";
+		var ctx = new MockAlertContext();
+		Alert? alert = await new LsassAccessRule().EvaluateAsync(evt, ctx, default);
+		Assert.NotNull(alert);
+	}
+
+	[Fact]
+	public void LsassAccess_TryParseAccessMask_ParsesHexAndDecimal()
+	{
+		Assert.True(LsassAccessRule.TryParseAccessMask("0x10", out uint a));
+		Assert.Equal(0x10u, a);
+		Assert.True(LsassAccessRule.TryParseAccessMask("0x1F0FFF", out uint b));
+		Assert.Equal(0x1F0FFFu, b);
+		Assert.True(LsassAccessRule.TryParseAccessMask("16", out uint c));
+		Assert.Equal(16u, c);
+		Assert.False(LsassAccessRule.TryParseAccessMask("", out _));
+		Assert.False(LsassAccessRule.TryParseAccessMask("not-a-number", out _));
+	}
+
+	[Fact]
+	public async Task BruteForce_Cooldown_SecondAlertSuppressed()
+	{
+		AlertCooldownTracker tracker = new();
+		var ctx = new MockAlertContext(
+			options: new RdpAuditOptions { Alerts = new AlertOptions { BruteForceThreshold = 5, ThresholdCooldownMinutes = 60 } },
+			byIp: Enumerable.Range(0, 10).Select(_ => Logon(4625)));
+
+		BruteForceRule rule = new(tracker);
+		Alert? first = await rule.EvaluateAsync(Logon(4625), ctx, default);
+		Alert? second = await rule.EvaluateAsync(Logon(4625), ctx, default);
+		Assert.NotNull(first);
+		Assert.Null(second);
+	}
+
+	[Fact]
+	public void Firewall_BuildBlockArgs_RejectsInvalidIp()
+	{
+		Assert.Throws<ArgumentException>(() => RdpAudit.Service.Services.FirewallManager.BuildBlockArgs("RdpAudit-Block", "not.an.ip"));
+	}
+
+	[Fact]
+	public void Firewall_BuildBlockArgs_RejectsInjectionInRuleName()
+	{
+		Assert.Throws<ArgumentException>(() => RdpAudit.Service.Services.FirewallManager.BuildBlockArgs("\"; del *", "1.2.3.4"));
+	}
+
+	[Fact]
+	public void Firewall_BuildBlockArgs_ProducesExpectedArguments()
+	{
+		var args = RdpAudit.Service.Services.FirewallManager.BuildBlockArgs("RdpAudit-Block", "1.2.3.4");
+		Assert.Contains("advfirewall", args);
+		Assert.Contains("name=RdpAudit-Block-1.2.3.4", args);
+		Assert.Contains("dir=in", args);
+		Assert.Contains("action=block", args);
+		Assert.Contains("remoteip=1.2.3.4", args);
+	}
+
+	[Fact]
+	public void OffHoursLogin_ResolveTimeZone_FallsBackToUtcOnUnknown()
+	{
+		var tz = RdpAudit.Service.Alerts.OffHoursLoginRule.ResolveTimeZone("This/Zone/Definitely/Does/Not/Exist");
+		Assert.Equal(TimeZoneInfo.Utc.Id, tz.Id);
+	}
+
+	[Fact]
+	public async Task ProcessAnomaly_CmdFromExplorer_DefaultSuppressesAlert()
+	{
+		RawEvent evt = Logon(4688);
+		evt.ProcessName = "C:\\Windows\\System32\\cmd.exe";
+		evt.Details = "{\"ParentProcessName\":\"C:\\\\Windows\\\\explorer.exe\"}";
+		var ctx = new MockAlertContext();
+		Assert.Null(await new ProcessAnomalyRule().EvaluateAsync(evt, ctx, default));
+	}
+
+	[Fact]
+	public async Task ProcessAnomaly_PowerShellFromExplorer_StillAlerts()
+	{
+		RawEvent evt = Logon(4688);
+		evt.ProcessName = "C:\\Windows\\System32\\powershell.exe";
+		evt.Details = "{\"ParentProcessName\":\"C:\\\\Windows\\\\explorer.exe\"}";
+		var ctx = new MockAlertContext();
+		Alert? alert = await new ProcessAnomalyRule().EvaluateAsync(evt, ctx, default);
+		Assert.NotNull(alert);
+	}
+
+	[Fact]
+	public void EventNormalizer_TruncatesHugeDetails_ProducesValidJson()
+	{
+		var map = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+		{
+			["ProcessName"] = "C:\\Tools\\mimikatz.exe",
+			["Big"] = new string('A', 200_000),
+		};
+		string json = RdpAudit.Service.Processors.EventNormalizer.SerializeAndCap(map);
+		Assert.True(json.Length <= 65_536);
+		using JsonDocument doc = JsonDocument.Parse(json);
+		// ProcessName must remain accessible to LsassAccess / StickyKeys-like rules.
+		Assert.True(doc.RootElement.TryGetProperty("ProcessName", out _));
+	}
+
+	[Fact]
+	public void AuditPolicy_RequiredRows_AllHaveValidGuids()
+	{
+		Assert.NotEmpty(RdpAudit.Core.Events.AuditPolicyManager.RequiredRows);
+		foreach (var row in RdpAudit.Core.Events.AuditPolicyManager.RequiredRows)
+		{
+			Assert.True(Guid.TryParse(row.SubcategoryGuid.Trim('{', '}'), out _),
+				$"Subcategory {row.Subcategory} GUID is invalid: {row.SubcategoryGuid}");
+		}
+	}
+
+	[Fact]
+	public async Task RapidReconnect_SameIp_NoAlert()
+	{
+		RawEvent reconnect = Logon(25, ip: "9.9.9.9");
+		reconnect.SessionId = 7;
+		var disconnect = new RawEvent { EventId = 24, SessionId = 7, SourceIp = "9.9.9.9", TimeUtc = DateTime.UtcNow.AddSeconds(-5) };
+		var ctx = new MockAlertContext(
+			options: new RdpAuditOptions { Alerts = new AlertOptions { RapidReconnectSeconds = 30 } },
+			bySession: new[] { disconnect });
+		Assert.Null(await new RapidReconnectRule().EvaluateAsync(reconnect, ctx, default));
+	}
+
+	[Fact]
+	public async Task PrivilegedLogin_NoSensitivePrivileges_NoAlert()
+	{
+		RawEvent evt = Logon(4672);
+		evt.Details = "{\"PrivilegeList\":\"SeChangeNotifyPrivilege\"}";
+		var ctx = new MockAlertContext();
+		Assert.Null(await new PrivilegedLoginRule().EvaluateAsync(evt, ctx, default));
+	}
+
+	[Fact]
+	public async Task TaskPersistence_WrongEvent_NoAlert()
+	{
+		var ctx = new MockAlertContext();
+		Assert.Null(await new TaskPersistenceRule().EvaluateAsync(Logon(4625), ctx, default));
+	}
+
+	[Fact]
+	public async Task ServiceInstall_WrongEvent_NoAlert()
+	{
+		var ctx = new MockAlertContext();
+		Assert.Null(await new ServiceInstallRule().EvaluateAsync(Logon(4625), ctx, default));
+	}
+
+	[Fact]
+	public async Task NewAccount_WrongEvent_NoAlert()
+	{
+		var ctx = new MockAlertContext();
+		Assert.Null(await new NewAccountRule().EvaluateAsync(Logon(4625), ctx, default));
 	}
 }

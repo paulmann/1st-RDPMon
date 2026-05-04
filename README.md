@@ -1,9 +1,71 @@
-# 1st RDP Monitor Security Analyzer
+# 1st-RDPMon — RdpAudit .NET 8 Solution
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/paulmann/1st-RDPMon)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue.svg)](https://github.com/paulmann/1st-RDPMon)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![PowerShell](https://img.shields.io/badge/powershell-7.5%2B-blue.svg)](https://docs.microsoft.com/en-us/powershell/)
+[![.NET](https://img.shields.io/badge/dotnet-8.0--windows-blue.svg)](https://dotnet.microsoft.com/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2B%2FServer-blue.svg)](https://www.microsoft.com/windows/)
+[![SQLite](https://img.shields.io/badge/sqlite-WAL-orange.svg)](https://sqlite.org/)
+
+> **What is this repository?** It contains two generations of the same project:
+>
+> 1. **RdpAudit (v2)** — a production-grade .NET 8 Worker Service plus a WinForms Configurator
+>    that monitors Windows RDP / Security / Terminal Services event channels in real time, raises
+>    21 high-quality alert rules, persists to SQLite via EF Core, and exposes a named-pipe IPC
+>    surface restricted to BUILTIN\Administrators. This is the actively developed flagship.
+> 2. **1st-RdpMonSecurityAnalyzer.ps1 (v1)** — the original PowerShell analyzer that reads
+>    Cameyo RDPMon's LiteDB. Documented below for historical reference.
+
+## RdpAudit (v2) — at a glance
+
+| Layer | Project | Responsibility |
+|-------|---------|----------------|
+| Service | `src/RdpAudit.Service` | Captures events with `EventLogWatcher`, batches into SQLite, runs 21 alert rules, hosts named-pipe IPC, applies firewall auto-blocks. |
+| Configurator | `src/RdpAudit.Configurator` | WinForms UI: prerequisites, audit-policy / SACL apply, service install, settings, live event tail. Runs as `requireAdministrator`. |
+| Core | `src/RdpAudit.Core` | EF Core 8 entities & migrations, IPC contracts, event catalog (GUID-based audit subcategories), shared utilities. |
+
+### Quick start (RdpAudit)
+
+```powershell
+# 1. Build & publish single-file binaries
+./publish.ps1
+
+# 2. Copy the published Service folder under Program Files
+Copy-Item -Recurse publish/Service "$env:ProgramFiles/RdpAudit/Service"
+
+# 3. Use the Configurator to install the service, apply audit policy, and configure SACLs
+publish/Configurator/RdpAudit.Configurator.exe
+```
+
+### Highlights of v2
+
+- **Real audit-policy apply** via `auditpol.exe` with **GUID** subcategory identifiers (locale-independent).
+- **Real SACL configuration** for IFEO accessibility binaries, RDP-Tcp, and LSA registry keys.
+- **Real Windows Firewall block** (per-IP, sanitised arguments, idempotent add/remove) tied to brute-force thresholds.
+- **Bookmark durability**: every 100 events **and** every 30 seconds — no more than 99 events lost on crash.
+- **Bulk batch persistence**: one transaction, prefetched address map, single `AddRange/SaveChanges`.
+- **EF Core migrations** applied on startup (no more `EnsureCreated` only).
+- **Named-pipe IPC** with admin-only ACL, hard per-connection deadline, sanitised error text.
+- **Atomic settings save** over IPC; UI never writes service-owned config files directly.
+- 21 alert rules including `STICKY_KEYS_BACKDOOR`, `RDP_PORT_CHANGED`, `LSASS_PPL_TAMPER`,
+  `LSASS_ACCESS` (bitwise mask check), `KERBEROS_SPRAY`, `BRUTE_FORCE_NTLM` with cooldown to
+  prevent alert flood, `OFF_HOURS_LOGIN` with explicit time-zone (UTC by default).
+
+### Build & test
+
+```powershell
+dotnet build  RdpAudit.sln -c Release
+dotnet test   RdpAudit.sln -c Release
+./publish.ps1
+```
+
+---
+
+# 1st RDP Monitor Security Analyzer (legacy PowerShell, v1)
+
+The remainder of this README documents the original PowerShell analyzer. It remains useful for
+sites already running Cameyo RDPMon and is left here for backwards compatibility.
+
+[![PowerShell](https://img.shields.io/badge/powershell-7.5%2B-blue.svg)](https://docs.microsoft.com/en-us/powershell/)
 [![LiteDB](https://img.shields.io/badge/litedb-4.1.4-orange.svg)](https://www.nuget.org/packages/LiteDB)
 
 - [1. Overview](#1-overview)

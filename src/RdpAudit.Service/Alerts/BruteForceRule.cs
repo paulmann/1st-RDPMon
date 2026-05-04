@@ -1,6 +1,7 @@
 // File:    src/RdpAudit.Service/Alerts/BruteForceRule.cs
 // Module:  RdpAudit.Service.Alerts
 // Purpose: Detects classic brute-force password guessing on Event ID 4625.
+//          Uses AlertCooldownTracker to avoid one alert per offending event after threshold.
 // Extends: RdpAudit.Core.Events.AlertRuleBase
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
@@ -14,6 +15,17 @@ namespace RdpAudit.Service.Alerts;
 /// <summary>Detects classic brute-force password guessing on Event ID 4625.</summary>
 public sealed class BruteForceRule : AlertRuleBase
 {
+	private readonly AlertCooldownTracker? _cooldown;
+
+	public BruteForceRule()
+	{
+	}
+
+	public BruteForceRule(AlertCooldownTracker cooldown)
+	{
+		_cooldown = cooldown;
+	}
+
 	public override string RuleId => "BRUTE_FORCE_01";
 
 	public override string Name => "Brute Force Password Guessing";
@@ -41,6 +53,16 @@ public sealed class BruteForceRule : AlertRuleBase
 		if (fails < threshold)
 		{
 			return null;
+		}
+
+		// De-dup: at most one alert per (rule, source IP) in the configured cooldown window.
+		if (_cooldown is not null)
+		{
+			TimeSpan cooldown = TimeSpan.FromMinutes(Math.Max(1, ctx.Options.Alerts.ThresholdCooldownMinutes));
+			if (!_cooldown.TryRegister(RuleId, evt.SourceIp, cooldown))
+			{
+				return null;
+			}
 		}
 
 		return CreateAlert(evt,

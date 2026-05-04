@@ -1,34 +1,66 @@
 // File:    src/RdpAudit.Configurator/Services/ReadOnlyDb.cs
 // Module:  RdpAudit.Configurator.Services
-// Purpose: Helper that opens a read-only DbContext against the live audit database.
+// Purpose: Optional read-only DB helper. The Configurator UI now reads events / alerts /
+//          addresses / sessions over IPC; this helper remains for diagnostic tooling and
+//          honours the configured Storage.DatabasePath (no hard-coded ProgramData path).
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
 
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using RdpAudit.Core.Config;
 using RdpAudit.Core.Data;
 
 namespace RdpAudit.Configurator.Services;
 
-/// <summary>Helper that opens a DbContext against the live audit database for read-only display.</summary>
+/// <summary>Optional read-only DB helper that honours the service-configured database path.</summary>
 public static class ReadOnlyDb
 {
 	public static AuditDbContext Open()
 	{
-		string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-		string dbPath = Path.Combine(programData, "RdpAudit", "rdpaudit.db");
+		string dbPath = ResolveDatabasePath();
 		DbContextOptions<AuditDbContext> options = new DbContextOptionsBuilder<AuditDbContext>()
 			.UseSqlite($"Data Source={dbPath};Mode=ReadOnly;Cache=Shared")
 			.Options;
 		return new AuditDbContext(options);
 	}
 
-	public static string DatabasePath
+	public static string DatabasePath => ResolveDatabasePath();
+
+	/// <summary>Honour Storage.DatabasePath from appsettings.json; fall back to the ProgramData default.</summary>
+	private static string ResolveDatabasePath()
 	{
-		get
+		string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+		string appsettings = Path.Combine(programData, "RdpAudit", "appsettings.json");
+		string fallback = Path.Combine(programData, "RdpAudit", "rdpaudit.db");
+
+		if (!File.Exists(appsettings))
 		{
-			string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-			return Path.Combine(programData, "RdpAudit", "rdpaudit.db");
+			return fallback;
 		}
+
+		try
+		{
+			using FileStream fs = File.OpenRead(appsettings);
+			using JsonDocument doc = JsonDocument.Parse(fs);
+			if (doc.RootElement.TryGetProperty(RdpAuditOptions.SectionName, out JsonElement section)
+				&& section.TryGetProperty("Storage", out JsonElement storage)
+				&& storage.TryGetProperty(nameof(StorageOptions.DatabasePath), out JsonElement v)
+				&& v.ValueKind == JsonValueKind.String)
+			{
+				string? value = v.GetString();
+				if (!string.IsNullOrWhiteSpace(value))
+				{
+					return value;
+				}
+			}
+		}
+		catch
+		{
+			// Best-effort — fallback to default.
+		}
+
+		return fallback;
 	}
 }

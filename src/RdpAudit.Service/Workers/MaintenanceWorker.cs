@@ -73,7 +73,9 @@ public sealed class MaintenanceWorker : BackgroundService
 		DateTime alertCutoff = DateTime.UtcNow.AddDays(-Math.Max(30, storage.AlertRetentionDays));
 		int alertsDeleted = await db.Alerts.Where(a => a.TimeUtc < alertCutoff).ExecuteDeleteAsync(ct).ConfigureAwait(false);
 
-		await db.Database.ExecuteSqlRawAsync("PRAGMA incremental_vacuum;", ct).ConfigureAwait(false);
+		// Bounded incremental_vacuum: at most 5000 free pages per pass to avoid
+		// holding the writer lock for an unbounded amount of time on huge databases.
+		await db.Database.ExecuteSqlRawAsync("PRAGMA incremental_vacuum(5000);", ct).ConfigureAwait(false);
 
 		List<Core.Models.Address> addresses = await db.Addresses.ToListAsync(ct).ConfigureAwait(false);
 		foreach (Core.Models.Address addr in addresses)

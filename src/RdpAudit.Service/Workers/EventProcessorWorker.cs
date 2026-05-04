@@ -1,6 +1,8 @@
 // File:    src/RdpAudit.Service/Workers/EventProcessorWorker.cs
 // Module:  RdpAudit.Service.Workers
 // Purpose: Drains the event channel in batches, normalises payloads, and persists to SQLite.
+//          Uses a single transaction with prefetched address map and a bulk AddRange/SaveChanges
+//          to avoid the original per-IP / per-event N+1 round-trips.
 // Extends: Microsoft.Extensions.Hosting.BackgroundService
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
@@ -31,11 +33,14 @@ public sealed class EventProcessorWorker : BackgroundService
 		TimeSpan.FromMilliseconds(2000),
 	};
 
+	private const int MaxConsecutiveFailures = 5;
+
 	private readonly EventChannel _channel;
 	private readonly IDbContextFactory<AuditDbContext> _factory;
 	private readonly EventNormalizer _normalizer;
 	private readonly ILogger<EventProcessorWorker> _logger;
 	private readonly IOptionsMonitor<RdpAuditOptions> _options;
+	private int _consecutiveFailures;
 
 	public EventProcessorWorker(
 		EventChannel channel,
@@ -67,10 +72,20 @@ public sealed class EventProcessorWorker : BackgroundService
 				try
 				{
 					await WithRetryAsync(ct => PersistBatchAsync(batch, ct), stoppingToken).ConfigureAwait(false);
+					_consecutiveFailures = 0;
 				}
 				catch (Exception ex)
 				{
-					_logger.LogError(ex, "Persist batch of {Count} failed", batch.Count);
+					_consecutiveFailures++;
+					_logger.LogError(ex, "Persist batch of {Count} failed (consecutiveFailures={ConsecutiveFailures})",
+						batch.Count, _consecutiveFailures);
+					if (_consecutiveFailures >= MaxConsecutiveFailures)
+					{
+						_logger.LogCritical(
+							"DB persistence has failed {ConsecutiveFailures} batches in a row — pausing 30s before retry",
+							_consecutiveFailures);
+						await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken).ConfigureAwait(false);
+					}
 				}
 			}
 		}
@@ -132,6 +147,7 @@ public sealed class EventProcessorWorker : BackgroundService
 
 		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
 		await using var tx = await db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+		DateTime now = DateTime.UtcNow;
 
 		try
 		{
@@ -144,66 +160,67 @@ public sealed class EventProcessorWorker : BackgroundService
 				}
 			}
 
-			Dictionary<string, long> addressIds = new(StringComparer.OrdinalIgnoreCase);
+			Dictionary<string, Address> existingMap = new(StringComparer.OrdinalIgnoreCase);
+			if (ips.Count > 0)
+			{
+				List<Address> existing = await db.Addresses
+					.Where(a => ips.Contains(a.Ip))
+					.ToListAsync(ct)
+					.ConfigureAwait(false);
+				foreach (Address a in existing)
+				{
+					existingMap[a.Ip] = a;
+				}
+			}
+
+			List<Address> toAdd = new();
 			foreach (string ip in ips)
 			{
-				Address? existing = await db.Addresses
-					.FirstOrDefaultAsync(a => a.Ip == ip, ct)
-					.ConfigureAwait(false);
-				if (existing is null)
+				if (!existingMap.ContainsKey(ip))
 				{
-					existing = new Address
+					Address fresh = new()
 					{
 						Ip = ip,
-						FirstSeen = DateTime.UtcNow,
-						LastSeen = DateTime.UtcNow,
+						FirstSeen = now,
+						LastSeen = now,
 						IsPublicIp = IpClassifier.IsPublicIp(ip),
 					};
-					db.Addresses.Add(existing);
-					await db.SaveChangesAsync(ct).ConfigureAwait(false);
+					existingMap[ip] = fresh;
+					toAdd.Add(fresh);
 				}
-				else
-				{
-					existing.LastSeen = DateTime.UtcNow;
-				}
+			}
 
-				addressIds[ip] = existing.Id;
+			if (toAdd.Count > 0)
+			{
+				db.Addresses.AddRange(toAdd);
+				await db.SaveChangesAsync(ct).ConfigureAwait(false); // assigns Ids in one round-trip
 			}
 
 			foreach (RawEvent entity in entities)
 			{
-				if (!string.IsNullOrEmpty(entity.SourceIp)
-					&& addressIds.TryGetValue(entity.SourceIp, out long addrId))
+				if (string.IsNullOrEmpty(entity.SourceIp))
 				{
-					entity.AddressId = addrId;
+					continue;
+				}
+
+				if (!existingMap.TryGetValue(entity.SourceIp, out Address? addr))
+				{
+					continue;
+				}
+
+				entity.AddressId = addr.Id;
+				addr.LastSeen = now;
+				if (entity.EventId == 4625 || entity.EventId == 4771 || entity.EventId == 140)
+				{
+					addr.FailCount++;
+				}
+				else if (entity.EventId == 4624 || entity.EventId == 4768 || entity.EventId == 4769)
+				{
+					addr.SuccessCount++;
 				}
 			}
 
 			db.RawEvents.AddRange(entities);
-			await db.SaveChangesAsync(ct).ConfigureAwait(false);
-
-			foreach (RawEvent entity in entities)
-			{
-				if (!string.IsNullOrEmpty(entity.SourceIp)
-					&& addressIds.TryGetValue(entity.SourceIp, out long addrId))
-				{
-					Address? addr = await db.Addresses.FindAsync(new object?[] { addrId }, ct).ConfigureAwait(false);
-					if (addr is null)
-					{
-						continue;
-					}
-
-					if (entity.EventId == 4625 || entity.EventId == 4771 || entity.EventId == 140)
-					{
-						addr.FailCount++;
-					}
-					else if (entity.EventId == 4624 || entity.EventId == 4768 || entity.EventId == 4769)
-					{
-						addr.SuccessCount++;
-					}
-				}
-			}
-
 			await db.SaveChangesAsync(ct).ConfigureAwait(false);
 			await tx.CommitAsync(ct).ConfigureAwait(false);
 		}

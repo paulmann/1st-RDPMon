@@ -14,6 +14,17 @@ namespace RdpAudit.Service.Alerts;
 /// <summary>Detects brute-force NTLM credential validation failures (Event 4776).</summary>
 public sealed class BruteForceNtlmRule : AlertRuleBase
 {
+	private readonly AlertCooldownTracker? _cooldown;
+
+	public BruteForceNtlmRule()
+	{
+	}
+
+	public BruteForceNtlmRule(AlertCooldownTracker cooldown)
+	{
+		_cooldown = cooldown;
+	}
+
 	public override string RuleId => "BRUTE_FORCE_NTLM";
 
 	public override string Name => "Brute Force — NTLM Credential Validation";
@@ -53,6 +64,15 @@ public sealed class BruteForceNtlmRule : AlertRuleBase
 		if (fails < threshold)
 		{
 			return null;
+		}
+
+		if (_cooldown is not null)
+		{
+			TimeSpan cooldown = TimeSpan.FromMinutes(Math.Max(1, ctx.Options.Alerts.ThresholdCooldownMinutes));
+			if (!_cooldown.TryRegister(RuleId, workstation, cooldown))
+			{
+				return null;
+			}
 		}
 
 		return CreateAlert(evt,

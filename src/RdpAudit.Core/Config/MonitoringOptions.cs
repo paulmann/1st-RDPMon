@@ -17,7 +17,7 @@ public sealed class MonitoringOptions
 		"Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational",
 		"Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational",
 		"Microsoft-Windows-TerminalServices-Gateway/Operational",
-		"Microsoft-Windows-TerminalServices-ClientUSBDevices/Operational",
+		"Microsoft-Windows-TerminalServices-RDPClient/Operational",
 		"System",
 	};
 

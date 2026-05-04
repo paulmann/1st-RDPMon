@@ -1,6 +1,7 @@
 // File:    src/RdpAudit.Service/Alerts/AlertRuleRegistration.cs
 // Module:  RdpAudit.Service.Alerts
 // Purpose: Registers every IAlertRule implementation with the DI container.
+//          Threshold rules receive AlertCooldownTracker via DI to dedupe alert floods.
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
@@ -15,8 +16,8 @@ public static class AlertRuleRegistration
 {
 	public static void Register(IServiceCollection services)
 	{
-		services.AddSingleton<IAlertRule, BruteForceRule>();
-		services.AddSingleton<IAlertRule, BruteForceNtlmRule>();
+		services.AddSingleton<IAlertRule>(sp => new BruteForceRule(sp.GetRequiredService<AlertCooldownTracker>()));
+		services.AddSingleton<IAlertRule>(sp => new BruteForceNtlmRule(sp.GetRequiredService<AlertCooldownTracker>()));
 		services.AddSingleton<IAlertRule, PassTheHashRule>();
 		services.AddSingleton<IAlertRule, GoldenTicketRule>();
 		services.AddSingleton<IAlertRule, OffHoursLoginRule>();
@@ -35,6 +36,6 @@ public static class AlertRuleRegistration
 		services.AddSingleton<IAlertRule, StickyKeysBackdoorRule>();
 		services.AddSingleton<IAlertRule, RdpPortChangedRule>();
 		services.AddSingleton<IAlertRule, LsassPplTamperRule>();
-		services.AddSingleton<IAlertRule, KerberosSprayRule>();
+		services.AddSingleton<IAlertRule>(sp => new KerberosSprayRule(sp.GetRequiredService<AlertCooldownTracker>()));
 	}
 }

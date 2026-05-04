@@ -14,6 +14,17 @@ namespace RdpAudit.Service.Alerts;
 /// <summary>Detects high-volume Kerberos pre-auth failures from a single IP (Event 4771).</summary>
 public sealed class KerberosSprayRule : AlertRuleBase
 {
+	private readonly AlertCooldownTracker? _cooldown;
+
+	public KerberosSprayRule()
+	{
+	}
+
+	public KerberosSprayRule(AlertCooldownTracker cooldown)
+	{
+		_cooldown = cooldown;
+	}
+
 	public override string RuleId => "KERBEROS_SPRAY";
 
 	public override string Name => "Kerberos Pre-Auth Spray";
@@ -41,6 +52,15 @@ public sealed class KerberosSprayRule : AlertRuleBase
 		if (fails < threshold)
 		{
 			return null;
+		}
+
+		if (_cooldown is not null)
+		{
+			TimeSpan cooldown = TimeSpan.FromMinutes(Math.Max(1, ctx.Options.Alerts.ThresholdCooldownMinutes));
+			if (!_cooldown.TryRegister(RuleId, evt.SourceIp, cooldown))
+			{
+				return null;
+			}
 		}
 
 		return CreateAlert(evt,

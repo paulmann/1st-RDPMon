@@ -1,20 +1,26 @@
 // File:    src/RdpAudit.Configurator/Services/PrerequisiteChecker.cs
 // Module:  RdpAudit.Configurator.Services
 // Purpose: Implements the 15 prerequisite probes shown on the Prerequisites tab.
+//          Object-Access auditing check uses GUID + auditpol /r CSV bitfield (locale-stable).
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
 
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.Versioning;
 using System.ServiceProcess;
+using RdpAudit.Core.Events;
 
 namespace RdpAudit.Configurator.Services;
 
 /// <summary>Result of a single prerequisite probe.</summary>
-public sealed record PrerequisiteResult(string Name, bool IsOk, string Detail);
+public sealed record PrerequisiteResult(string Name, bool IsOk, string Detail, PrerequisiteFix? Fix = null);
+
+/// <summary>Optional remediation action for a prerequisite that failed.</summary>
+public sealed record PrerequisiteFix(string Description, Func<Task<string>> ApplyAsync);
 
 /// <summary>Implements the 15 prerequisite probes shown on the Prerequisites tab.</summary>
 [SupportedOSPlatform("windows")]
@@ -87,10 +93,25 @@ public sealed class PrerequisiteChecker
 		try
 		{
 			using ServiceController controller = new("TermService");
+			ServiceControllerStatus status = controller.Status;
+			PrerequisiteFix? fix = status != ServiceControllerStatus.Running
+				? new PrerequisiteFix("Start TermService", async () =>
+				{
+					try
+					{
+						using ServiceController c = new("TermService");
+						c.Start();
+						await Task.Run(() => c.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(20))).ConfigureAwait(false);
+						return "Started";
+					}
+					catch (Exception ex) { return ex.Message; }
+				})
+				: null;
 			return new PrerequisiteResult(
 				"Remote Desktop Services running",
-				controller.Status == ServiceControllerStatus.Running,
-				controller.Status.ToString());
+				status == ServiceControllerStatus.Running,
+				status.ToString(),
+				fix);
 		}
 		catch (Exception ex)
 		{
@@ -122,10 +143,16 @@ public sealed class PrerequisiteChecker
 	private static PrerequisiteResult CheckRdpFirewallRule()
 	{
 		int code = RunCommand("netsh", "advfirewall firewall show rule name=\"Remote Desktop - User Mode (TCP-In)\"");
+		PrerequisiteFix? fix = code != 0
+			? new PrerequisiteFix("Enable RDP firewall group", () =>
+				Task.FromResult(RunCommand("netsh", "advfirewall firewall set rule group=\"remote desktop\" new enable=Yes") == 0
+					? "Enabled" : "netsh failed"))
+			: null;
 		return new PrerequisiteResult(
 			"Windows Firewall RDP rule present",
 			code == 0,
-			code == 0 ? "Found" : $"netsh exit {code}");
+			code == 0 ? "Found" : $"netsh exit {code}",
+			fix);
 	}
 
 	private static PrerequisiteResult CheckSecurityChannel()
@@ -146,7 +173,13 @@ public sealed class PrerequisiteChecker
 		{
 			using System.Diagnostics.Eventing.Reader.EventLogSession session = new();
 			System.Diagnostics.Eventing.Reader.EventLogConfiguration config = new(channel, session);
-			return new PrerequisiteResult($"Channel: {channel}", config.IsEnabled, $"Enabled={config.IsEnabled}");
+			bool enabled = config.IsEnabled;
+			PrerequisiteFix? fix = enabled
+				? null
+				: new PrerequisiteFix("Enable channel via wevtutil", () =>
+					Task.FromResult(RunCommand("wevtutil", "sl \"" + channel + "\" /enabled:true") == 0
+						? "Enabled" : "wevtutil failed"));
+			return new PrerequisiteResult($"Channel: {channel}", enabled, $"Enabled={enabled}", fix);
 		}
 		catch (Exception ex)
 		{
@@ -198,29 +231,65 @@ public sealed class PrerequisiteChecker
 
 	private static PrerequisiteResult CheckObjectAccessAuditing()
 	{
-		using Process? p = Process.Start(new ProcessStartInfo("auditpol.exe", "/get /category:\"Object Access\"")
+		// Use GUIDs and the auditpol /r CSV bit field rather than parsing localized output.
+		string[] subcategoryGuids =
 		{
-			UseShellExecute = false,
-			RedirectStandardOutput = true,
-			CreateNoWindow = true,
-		});
+			AuditPolicyManager.GuidFileSystem,
+			AuditPolicyManager.GuidRegistry,
+		};
 
-		if (p is null)
+		List<string> details = new();
+		bool ok = true;
+		foreach (string guid in subcategoryGuids)
 		{
-			return new PrerequisiteResult("Object Access auditing", false, "auditpol.exe not found");
+			AuditPolicyState? state = AuditPolicyManager.ReadSubcategoryState(guid);
+			if (state is null)
+			{
+				ok = false;
+				details.Add(string.Format(CultureInfo.InvariantCulture, "{0}: read failed", guid));
+				continue;
+			}
+
+			bool subOk = state.Success && state.Failure;
+			ok &= subOk;
+			details.Add(string.Format(CultureInfo.InvariantCulture, "{0}: S={1} F={2}",
+				guid, state.Success ? "Y" : "N", state.Failure ? "Y" : "N"));
 		}
 
-		p.WaitForExit(10_000);
-		string output = p.StandardOutput.ReadToEnd();
-		bool ok = output.Contains("Success", StringComparison.OrdinalIgnoreCase);
-		return new PrerequisiteResult("Object Access auditing", ok, ok ? "Enabled" : "Not enabled");
+		PrerequisiteFix? fix = ok
+			? null
+			: new PrerequisiteFix("Apply Object Access auditpol", () =>
+			{
+				int failures = 0;
+				foreach (string guid in subcategoryGuids)
+				{
+					string args = string.Format(CultureInfo.InvariantCulture,
+						"/set /subcategory:{0} /success:enable /failure:enable", guid);
+					if (RunCommand("auditpol.exe", args) != 0)
+					{
+						failures++;
+					}
+				}
+				return Task.FromResult(failures == 0 ? "Applied" : string.Format(CultureInfo.InvariantCulture, "{0} subcategory updates failed", failures));
+			});
+
+		return new PrerequisiteResult("Object Access auditing", ok, string.Join("; ", details), fix);
 	}
 
 	private static PrerequisiteResult CheckLsassPpl()
 	{
 		int code = RunCommand("reg.exe",
 			"query \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\" /v RunAsPPL");
-		return new PrerequisiteResult("LSASS RunAsPPL enabled", code == 0, code == 0 ? "Configured" : "Not set (reboot required after enabling)");
+		PrerequisiteFix? fix = code != 0
+			? new PrerequisiteFix("Enable LSASS RunAsPPL (requires reboot)", () =>
+				Task.FromResult(RunCommand("reg.exe",
+					"add \"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa\" /v RunAsPPL /t REG_DWORD /d 1 /f") == 0
+					? "Set RunAsPPL=1; reboot to apply"
+					: "reg.exe failed"))
+			: null;
+		return new PrerequisiteResult("LSASS RunAsPPL enabled", code == 0,
+			code == 0 ? "Configured" : "Not set (reboot required after enabling)",
+			fix);
 	}
 
 	private static int RunCommand(string exe, string args)

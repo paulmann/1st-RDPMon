@@ -1,11 +1,16 @@
 // File:    src/RdpAudit.Configurator/Forms/ServicePage.cs
 // Module:  RdpAudit.Configurator.Forms
 // Purpose: Service status panel, lifecycle controls, and recent alerts grid.
+//          Service install computes the absolute service binary path, never literal %ProgramFiles%.
+//          All Process.Start + WaitForExit calls are wrapped in Task.Run so the UI thread is free.
 // Extends: System.Windows.Forms.TabPage
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
 
+using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
+using System.IO;
 using System.Runtime.Versioning;
 using RdpAudit.Configurator.Ipc;
 using RdpAudit.Core.Ipc;
@@ -17,6 +22,8 @@ namespace RdpAudit.Configurator.Forms;
 [SupportedOSPlatform("windows")]
 public sealed class ServicePage : TabPage
 {
+	private const string ServiceName = "RdpAuditService";
+
 	private readonly IpcClient _ipc;
 	private readonly Label _status;
 	private readonly DataGridView _alertsGrid;
@@ -33,14 +40,14 @@ public sealed class ServicePage : TabPage
 		Button stop = new() { Text = "Stop", Width = 80 };
 		Button restart = new() { Text = "Restart", Width = 80 };
 
-		install.Click += (_, _) => Sc("create RdpAuditService binPath= \"%ProgramFiles%\\RdpAudit\\RdpAudit.Service.exe\" start= auto obj= LocalSystem");
-		uninstall.Click += (_, _) => Sc("delete RdpAuditService");
-		start.Click += (_, _) => Sc("start RdpAuditService");
-		stop.Click += (_, _) => Sc("stop RdpAuditService");
-		restart.Click += (_, _) =>
+		install.Click += async (_, _) => await InstallServiceAsync().ConfigureAwait(true);
+		uninstall.Click += async (_, _) => await ScAsync("delete", new[] { ServiceName }).ConfigureAwait(true);
+		start.Click += async (_, _) => await ScAsync("start", new[] { ServiceName }).ConfigureAwait(true);
+		stop.Click += async (_, _) => await ScAsync("stop", new[] { ServiceName }).ConfigureAwait(true);
+		restart.Click += async (_, _) =>
 		{
-			Sc("stop RdpAuditService");
-			Sc("start RdpAuditService");
+			await ScAsync("stop", new[] { ServiceName }).ConfigureAwait(true);
+			await ScAsync("start", new[] { ServiceName }).ConfigureAwait(true);
 		};
 
 		buttons.Controls.AddRange(new Control[] { install, uninstall, start, stop, restart });
@@ -70,11 +77,11 @@ public sealed class ServicePage : TabPage
 		Controls.Add(buttons);
 
 		_timer = new System.Windows.Forms.Timer { Interval = 5_000 };
-		_timer.Tick += async (_, _) => await RefreshAsync().ConfigureAwait(false);
+		_timer.Tick += async (_, _) => await RefreshAsync().ConfigureAwait(true);
 		HandleCreated += async (_, _) =>
 		{
 			_timer.Start();
-			await RefreshAsync().ConfigureAwait(false);
+			await RefreshAsync().ConfigureAwait(true);
 		};
 	}
 
@@ -103,43 +110,88 @@ public sealed class ServicePage : TabPage
 
 	private async Task RefreshAsync()
 	{
-		ServiceStatus? status = await _ipc.SendAsync<ServiceStatus>(IpcCommand.GetStatus).ConfigureAwait(false);
+		ServiceStatus? status = await _ipc.SendAsync<ServiceStatus>(IpcCommand.GetStatus).ConfigureAwait(true);
 		string label = status is null
 			? "Service: not reachable (start the service or run as administrator)"
 			: $"Version: {status.Version}\r\nUptime: {status.Uptime}\r\nEvents captured: {status.EventsCaptured} (dropped {status.EventsDropped})\r\nAlerts raised: {status.AlertsRaised}";
 
-		List<Alert>? alerts = await _ipc.SendAsync<List<Alert>>(IpcCommand.GetRecentAlerts).ConfigureAwait(false);
+		List<Alert>? alerts = await _ipc.SendAsync<List<Alert>>(IpcCommand.GetRecentAlerts).ConfigureAwait(true);
 
-		void apply()
-		{
-			_status.Text = label;
-			_alertsGrid.DataSource = alerts ?? new List<Alert>();
-		}
-
-		if (InvokeRequired)
-		{
-			Invoke(apply);
-		}
-		else
-		{
-			apply();
-		}
+		_status.Text = label;
+		_alertsGrid.DataSource = alerts ?? new List<Alert>();
 	}
 
-	private static void Sc(string args)
+	/// <summary>Resolve the absolute path to the installed service binary, validate it, and call sc create.</summary>
+	private async Task InstallServiceAsync()
+	{
+		string binaryPath = ResolveServiceBinaryPath();
+		if (!File.Exists(binaryPath))
+		{
+			MessageBox.Show(
+				string.Format(CultureInfo.InvariantCulture,
+					"Service binary not found at:\r\n{0}\r\n\r\nCopy the published Service folder under Program Files first.",
+					binaryPath),
+				"RdpAudit",
+				MessageBoxButtons.OK,
+				MessageBoxIcon.Warning);
+			return;
+		}
+
+		// sc.exe expects: name= value pairs separated by spaces. The binPath value, if quoted, must
+		// have its quoted absolute path embedded inside the quoted argument (sc parses one whitespace
+		// after the "="). ProcessStartInfo.ArgumentList handles quoting per-argument.
+		string[] args =
+		{
+			"create",
+			ServiceName,
+			"binPath= " + Quote(binaryPath),
+			"start= auto",
+			"obj= LocalSystem",
+			"DisplayName= RdpAudit Service",
+		};
+
+		await ScAsync(null, args).ConfigureAwait(true);
+		// Configure failure restart policy: restart 60s, 60s, 60s
+		await ScAsync(null, new[] { "failure", ServiceName, "reset= 86400", "actions= restart/60000/restart/60000/restart/60000" }).ConfigureAwait(true);
+	}
+
+	internal static string ResolveServiceBinaryPath()
+	{
+		string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+		return Path.Combine(programFiles, "RdpAudit", "Service", "RdpAudit.Service.exe");
+	}
+
+	private static string Quote(string value) =>
+		value.Contains(' ', StringComparison.Ordinal) ? "\"" + value + "\"" : value;
+
+	private static async Task ScAsync(string? leadingVerb, IReadOnlyList<string> args)
 	{
 		try
 		{
-			ProcessStartInfo psi = new("sc.exe", args)
+			ProcessStartInfo psi = new("sc.exe")
 			{
-				Verb = "runas",
-				UseShellExecute = true,
-				WindowStyle = ProcessWindowStyle.Hidden,
+				UseShellExecute = false,
+				CreateNoWindow = true,
+				RedirectStandardError = true,
+				RedirectStandardOutput = true,
 			};
-			using Process? p = Process.Start(psi);
-			p?.WaitForExit();
+			if (leadingVerb is not null)
+			{
+				psi.ArgumentList.Add(leadingVerb);
+			}
+
+			foreach (string a in args)
+			{
+				psi.ArgumentList.Add(a);
+			}
+
+			await Task.Run(() =>
+			{
+				using Process? p = Process.Start(psi);
+				p?.WaitForExit(30_000);
+			}).ConfigureAwait(true);
 		}
-		catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
+		catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
 		{
 			MessageBox.Show("UAC was cancelled.", "RdpAudit", MessageBoxButtons.OK, MessageBoxIcon.Warning);
 		}
