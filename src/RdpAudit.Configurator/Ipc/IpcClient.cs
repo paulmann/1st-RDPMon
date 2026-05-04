@@ -70,10 +70,9 @@ public sealed class IpcClient
 		}
 	}
 
-	public Task<bool> PingAsync(CancellationToken ct = default) =>
-		SendAsync<string>(IpcCommand.Ping, null, ct).ContinueWith(
-			t => t.Status == TaskStatus.RanToCompletion && t.Result is not null,
-			ct,
-			TaskContinuationOptions.OnlyOnRanToCompletion,
-			TaskScheduler.Default);
+	public async Task<bool> PingAsync(CancellationToken ct = default)
+	{
+		string? response = await SendAsync<string>(IpcCommand.Ping, null, ct).ConfigureAwait(false);
+		return response is not null;
+	}
 }

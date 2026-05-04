@@ -1,7 +1,8 @@
 // File:    src/RdpAudit.Service/Workers/EventCollectorWorker.cs
 // Module:  RdpAudit.Service.Workers
 // Purpose: Captures events from configured channels via EventLogWatcher and pushes RawEventDto into
-//          the in-memory channel for downstream processing.
+//          the in-memory channel for downstream processing. Saves the latest per-channel bookmark
+//          every 100 events AND every 30 seconds, whichever comes first, to bound recovery loss.
 // Extends: Microsoft.Extensions.Hosting.BackgroundService
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
@@ -25,6 +26,9 @@ namespace RdpAudit.Service.Workers;
 /// </summary>
 public sealed class EventCollectorWorker : BackgroundService
 {
+	private const int FlushEventThreshold = 100;
+	private static readonly TimeSpan FlushTimerPeriod = TimeSpan.FromSeconds(30);
+
 	private readonly EventChannel _channel;
 	private readonly BookmarkStore _bookmarks;
 	private readonly ServiceMetrics _metrics;
@@ -33,6 +37,9 @@ public sealed class EventCollectorWorker : BackgroundService
 
 	private readonly ConcurrentDictionary<string, EventLogWatcher> _watchers = new(StringComparer.OrdinalIgnoreCase);
 	private readonly object _watcherLock = new();
+	private readonly object _bookmarkLock = new();
+	private readonly Dictionary<string, string> _pendingBookmarks = new(StringComparer.OrdinalIgnoreCase);
+	private readonly Dictionary<string, string> _flushedBookmarks = new(StringComparer.OrdinalIgnoreCase);
 	private readonly Dictionary<string, int> _eventCounters = new(StringComparer.OrdinalIgnoreCase);
 	private CancellationToken _stoppingToken;
 	private Timer? _bookmarkTimer;
@@ -67,10 +74,10 @@ public sealed class EventCollectorWorker : BackgroundService
 		{
 			StartWatchers();
 			_bookmarkTimer = new Timer(
-				_ => _ = FlushAllBookmarksAsync(),
+				_ => _ = FlushPendingBookmarksAsync(),
 				state: null,
-				dueTime: TimeSpan.FromSeconds(30),
-				period: TimeSpan.FromSeconds(30));
+				dueTime: FlushTimerPeriod,
+				period: FlushTimerPeriod);
 
 			await Task.Delay(Timeout.InfiniteTimeSpan, stoppingToken).ConfigureAwait(false);
 		}
@@ -85,7 +92,21 @@ public sealed class EventCollectorWorker : BackgroundService
 		finally
 		{
 			DisposeAllWatchers();
-			_bookmarkTimer?.Dispose();
+			if (_bookmarkTimer is not null)
+			{
+				await _bookmarkTimer.DisposeAsync().ConfigureAwait(false);
+			}
+
+			// Final best-effort flush so we never lose more than the latest bookmark per channel.
+			try
+			{
+				await FlushPendingBookmarksAsync().ConfigureAwait(false);
+			}
+			catch (Exception ex)
+			{
+				_logger.LogDebug(ex, "Final bookmark flush failed");
+			}
+
 			_logger.LogInformation("{Worker} stopped", nameof(EventCollectorWorker));
 		}
 	}
@@ -120,7 +141,11 @@ public sealed class EventCollectorWorker : BackgroundService
 	[SupportedOSPlatform("windows")]
 	private EventLogWatcher CreateWatcher(string channel)
 	{
-		List<int> ids = EventCatalog.EventIdsForChannel(channel).ToList();
+		IEnumerable<int> catalogIds = EventCatalog.EventIdsForChannel(channel);
+		IReadOnlyCollection<int> filterSet = _options.CurrentValue.Monitoring.EnabledEventIds;
+		List<int> ids = filterSet.Count > 0
+			? catalogIds.Where(filterSet.Contains).ToList()
+			: catalogIds.ToList();
 		string xpath = ids.Count == 0
 			? "*"
 			: "*[System[(" + string.Join(" or ", ids.Select(id => $"EventID={id}")) + ")]]";
@@ -206,20 +231,28 @@ public sealed class EventCollectorWorker : BackgroundService
 			_metrics.IncrementCaptured();
 		}
 
-		if (bookmarkXml is not null)
+		if (bookmarkXml is null)
 		{
-			lock (_eventCounters)
+			return;
+		}
+
+		bool flushNow;
+		lock (_bookmarkLock)
+		{
+			_pendingBookmarks[channel] = bookmarkXml;
+			_eventCounters.TryGetValue(channel, out int count);
+			count++;
+			_eventCounters[channel] = count;
+			flushNow = count >= FlushEventThreshold;
+			if (flushNow)
 			{
-				_eventCounters.TryGetValue(channel, out int count);
-				count++;
-				_eventCounters[channel] = count;
-				if (count >= 100)
-				{
-					_eventCounters[channel] = 0;
-					string toFlush = bookmarkXml;
-					_ = Task.Run(() => _bookmarks.SaveBookmarkAsync(channel, toFlush, _stoppingToken), _stoppingToken);
-				}
+				_eventCounters[channel] = 0;
 			}
+		}
+
+		if (flushNow)
+		{
+			_ = Task.Run(() => FlushPendingBookmarksAsync(), _stoppingToken);
 		}
 	}
 
@@ -270,28 +303,41 @@ public sealed class EventCollectorWorker : BackgroundService
 		_logger.LogCritical("Watcher permanently disabled for {Channel}", channel);
 	}
 
-	private async Task FlushAllBookmarksAsync()
+	private async Task FlushPendingBookmarksAsync()
 	{
-		try
+		Dictionary<string, string> snapshot;
+		lock (_bookmarkLock)
 		{
-			Dictionary<string, EventLogWatcher> snapshot;
-			lock (_watcherLock)
+			snapshot = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+			foreach (KeyValuePair<string, string> kv in _pendingBookmarks)
 			{
-				snapshot = new Dictionary<string, EventLogWatcher>(_watchers, StringComparer.OrdinalIgnoreCase);
-			}
-
-			foreach (KeyValuePair<string, EventLogWatcher> kv in snapshot)
-			{
-				string? cached = _bookmarks.GetBookmarkXml(kv.Key);
-				if (cached is not null)
+				if (!_flushedBookmarks.TryGetValue(kv.Key, out string? prev) || !string.Equals(prev, kv.Value, StringComparison.Ordinal))
 				{
-					await _bookmarks.SaveBookmarkAsync(kv.Key, cached, _stoppingToken).ConfigureAwait(false);
+					snapshot[kv.Key] = kv.Value;
 				}
 			}
 		}
-		catch (Exception ex)
+
+		foreach (KeyValuePair<string, string> kv in snapshot)
 		{
-			_logger.LogDebug(ex, "Periodic bookmark flush failed");
+			try
+			{
+				await _bookmarks.SaveBookmarkAsync(kv.Key, kv.Value, _stoppingToken).ConfigureAwait(false);
+				lock (_bookmarkLock)
+				{
+					_flushedBookmarks[kv.Key] = kv.Value;
+					// Reset counter on successful flush.
+					_eventCounters[kv.Key] = 0;
+				}
+			}
+			catch (OperationCanceledException) when (_stoppingToken.IsCancellationRequested)
+			{
+				break;
+			}
+			catch (Exception ex)
+			{
+				_logger.LogDebug(ex, "Bookmark flush failed for {Channel}", kv.Key);
+			}
 		}
 	}
 

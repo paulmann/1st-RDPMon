@@ -24,7 +24,7 @@ public static class EventCatalog
 
 	public const string ChannelTsGateway = "Microsoft-Windows-TerminalServices-Gateway/Operational";
 
-	public const string ChannelTsClient = "Microsoft-Windows-TerminalServices-ClientUSBDevices/Operational";
+	public const string ChannelTsClient = "Microsoft-Windows-TerminalServices-RDPClient/Operational";
 
 	public static readonly IReadOnlyList<EventDescriptor> All = new List<EventDescriptor>
 	{

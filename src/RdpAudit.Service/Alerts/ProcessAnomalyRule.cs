@@ -1,6 +1,7 @@
 // File:    src/RdpAudit.Service/Alerts/ProcessAnomalyRule.cs
 // Module:  RdpAudit.Service.Alerts
-// Purpose: Flags shells (cmd / PowerShell) spawned from svchost / mstsc / rdpclip.
+// Purpose: Flags shells (cmd / PowerShell) spawned from svchost / mstsc / rdpclip / explorer.
+//          cmd-from-explorer can be suppressed (interactive use is common) via configuration.
 // Extends: RdpAudit.Core.Events.AlertRuleBase
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
@@ -11,7 +12,7 @@ using RdpAudit.Core.Models;
 
 namespace RdpAudit.Service.Alerts;
 
-/// <summary>Flags shells (cmd / PowerShell) spawned from svchost / mstsc / rdpclip.</summary>
+/// <summary>Flags shells (cmd / PowerShell) spawned from svchost / mstsc / rdpclip / explorer.</summary>
 public sealed class ProcessAnomalyRule : AlertRuleBase
 {
 	private static readonly string[] SuspiciousChildren =
@@ -52,6 +53,15 @@ public sealed class ProcessAnomalyRule : AlertRuleBase
 
 		string parent = ExtractParent(evt.Details).ToLowerInvariant();
 		if (!SuspiciousParents.Any(p => parent.EndsWith(p, StringComparison.Ordinal)))
+		{
+			return Task.FromResult<Alert?>(null);
+		}
+
+		// Reduce false positives: cmd.exe spawned by explorer.exe is a routine interactive
+		// pattern (Win+R, Run dialog, double-click batch). Suppress unless explicitly tracked.
+		bool fromExplorer = parent.EndsWith("explorer.exe", StringComparison.Ordinal);
+		if (fromExplorer && string.Equals(child, "cmd.exe", StringComparison.OrdinalIgnoreCase)
+			&& ctx.Options.Alerts.ProcessAnomalyAllowExplorerCmd)
 		{
 			return Task.FromResult<Alert?>(null);
 		}

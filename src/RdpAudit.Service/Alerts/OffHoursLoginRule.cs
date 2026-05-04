@@ -1,10 +1,13 @@
 // File:    src/RdpAudit.Service/Alerts/OffHoursLoginRule.cs
 // Module:  RdpAudit.Service.Alerts
 // Purpose: Flags interactive RDP logons (Type 10) outside the configured business hours.
+//          Uses an explicit configured timezone (default UTC) so test stability and
+//          server-locale changes do not affect detection.
 // Extends: RdpAudit.Core.Events.AlertRuleBase
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
 
+using System.Globalization;
 using RdpAudit.Core.Config;
 using RdpAudit.Core.Events;
 using RdpAudit.Core.Models;
@@ -35,7 +38,10 @@ public sealed class OffHoursLoginRule : AlertRuleBase
 			return Task.FromResult<Alert?>(null);
 		}
 
-		TimeSpan local = evt.TimeUtc.ToLocalTime().TimeOfDay;
+		TimeZoneInfo tz = ResolveTimeZone(ctx.Options.Alerts.OffHoursTimeZoneId);
+		DateTime utc = evt.TimeUtc.Kind == DateTimeKind.Utc ? evt.TimeUtc : DateTime.SpecifyKind(evt.TimeUtc, DateTimeKind.Utc);
+		DateTime zoned = TimeZoneInfo.ConvertTimeFromUtc(utc, tz);
+		TimeSpan local = zoned.TimeOfDay;
 		TimeSpan start = ctx.Options.Alerts.BusinessHoursStart;
 		TimeSpan end = ctx.Options.Alerts.BusinessHoursEnd;
 
@@ -49,7 +55,40 @@ public sealed class OffHoursLoginRule : AlertRuleBase
 		}
 
 		return Task.FromResult<Alert?>(CreateAlert(evt,
-			$"Off-hours interactive logon by {evt.UserName} from {evt.SourceIp ?? "(local)"} at {evt.TimeUtc.ToLocalTime():HH:mm}",
-			new { LocalTime = evt.TimeUtc.ToLocalTime(), Mitre = "T1133" }));
+			string.Format(CultureInfo.InvariantCulture,
+				"Off-hours interactive logon by {0} from {1} at {2:HH:mm} ({3})",
+				evt.UserName, evt.SourceIp ?? "(local)", zoned, tz.Id),
+			new
+			{
+				ZonedTime = zoned,
+				ZoneId = tz.Id,
+				Mitre = "T1133",
+			}));
+	}
+
+	internal static TimeZoneInfo ResolveTimeZone(string? id)
+	{
+		if (string.IsNullOrWhiteSpace(id))
+		{
+			return TimeZoneInfo.Utc;
+		}
+
+		if (string.Equals(id, "Local", StringComparison.OrdinalIgnoreCase))
+		{
+			return TimeZoneInfo.Local;
+		}
+
+		try
+		{
+			return TimeZoneInfo.FindSystemTimeZoneById(id);
+		}
+		catch (TimeZoneNotFoundException)
+		{
+			return TimeZoneInfo.Utc;
+		}
+		catch (InvalidTimeZoneException)
+		{
+			return TimeZoneInfo.Utc;
+		}
 	}
 }

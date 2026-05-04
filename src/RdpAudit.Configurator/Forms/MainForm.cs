@@ -1,10 +1,12 @@
 // File:    src/RdpAudit.Configurator/Forms/MainForm.cs
 // Module:  RdpAudit.Configurator.Forms
 // Purpose: Top-level WinForms shell with tab navigation across the 5 configuration pages.
+//          Async event handlers use ConfigureAwait(true) so continuations stay on the UI thread.
 // Extends: System.Windows.Forms.Form
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
 
+using System.Globalization;
 using System.Runtime.Versioning;
 using RdpAudit.Configurator.Ipc;
 using RdpAudit.Core.Ipc;
@@ -33,7 +35,7 @@ public sealed class MainForm : Form
 		_tabs.TabPages.Add(new AuditPolicyPage { Text = "Audit Policy" });
 		_tabs.TabPages.Add(new ServicePage(_ipc) { Text = "Service" });
 		_tabs.TabPages.Add(new SettingsPage(_ipc) { Text = "Settings" });
-		_tabs.TabPages.Add(new LiveEventsPage { Text = "Live Events" });
+		_tabs.TabPages.Add(new LiveEventsPage(_ipc) { Text = "Live Events" });
 
 		Controls.Add(_tabs);
 
@@ -43,11 +45,11 @@ public sealed class MainForm : Form
 		Controls.Add(_statusStrip);
 
 		_statusTimer = new System.Windows.Forms.Timer { Interval = 5_000 };
-		_statusTimer.Tick += async (_, _) => await RefreshServiceStatusAsync().ConfigureAwait(false);
+		_statusTimer.Tick += async (_, _) => await RefreshServiceStatusAsync().ConfigureAwait(true);
 		Load += async (_, _) =>
 		{
 			_statusTimer.Start();
-			await RefreshServiceStatusAsync().ConfigureAwait(false);
+			await RefreshServiceStatusAsync().ConfigureAwait(true);
 		};
 		FormClosing += (_, _) => _statusTimer.Stop();
 	}
@@ -56,30 +58,16 @@ public sealed class MainForm : Form
 	{
 		try
 		{
-			ServiceStatus? status = await _ipc.SendAsync<ServiceStatus>(IpcCommand.GetStatus).ConfigureAwait(false);
-			string text = status is null
+			ServiceStatus? status = await _ipc.SendAsync<ServiceStatus>(IpcCommand.GetStatus).ConfigureAwait(true);
+			_statusLabel.Text = status is null
 				? "Service: not reachable"
-				: $"Service v{status.Version} | uptime {status.Uptime:hh\\:mm\\:ss} | events {status.EventsCaptured} (dropped {status.EventsDropped}) | alerts {status.AlertsRaised}";
-			if (InvokeRequired)
-			{
-				Invoke(() => _statusLabel.Text = text);
-			}
-			else
-			{
-				_statusLabel.Text = text;
-			}
+				: string.Format(CultureInfo.InvariantCulture,
+					"Service v{0} | uptime {1:hh\\:mm\\:ss} | events {2} (dropped {3}) | alerts {4}",
+					status.Version, status.Uptime, status.EventsCaptured, status.EventsDropped, status.AlertsRaised);
 		}
 		catch (Exception ex)
 		{
-			string text = $"Service: error — {ex.Message}";
-			if (InvokeRequired)
-			{
-				Invoke(() => _statusLabel.Text = text);
-			}
-			else
-			{
-				_statusLabel.Text = text;
-			}
+			_statusLabel.Text = $"Service: error — {ex.GetType().Name}";
 		}
 	}
 

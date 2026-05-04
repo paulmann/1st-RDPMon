@@ -20,6 +20,7 @@ using RdpAudit.Service.Alerts;
 using RdpAudit.Service.Collectors;
 using RdpAudit.Service.Ipc;
 using RdpAudit.Service.Processors;
+using RdpAudit.Service.Services;
 using RdpAudit.Service.Workers;
 using Serilog;
 using Serilog.Formatting.Compact;
@@ -39,7 +40,11 @@ public static class Program
 
 		string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
 		string configPath = Path.Combine(programData, "RdpAudit", "appsettings.json");
-		Directory.CreateDirectory(Path.GetDirectoryName(configPath)!);
+		string? configDir = Path.GetDirectoryName(configPath);
+		if (!string.IsNullOrEmpty(configDir))
+		{
+			Directory.CreateDirectory(configDir);
+		}
 		if (!File.Exists(configPath))
 		{
 			await File.WriteAllTextAsync(configPath, AppSettingsTemplate.Default).ConfigureAwait(false);
@@ -111,8 +116,13 @@ public static class Program
 		services.AddDbContextFactory<AuditDbContext>((sp, options) =>
 		{
 			IOptions<RdpAuditOptions> opts = sp.GetRequiredService<IOptions<RdpAuditOptions>>();
-			string dbPath = opts.Value.Storage.ResolveDatabasePath();
-			Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+			string dbPath = Path.GetFullPath(opts.Value.Storage.ResolveDatabasePath());
+			string? dbDir = Path.GetDirectoryName(dbPath);
+			if (!string.IsNullOrEmpty(dbDir))
+			{
+				Directory.CreateDirectory(dbDir);
+			}
+
 			options
 				.UseSqlite($"Data Source={dbPath};Cache=Shared")
 				.AddInterceptors(sp.GetRequiredService<SqlitePragmaInterceptor>());
@@ -125,6 +135,10 @@ public static class Program
 		services.AddSingleton<EventNormalizer>();
 		services.AddSingleton<DbAlertContext>();
 		services.AddSingleton<IAlertContext>(sp => sp.GetRequiredService<DbAlertContext>());
+		services.AddSingleton<AlertCooldownTracker>();
+		services.AddSingleton<SettingsManager>();
+		services.AddSingleton<FirewallManager>();
+		services.AddSingleton<FirewallAutoBlockWorker>();
 		services.AddScoped<IpcDispatcher>();
 
 		AlertRuleRegistration.Register(services);
@@ -134,5 +148,6 @@ public static class Program
 		services.AddHostedService<AlertWorker>();
 		services.AddHostedService<IpcServerWorker>();
 		services.AddHostedService<MaintenanceWorker>();
+		services.AddHostedService(sp => sp.GetRequiredService<FirewallAutoBlockWorker>());
 	}
 }

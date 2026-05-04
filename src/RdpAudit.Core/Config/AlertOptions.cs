@@ -30,6 +30,17 @@ public sealed class AlertOptions
 
 	public bool OffHoursAlertEnabled { get; set; } = true;
 
+	/// <summary>IANA / Windows time-zone id used to evaluate business-hours rules.
+	/// Empty value means UTC; "Local" means the host machine's local zone.</summary>
+	public string OffHoursTimeZoneId { get; set; } = "UTC";
+
+	/// <summary>Cooldown applied to brute-force / NTLM / Kerberos / threshold rules to avoid
+	/// emitting one alert per offending event after the threshold is crossed.</summary>
+	public int ThresholdCooldownMinutes { get; set; } = 15;
+
+	/// <summary>If true, ProcessAnomaly suppresses cmd.exe spawned from explorer.exe (interactive use).</summary>
+	public bool ProcessAnomalyAllowExplorerCmd { get; set; } = true;
+
 	public string KerberosExpectedEncryptionType { get; set; } = "0x12";
 
 	public List<string> LsassAccessWhitelistProcesses { get; set; } = new()

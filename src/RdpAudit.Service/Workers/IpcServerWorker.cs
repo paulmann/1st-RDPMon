@@ -110,10 +110,15 @@ public sealed class IpcServerWorker : BackgroundService
 	{
 		await using (pipe)
 		{
+			// Hard per-connection deadline so a stalled / slow client never holds a server slot
+			// indefinitely. Linked to the service stoppingToken so shutdown still cancels.
+			using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+			cts.CancelAfter(TimeSpan.FromMilliseconds(IpcConstants.OperationTimeoutMs));
+			CancellationToken token = cts.Token;
 			try
 			{
 				byte[] lenBuf = new byte[4];
-				await pipe.ReadExactlyAsync(lenBuf, ct).ConfigureAwait(false);
+				await pipe.ReadExactlyAsync(lenBuf, token).ConfigureAwait(false);
 				int len = BitConverter.ToInt32(lenBuf);
 				if (len <= 0 || len > IpcConstants.MaxFrameBytes)
 				{
@@ -122,20 +127,24 @@ public sealed class IpcServerWorker : BackgroundService
 				}
 
 				byte[] body = new byte[len];
-				await pipe.ReadExactlyAsync(body, ct).ConfigureAwait(false);
+				await pipe.ReadExactlyAsync(body, token).ConfigureAwait(false);
 
-				IpcRequest request = MessagePackSerializer.Deserialize<IpcRequest>(body, cancellationToken: ct);
+				IpcRequest request = MessagePackSerializer.Deserialize<IpcRequest>(body, cancellationToken: token);
 				using IServiceScope scope = _services.CreateScope();
 				IpcDispatcher dispatcher = scope.ServiceProvider.GetRequiredService<IpcDispatcher>();
-				IpcResponse response = await dispatcher.DispatchAsync(request, ct).ConfigureAwait(false);
+				IpcResponse response = await dispatcher.DispatchAsync(request, token).ConfigureAwait(false);
 
-				byte[] respBytes = MessagePackSerializer.Serialize(response, cancellationToken: ct);
-				await pipe.WriteAsync(BitConverter.GetBytes(respBytes.Length), ct).ConfigureAwait(false);
-				await pipe.WriteAsync(respBytes, ct).ConfigureAwait(false);
-				await pipe.FlushAsync(ct).ConfigureAwait(false);
+				byte[] respBytes = MessagePackSerializer.Serialize(response, cancellationToken: token);
+				await pipe.WriteAsync(BitConverter.GetBytes(respBytes.Length), token).ConfigureAwait(false);
+				await pipe.WriteAsync(respBytes, token).ConfigureAwait(false);
+				await pipe.FlushAsync(token).ConfigureAwait(false);
 			}
 			catch (OperationCanceledException) when (ct.IsCancellationRequested)
 			{
+			}
+			catch (OperationCanceledException)
+			{
+				_logger.LogWarning("IPC connection deadline exceeded");
 			}
 			catch (IOException ex)
 			{

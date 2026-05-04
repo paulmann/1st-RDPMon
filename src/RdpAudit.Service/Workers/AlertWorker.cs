@@ -86,7 +86,7 @@ public sealed class AlertWorker : BackgroundService
 		List<RawEvent> batch = await db.RawEvents
 			.Where(e => !e.Processed)
 			.OrderBy(e => e.Id)
-			.Take(200)
+			.Take(500)
 			.ToListAsync(ct)
 			.ConfigureAwait(false);
 
