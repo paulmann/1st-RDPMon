@@ -1,0 +1,21 @@
+<Project>
+	<PropertyGroup>
+		<TargetFramework>net8.0-windows</TargetFramework>
+		<PlatformTarget>x64</PlatformTarget>
+		<Platforms>x64</Platforms>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+		<AnalysisMode>Default</AnalysisMode>
+		<EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+		<LangVersion>latest</LangVersion>
+		<Optimize Condition="'$(Configuration)'=='Release'">true</Optimize>
+		<Authors>Mikhail Deynekin</Authors>
+		<Company>Mikhail Deynekin (https://Deynekin.com)</Company>
+		<Product>RdpAudit</Product>
+		<Copyright>Copyright (c) Mikhail Deynekin</Copyright>
+		<NeutralLanguage>en-US</NeutralLanguage>
+		<InvariantGlobalization>false</InvariantGlobalization>
+		<EnableWindowsTargeting>true</EnableWindowsTargeting>
+	</PropertyGroup>
+</Project>
