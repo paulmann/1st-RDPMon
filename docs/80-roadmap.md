@@ -149,6 +149,74 @@ Before Stage 4 can start:
    provider-id resolution in `FirewallAutoBlockWorker` / `FirewallExpirationWorker` work
    unchanged when a MikroTik provider is wired in. No worker changes should be needed.
 
+## Stage 4 — LiveEvents UX (this branch)
+
+Stage 4 is the first UI-heavy stage. It deliberately ships only the LiveEvents page improvements
+and **no Firewall tab, no Attack Statistics tab, no Remote RDP Clients tab, no AbuseIPDB page,
+and no MikroTik page**. All Stage 4 mutations route through Stage 3 IPC handlers — no new IPC
+ordinals are introduced.
+
+Delivered:
+
+* **Filter bar (`Forms/LiveEventsPage.cs`)** — IP, user / login, event id, channel, free-text,
+  and time-range (`All time`, `Last 5 / 15 / 60 minutes`, `Last 24 hours`) controls combined with
+  AND semantics. Text inputs are debounced by 350 ms so a typing burst triggers a single
+  refresh. A `Clear filters` button resets every control and re-applies.
+* **Filter predicate (`Core/Events/LiveEventFilter.cs`)** — pure, UI-agnostic predicate and the
+  `LiveEventRowView` projection consumed by the WinForms grid. Designed so the same spec can be
+  forwarded to a server-side query once `GetRecentEvents` grows one.
+* **Row formatter (`Core/Events/LiveEventRowFormatter.cs`)** — labelled multiline and TSV
+  serialisations for the `Copy Event Details` clipboard action. Embedded tabs / CR / LF are
+  neutralised so a pasted TSV row never breaks downstream parsers.
+* **Context menu** — per-cell right-click menu whose items target the row under the cursor (not
+  the previously-selected row): `Copy Event Details`, `Copy Cell Value`, `Filter by This Value`,
+  `Block IP in Windows Firewall and Add to Blocklist`, `Add IP to Whitelist and Unblock`,
+  `Add Login to Blocklist and Block IP`. Destructive items are gated by a confirmation dialog
+  and disabled when the row lacks a valid IP / login or the cell is empty. IP validity is checked
+  via `IPAddress.TryParse`.
+* **Status strip** — every operator action and refresh result is rendered into the status strip
+  with a UTC `HH:mm:ss` timestamp and per-step success/failure detail (`blocklist=OK,
+  firewall=FAIL` etc.). Continuations marshal back to the UI thread before touching the label.
+* **IPC reuse** — Block routes through `AddToBlocklist` + legacy `BlockAddress`; whitelist
+  routes through `AddToWhitelist` + legacy `UnblockAddress`; login block routes through
+  `AddToBlocklist` for the login and (optionally) for the paired IP. No new IPC ordinals are
+  introduced; the append-only ABI is preserved.
+* **Tests** — `LiveEventFilterTests` (each field in isolation + AND-semantics combinations +
+  time-range boundary inclusivity + null-row guard), `LiveEventRowFormatterTests` (multiline
+  labels, TSV header / data row, dash placeholder for null / blank fields, tab and newline
+  neutralisation, null-row guard).
+* **Docs** — refreshed `docs/30-configurator.md`, this roadmap entry.
+
+Deferred to Stage 5+ (explicitly NOT in Stage 4):
+
+* Firewall tab UI (blocklist / whitelist / active-block grids with CRUD).
+* Attack Statistics tab.
+* Remote RDP Clients tab + session control wiring (`DisconnectSession`, `LogoffSession`,
+  `ShadowSession`).
+* AbuseIPDB page and HTTP client.
+* MikroTik page and REST client.
+* Server-side `GetRecentEvents` query parameters (the client-side predicate ships now; the IPC
+  contract can grow a payload later without changing call sites).
+
+### Stage 5 prerequisites
+
+Before Stage 5 can start:
+
+1. **Windows manual validation of Stage 4.** Walk the LiveEvents page on a Windows host with the
+   service running: type into each filter and confirm debounced refresh; cycle the time-range
+   drop-down; right-click the IP / user / channel cells and confirm context-menu enable/disable
+   semantics; copy details and a cell value and paste into Notepad and Excel; trigger a Block
+   IP → Whitelist round-trip and confirm both `netsh advfirewall firewall show rule
+   name=RdpAudit-Block-{ip}` and the `BlocklistEntries` table reflect the change; trigger a
+   Login Block and confirm the `BlocklistEntries` row carries the login.
+2. **Stage 5 IPC reservation.** Reserve the next contiguous block of `IpcCommand` ordinals for
+   the Firewall tab grids (CRUD already exists; the reservation is for any new
+   listings — e.g. active-blocks with filters — that the UI may need).
+3. **Layout discipline.** The Firewall / Attack Stats / Remote Clients tabs must follow the
+   established Configurator pattern: 5-second refresh timer, IPC-only reads/writes, `Invoke`
+   dispatch from background callbacks, async event handlers only on `Click`, no direct SQLite
+   writes.
+
 ## LLM-safe extension rules
 
 When implementing later stages:
