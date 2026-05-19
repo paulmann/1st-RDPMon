@@ -22,6 +22,7 @@ using RdpAudit.Core.Data;
 using RdpAudit.Core.Firewall;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
+using RdpAudit.Core.MikroTik;
 using RdpAudit.Core.Models;
 using RdpAudit.Core.Security;
 using RdpAudit.Core.Util;
@@ -43,6 +44,7 @@ public sealed class IpcDispatcher
 	private readonly ShadowPolicyManager? _shadow;
 	private readonly IAbuseIpDbClient? _abuseClient;
 	private readonly ISecretProtector? _protector;
+	private readonly IMikroTikClient? _mikroTikClient;
 
 	public IpcDispatcher(
 		IDbContextFactory<AuditDbContext> factory,
@@ -55,7 +57,8 @@ public sealed class IpcDispatcher
 		RdpSessionManager? sessions = null,
 		ShadowPolicyManager? shadow = null,
 		IAbuseIpDbClient? abuseClient = null,
-		ISecretProtector? protector = null)
+		ISecretProtector? protector = null,
+		IMikroTikClient? mikroTikClient = null)
 	{
 		_factory = factory;
 		_metrics = metrics;
@@ -68,6 +71,7 @@ public sealed class IpcDispatcher
 		_shadow = shadow;
 		_abuseClient = abuseClient;
 		_protector = protector;
+		_mikroTikClient = mikroTikClient;
 	}
 
 	public async Task<IpcResponse> DispatchAsync(IpcRequest request, CancellationToken ct)
@@ -123,9 +127,9 @@ public sealed class IpcDispatcher
 				IpcCommand.GetAbuseIpDbStatus => await GetAbuseIpDbStatusAsync(ct).ConfigureAwait(false),
 				IpcCommand.TestAbuseIpDbKey => await TestAbuseIpDbKeyAsync(ct).ConfigureAwait(false),
 
-				// --- Reserved Stage 1 commands still awaiting later-stage implementations. ---
-				IpcCommand.GetMikroTikStatus
-					or IpcCommand.TestMikroTik => NotImplementedResult(request.Command),
+				// --- Stage 9 handlers (MikroTik integration). ---
+				IpcCommand.GetMikroTikStatus => await GetMikroTikStatusAsync(ct).ConfigureAwait(false),
+				IpcCommand.TestMikroTik => await TestMikroTikAsync(ct).ConfigureAwait(false),
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
 
@@ -158,13 +162,6 @@ public sealed class IpcDispatcher
 			};
 		}
 	}
-
-	private static object NotImplementedResult(IpcCommand command) => new
-	{
-		status = IpcResultStatus.NotImplemented.ToString(),
-		command = command.ToString(),
-		message = "Command is reserved in Stage 1 but its handler is not yet implemented.",
-	};
 
 	private ServiceStatus BuildStatus()
 	{
@@ -1332,14 +1329,24 @@ public sealed class IpcDispatcher
 	private static MikroTikOptions CloneMikroTik(MikroTikOptions src) => new()
 	{
 		Enabled = src.Enabled,
+		AddAttackerRules = src.AddAttackerRules,
 		BaseUrl = src.BaseUrl,
+		UseHttps = src.UseHttps,
+		Host = src.Host,
+		Port = src.Port,
 		UserName = src.UserName,
 		Password = src.Password,
 		TimeoutSeconds = src.TimeoutSeconds,
 		AddressList = src.AddressList,
+		FilterChain = src.FilterChain,
+		FilterAction = src.FilterAction,
 		CommentTemplate = src.CommentTemplate,
+		CommentPrefix = src.CommentPrefix,
 		ValidateServerCertificate = src.ValidateServerCertificate,
 		MaxOperationsPerMinute = src.MaxOperationsPerMinute,
+		BlockDurationDays = src.BlockDurationDays,
+		BlockDurationHours = src.BlockDurationHours,
+		BlockDurationMinutes = src.BlockDurationMinutes,
 	};
 
 	private static string MaskSecret(string raw)
@@ -1490,6 +1497,169 @@ public sealed class IpcDispatcher
 				result.Status = IpcResultStatus.Unavailable;
 				break;
 			case AbuseIpDbReportOutcome.NotConfigured:
+				result.RemoteVerified = false;
+				result.Status = IpcResultStatus.InvalidRequest;
+				break;
+			default:
+				result.RemoteVerified = false;
+				result.Status = IpcResultStatus.Unavailable;
+				break;
+		}
+		return result;
+	}
+
+	// ----------------------------------------------------------------------------------------------
+	// Stage 9 handlers — MikroTik integration.
+	// ----------------------------------------------------------------------------------------------
+
+	private async Task<object?> GetMikroTikStatusAsync(CancellationToken ct)
+	{
+		MikroTikOptions opts = _options.CurrentValue.MikroTik;
+		MikroTikUrlBuilder.Result built = MikroTikUrlBuilder.Build(opts);
+		string endpoint = built.Ok ? built.Url : opts.DescribeEndpoint();
+
+		MikroTikStatusDto dto = new()
+		{
+			Status = IpcResultStatus.Success,
+			Configured = built.Ok && !string.IsNullOrWhiteSpace(opts.UserName),
+			CredentialPresent = !string.IsNullOrWhiteSpace(opts.Password),
+			Enabled = opts.Enabled,
+			AddAttackerRules = opts.AddAttackerRules,
+			Endpoint = endpoint,
+			Scheme = built.Ok && !string.IsNullOrEmpty(endpoint) && endpoint.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+				? "https"
+				: (built.Ok && !string.IsNullOrEmpty(endpoint) ? "http" : string.Empty),
+			Host = opts.Host,
+			Port = opts.Port,
+			FilterChain = opts.FilterChain,
+			FilterAction = opts.FilterAction,
+			CommentPrefix = string.IsNullOrWhiteSpace(opts.CommentPrefix) ? "RdpAudit" : opts.CommentPrefix,
+			BlockDurationSeconds = (long)opts.ComposedBlockDuration().TotalSeconds,
+			ValidateServerCertificate = opts.ValidateServerCertificate,
+			ProviderStatus = FirewallProviderStatus.NotConfigured.ToString(),
+		};
+
+		if (!built.Ok)
+		{
+			dto.LastError = built.Error;
+		}
+
+		try
+		{
+			await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+			dto.ActiveBlockCount = await db.ActiveBlocks.AsNoTracking()
+				.LongCountAsync(b => b.Provider == FirewallProviderKind.MikroTik
+					&& (b.Status == ActiveBlockStatus.Active || b.Status == ActiveBlockStatus.Pending), ct)
+				.ConfigureAwait(false);
+		}
+		catch (OperationCanceledException) when (ct.IsCancellationRequested)
+		{
+			throw;
+		}
+		catch (Exception ex)
+		{
+			_logger.LogWarning(ex, "GetMikroTikStatus active-block lookup failed");
+			dto.Status = IpcResultStatus.Unavailable;
+		}
+
+		// Resolve the actual provider status from the registered providers when available.
+		foreach (IFirewallProvider provider in _providers)
+		{
+			if (!string.Equals(provider.ProviderId, "MikroTik", StringComparison.OrdinalIgnoreCase))
+			{
+				continue;
+			}
+
+			try
+			{
+				FirewallStatusReport report = await provider.GetStatusAsync(ct).ConfigureAwait(false);
+				dto.ProviderStatus = report.Status.ToString();
+				if (report.Status != FirewallProviderStatus.Available && !string.IsNullOrWhiteSpace(report.Message))
+				{
+					dto.LastError = report.Message;
+				}
+				else if (report.Status == FirewallProviderStatus.Available)
+				{
+					dto.LastError = null;
+				}
+			}
+			catch (Exception ex)
+			{
+				_logger.LogWarning(ex, "MikroTik provider GetStatus threw");
+				dto.ProviderStatus = FirewallProviderStatus.Unreachable.ToString();
+				dto.LastError = ex.GetType().Name;
+			}
+			break;
+		}
+
+		dto.Message = string.Format(CultureInfo.InvariantCulture,
+			"MikroTik status: enabled={0} addRules={1} credential={2} endpoint={3} active={4}",
+			opts.Enabled,
+			opts.AddAttackerRules,
+			dto.CredentialPresent ? "configured" : "missing",
+			string.IsNullOrEmpty(endpoint) ? "(unset)" : endpoint,
+			dto.ActiveBlockCount);
+		return dto;
+	}
+
+	private async Task<object?> TestMikroTikAsync(CancellationToken ct)
+	{
+		MikroTikOptions opts = _options.CurrentValue.MikroTik;
+		MikroTikUrlBuilder.Result built = MikroTikUrlBuilder.Build(opts);
+		MikroTikTestResult result = new()
+		{
+			Endpoint = built.Ok ? built.Url : opts.DescribeEndpoint(),
+		};
+
+		if (!built.Ok)
+		{
+			result.Status = IpcResultStatus.InvalidRequest;
+			result.CredentialFormatValid = false;
+			result.RemoteVerified = false;
+			result.Message = built.Error ?? "Endpoint composition failed.";
+			return result;
+		}
+
+		if (string.IsNullOrWhiteSpace(opts.UserName) || string.IsNullOrWhiteSpace(opts.Password))
+		{
+			result.Status = IpcResultStatus.InvalidRequest;
+			result.CredentialFormatValid = false;
+			result.RemoteVerified = false;
+			result.Message = "Username and password must be configured before testing.";
+			return result;
+		}
+
+		result.CredentialFormatValid = true;
+
+		if (_mikroTikClient is null)
+		{
+			result.Status = IpcResultStatus.Unavailable;
+			result.RemoteVerified = false;
+			result.Message = "MikroTik client is not registered on this host.";
+			return result;
+		}
+
+		MikroTikOperationResult probe = await _mikroTikClient.PingAsync(ct).ConfigureAwait(false);
+		result.ResponseCode = probe.ResponseCode;
+		result.Message = probe.Message;
+
+		switch (probe.Outcome)
+		{
+			case MikroTikOutcome.Accepted:
+				result.RemoteVerified = true;
+				result.Status = IpcResultStatus.Success;
+				break;
+			case MikroTikOutcome.Rejected:
+				result.RemoteVerified = false;
+				result.Status = IpcResultStatus.Refused;
+				break;
+			case MikroTikOutcome.RateLimited:
+			case MikroTikOutcome.ServerError:
+			case MikroTikOutcome.TransportError:
+				result.RemoteVerified = false;
+				result.Status = IpcResultStatus.Unavailable;
+				break;
+			case MikroTikOutcome.NotConfigured:
 				result.RemoteVerified = false;
 				result.Status = IpcResultStatus.InvalidRequest;
 				break;

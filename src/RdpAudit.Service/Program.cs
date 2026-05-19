@@ -6,6 +6,7 @@
 // Site:    https://Deynekin.com
 
 using System.Diagnostics;
+using System.Net.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -18,6 +19,7 @@ using RdpAudit.Core.Config;
 using RdpAudit.Core.Data;
 using RdpAudit.Core.Events;
 using RdpAudit.Core.Firewall;
+using RdpAudit.Core.MikroTik;
 using RdpAudit.Core.Security;
 using RdpAudit.Service.AbuseIpDb;
 using RdpAudit.Service.Alerts;
@@ -155,6 +157,14 @@ public static class Program
 		}
 		services.AddHttpClient("AbuseIpDb");
 		services.AddSingleton<IAbuseIpDbClient, AbuseIpDbClient>();
+
+		services.AddHttpClient(MikroTikClient.HttpClientName);
+		services.AddHttpClient(MikroTikClient.HttpClientNameInsecure)
+			.ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+			{
+				ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator,
+			});
+		services.AddSingleton<IMikroTikClient, MikroTikClient>();
 
 		services.AddScoped<IpcDispatcher>();
 

@@ -612,6 +612,93 @@ Before Stage 9 can start:
    `MikroTikFirewallProvider`; Stage 9 wires the REST client and the Configurator MikroTik tab
    without changing the Core abstraction.
 
+### Stage 9 (delivered) — MikroTik RouterOS v7 integration
+
+Stage 9 delivers the optional MikroTik RouterOS v7 external firewall provider end-to-end. Stage 10
+(final QA, retention pruning, polish) remains explicitly NOT touched by this stage.
+
+* **Backend / IPC contracts.** Stage 1-reserved commands `GetMikroTikStatus` (29) and
+  `TestMikroTik` (30) are now implemented end-to-end. New MessagePack-compatible DTOs
+  (`MikroTikStatusDto`, `MikroTikTestResult`) use append-only integer keys.
+* **MikroTik client.** `RdpAudit.Service.Firewall.MikroTikClient` (registered behind the Core
+  abstraction `IMikroTikClient`) uses `IHttpClientFactory`, attaches HTTP Basic credentials only
+  at the call site, supports HTTP and HTTPS, honours `ValidateServerCertificate`, classifies every
+  response into `MikroTikOutcome.{Accepted, Rejected, RateLimited, ServerError, TransportError,
+  NotConfigured, AlreadyExists, NotFound}`, captures `Retry-After`, and never logs the plaintext
+  password. Probe endpoint: `GET /rest/system/resource`. Block create: idempotent
+  `PUT /rest/ip/firewall/filter` (lists owned rules first and reuses an existing matching row).
+  Block remove: verifying `GET` + `DELETE /rest/ip/firewall/filter/<id>`, **refusing to delete any
+  row whose comment does not start with the configured `CommentPrefix`**.
+* **URL builder.** `RdpAudit.Core.MikroTik.MikroTikUrlBuilder` is a pure, testable helper that
+  composes `BaseUrl` from `Scheme/Host/Port`, validates the host syntax, brackets IPv6 literals,
+  rejects unknown schemes, and combines REST paths defensively.
+* **Provider integration.** `MikroTikFirewallProvider` now delegates to the REST client. The
+  Stage 3 `FirewallAutoBlockWorker` was extended to fan out the `Both` provider kind into one
+  `ActiveBlock` row per provider, so the Stage 3 `FirewallExpirationWorker` continues to expire
+  each rule independently with its own `RuleHandle`. No hot polling.
+* **Settings persistence.** The Stage 8 `SettingsManager` already DPAPI-wraps `MikroTik.Password`.
+  The `MikroTikOptions` surface was extended with `AddAttackerRules`, `UseHttps`, `Host`, `Port`,
+  `FilterChain`, `FilterAction`, `CommentPrefix`, `BlockDurationDays/Hours/Minutes`, plus a pure
+  `ComposedBlockDuration()` helper that falls back to one hour when all components are zero.
+* **IPC masking.** `GetMikroTikStatus` never returns the password or the protected envelope —
+  only a `CredentialPresent` flag, the resolved endpoint, the resolved scheme, the configured
+  filter chain / action / prefix / duration, the provider status returned by the registered
+  provider, and the count of active MikroTik rows in `ActiveBlocks`.
+* **Configurator UI.** `RdpAudit.Configurator/Forms/MikroTikPage` adds a new tab after AbuseIPDB.
+  The tab carries inline RouterOS setup instructions (enable `www-ssl`, restrict allowed-address,
+  least-privilege user/group), Host/IP, port (0 = scheme default), Use HTTPS, Validate TLS,
+  Username, Password (with Show toggle), filter chain/action, comment prefix, block duration
+  (days/hours/minutes), `Add attacker IP block rules to MikroTik Firewall`, and `Enable MikroTik
+  integration` checkboxes, and Save / Test connection / Refresh status buttons. All UI strings
+  are English-only.
+* **Tests.** `MikroTikUrlBuilderTests` (Core), `MikroTikClientTests`,
+  `MikroTikFirewallProviderTests`, `IpcDispatcherStage9Tests` (Service), and an additional
+  `SettingsManagerSecretsTests.Save_ProtectsMikroTikPassword_BeforePersistence` test. All existing
+  tests still pass.
+* **Docs.** `docs/49-mikrotik.md` (new — RouterOS setup, security, REST semantics, troubleshooting,
+  TTL cleanup, Stage 9 invariants), `docs/40-options.md`, `docs/45-firewall.md`, `docs/50-ipc.md`,
+  this roadmap entry.
+
+Configuration surface additions on `MikroTikOptions`: `AddAttackerRules`, `UseHttps`, `Host`,
+`Port`, `FilterChain`, `FilterAction`, `CommentPrefix`, `BlockDurationDays`, `BlockDurationHours`,
+`BlockDurationMinutes`. Defaults remain safe: integration is OFF (`Enabled = false`,
+`AddAttackerRules = true`), TLS validation is ON (`ValidateServerCertificate = true`), the default
+block duration is one hour, and the default chain/action is `input/drop`.
+
+Deferred to Stage 10 (explicitly NOT in Stage 9):
+
+* Final QA pass (Windows manual validation, retention pruning of `AbuseReports`, polish).
+* Cross-tab filter linking between Attack Statistics / Remote RDP Clients / MikroTik tab and Live
+  Events.
+* Address-list synchronisation (the Stage 9 client writes to `/ip/firewall/filter` directly; the
+  `AddressList` field is preserved for operators who want to wire it into a router-side rule but
+  no automatic insert is performed yet).
+
+### Stage 10 prerequisites
+
+Before Stage 10 can start:
+
+1. **Windows manual validation of Stage 9.** From the Configurator host, with a RouterOS v7 device
+   reachable via HTTPS:
+   * Open the MikroTik tab. Type the host (IP literal or DNS name), confirm the URL builder
+     accepts it, enter the dedicated `rdpaudit` user + password, click Save. Confirm the password
+     is replaced with `***configured***` on the next Refresh — the plaintext is never echoed.
+   * Click Test connection. Confirm `MikroTikTestResult.RemoteVerified` is true and HTTP 200.
+   * Tick `Add attacker IP block rules to MikroTik Firewall` and `Enable MikroTik integration`,
+     click Save.
+   * Seed a synthetic attacker IP (e.g. via the Live Events context menu's Block IP action with
+     the Firewall provider set to `MikroTik` or `Both`). Confirm
+     `/ip/firewall/filter print where comment~"^RdpAudit"` lists the new row on the router and
+     `ActiveBlocks` has a matching row with `Provider = MikroTik` and a non-empty `RuleHandle`.
+   * Set a short block duration (e.g. 1 minute). Wait for `FirewallExpirationWorker` to run.
+     Confirm the row disappears from the router (`/ip/firewall/filter print where comment~"^RdpAudit"`
+     returns nothing) and `ActiveBlocks.Status` flips to `Removed`.
+   * Manually add a non-RdpAudit rule on the router (`/ip/firewall/filter add chain=input
+     action=drop src-address=198.51.100.1 comment="manual"`). Confirm RdpAudit never deletes it.
+2. **Stage 10 IPC reservation.** No new ordinals are required; Stage 10 is final QA + polish.
+3. **Linux CI baseline.** `dotnet build` + `dotnet test` continue to pass on Linux CI hosts; the
+   MikroTik REST client is exercised entirely via fake `HttpMessageHandler`s.
+
 ## LLM-safe extension rules
 
 When implementing later stages:

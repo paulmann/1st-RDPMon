@@ -245,17 +245,6 @@ public sealed class FirewallAutoBlockWorker : BackgroundService
 			decision.ReasonTag,
 			alert.RuleId);
 
-		ActiveBlock active = new()
-		{
-			Ip = ip,
-			Provider = providerKind,
-			CreatedUtc = nowUtc,
-			ExpiresUtc = expiresUtc,
-			Reason = reason,
-			Status = ActiveBlockStatus.Pending,
-		};
-		db.ActiveBlocks.Add(active);
-
 		bool blockedAlready = await db.BlocklistEntries
 			.AnyAsync(b => b.Ip == ip && b.IsEnabled, ct).ConfigureAwait(false);
 		if (!blockedAlready)
@@ -275,23 +264,20 @@ public sealed class FirewallAutoBlockWorker : BackgroundService
 
 		if (providerKind == FirewallProviderKind.None)
 		{
-			active.Status = ActiveBlockStatus.AuditOnly;
+			ActiveBlock audit = new()
+			{
+				Ip = ip,
+				Provider = FirewallProviderKind.None,
+				CreatedUtc = nowUtc,
+				ExpiresUtc = expiresUtc,
+				Reason = reason,
+				Status = ActiveBlockStatus.AuditOnly,
+			};
+			db.ActiveBlocks.Add(audit);
 			_logger.LogInformation(
 				"Auto-block recorded (audit-only) for {Ip} via alert {AlertId}",
 				ip,
 				alert.Id);
-			return;
-		}
-
-		IFirewallProvider? provider = ResolveProvider(providerKind);
-		if (provider is null)
-		{
-			active.Status = ActiveBlockStatus.Failed;
-			active.LastError = "No firewall provider registered for the configured provider kind.";
-			_logger.LogWarning(
-				"Auto-block failed for {Ip}: no provider for kind {Kind}",
-				ip,
-				providerKind);
 			return;
 		}
 
@@ -303,39 +289,71 @@ public sealed class FirewallAutoBlockWorker : BackgroundService
 			Reason = reason,
 		};
 
-		try
+		// Fan-out: when configured Both, drive Windows then MikroTik with one ActiveBlock row each so
+		// every rule has its own RuleHandle and can be expired by FirewallExpirationWorker on its own.
+		List<FirewallProviderKind> targets = providerKind == FirewallProviderKind.Both
+			? new List<FirewallProviderKind> { FirewallProviderKind.Windows, FirewallProviderKind.MikroTik }
+			: new List<FirewallProviderKind> { providerKind };
+
+		foreach (FirewallProviderKind target in targets)
 		{
-			FirewallActionResult result = await provider.BlockAsync(request, ct).ConfigureAwait(false);
-			if (result.Status == FirewallActionStatus.Success)
+			ActiveBlock active = new()
 			{
-				active.Status = ActiveBlockStatus.Active;
-				active.RuleHandle = result.RuleId;
-				_logger.LogInformation(
-					"Auto-block installed for {Ip} provider={Provider} rule={Rule}",
-					ip,
-					provider.ProviderId,
-					result.RuleId);
-			}
-			else
+				Ip = ip,
+				Provider = target,
+				CreatedUtc = nowUtc,
+				ExpiresUtc = expiresUtc,
+				Reason = reason,
+				Status = ActiveBlockStatus.Pending,
+			};
+			db.ActiveBlocks.Add(active);
+
+			IFirewallProvider? provider = ResolveProvider(target);
+			if (provider is null)
 			{
 				active.Status = ActiveBlockStatus.Failed;
-				active.LastError = result.Message;
+				active.LastError = "No firewall provider registered for the configured provider kind.";
 				_logger.LogWarning(
-					"Auto-block provider returned {Status} for {Ip}: {Message}",
-					result.Status,
+					"Auto-block failed for {Ip}: no provider for kind {Kind}",
 					ip,
-					result.Message);
+					target);
+				continue;
 			}
-		}
-		catch (OperationCanceledException)
-		{
-			throw;
-		}
-		catch (Exception ex)
-		{
-			active.Status = ActiveBlockStatus.Failed;
-			active.LastError = ex.Message;
-			_logger.LogError(ex, "Auto-block provider threw for {Ip}", ip);
+
+			try
+			{
+				FirewallActionResult result = await provider.BlockAsync(request, ct).ConfigureAwait(false);
+				if (result.Status == FirewallActionStatus.Success)
+				{
+					active.Status = ActiveBlockStatus.Active;
+					active.RuleHandle = result.RuleId;
+					_logger.LogInformation(
+						"Auto-block installed for {Ip} provider={Provider} rule={Rule}",
+						ip,
+						provider.ProviderId,
+						result.RuleId);
+				}
+				else
+				{
+					active.Status = ActiveBlockStatus.Failed;
+					active.LastError = result.Message;
+					_logger.LogWarning(
+						"Auto-block provider returned {Status} for {Ip}: {Message}",
+						result.Status,
+						ip,
+						result.Message);
+				}
+			}
+			catch (OperationCanceledException)
+			{
+				throw;
+			}
+			catch (Exception ex)
+			{
+				active.Status = ActiveBlockStatus.Failed;
+				active.LastError = ex.Message;
+				_logger.LogError(ex, "Auto-block provider threw for {Ip}", ip);
+			}
 		}
 	}
 
@@ -345,7 +363,6 @@ public sealed class FirewallAutoBlockWorker : BackgroundService
 		{
 			FirewallProviderKind.Windows => "Windows",
 			FirewallProviderKind.MikroTik => "MikroTik",
-			FirewallProviderKind.Both => "Windows",
 			_ => string.Empty,
 		};
 
