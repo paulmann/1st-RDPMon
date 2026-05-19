@@ -13,6 +13,7 @@ WinForms front-end for setup, monitoring, and configuration.
 | Settings | `Forms/SettingsPage.cs` | Loads `RdpAuditOptions` via IPC (falls back to disk). Saves to `%ProgramData%\RdpAudit\appsettings.json`; the service hot-reloads via `IOptionsMonitor<T>`. |
 | Live Events | `Forms/LiveEventsPage.cs` + `Core/Events/LiveEventFilter.cs` + `Core/Events/LiveEventRowFormatter.cs` | Live tail of the most recent `RawEvent` rows fetched over `IPC.GetRecentEvents` (currently 200 rows). A filter bar above the grid combines IP / user / event-id / channel / free-text / time-range filters with AND semantics and a 350 ms debounce on text input. A per-cell right-click context menu offers `Copy Event Details` (multiline + TSV), `Copy Cell Value`, `Filter by This Value`, `Block IP in Windows Firewall and Add to Blocklist`, `Add IP to Whitelist and Unblock`, and `Add Login to Blocklist and Block IP`. Every operator action is recorded in a status strip with a UTC timestamp and per-step success/failure detail. All mutations go through IPC handlers — the page never writes to SQLite directly. |
 | Firewall | `Forms/FirewallPage.cs` + `Core/Util/AddressListFilter.cs` | Stage 5 of the roadmap. Surfaces provider status / availability (Windows / None for Stage 5; MikroTik and Both are reserved for Stage 6 and shown disabled), the auto-block policy knobs from `FirewallOptions` (auto-block toggle, threshold, default block duration as days/hours/minutes, blacklisted-login auto-block, private-address refusal), and four inner tabs (Blocklist, Whitelist, Login trip-wires, Active blocks) each with a search/filter box, validated Add / Remove buttons, and a 5-second refresh timer. Whitelisting offers a follow-up prompt to remove an installed Windows Firewall rule via `UnblockAddress`. Removing a whitelist entry never installs a new block. Login trip-wires are explicitly separate from blocklist IPs and the UI makes clear they do **not** disable local Windows accounts. Active blocks expose the full `ActiveBlocks` row shape (IP, provider, rule handle, created / expires UTC, status, reason, last error) and a confirmation-gated `Unblock selected` button that drives `UnblockActiveBlock`. Settings persistence reuses the existing `GetSettings` / `SaveSettings` IPC round-trip; the JSON document is fetched, the `Firewall` sub-tree is mutated in place, and the wrapped `{ "RdpAudit": ... }` envelope is sent back through `SaveSettings`. A status strip timestamps every action with `[HH:mm:ss Z]` and reports per-step OK / FAIL detail. |
+| Attack Statistics | `Forms/AttackStatisticsPage.cs` + `Core/Util/AttackStatsFilter.cs` + `Core/Util/AttackStatsRecentRange.cs` + `Core/Models/AttackStatRowFormatter.cs` | Stage 6B of the roadmap. Renders one row per attacker IP fetched via `GetAttackStats` IPC (ordinal 18). Twelve grid columns (IP, Threat score / band, Total, Failed, Successful, First Seen, Last Seen, Duration, Top 10 Attempted Logins, Last LogonType, Blocked) with cameyo-style green / yellow / red row coloring driven directly by the Stage 6A `ThreatLevel` returned over the wire (no UI re-classification). A toolbar combines IP-search, min-threat score, only-blocked, recent-period preset (`Last hour` / `Last 24 hours` / `Last 7 days` / `Last 30 days` / `All time`), row-limit selector (100 / 250 / 500 / 1000 / 2000), an `Auto refresh (5s)` checkbox with a re-entry guard that drops overlapping ticks, a `Refresh` button, and a `Clear filters` button. A right-click context menu offers `Copy Row Details`, `Copy IP`, `Block IP…`, and `Whitelist IP…`; mutations are confirmation-gated and reuse the existing Stage 5 `AddToBlocklist` / `AddToWhitelist` IPC commands. A status strip timestamps every refresh and action with `[yyyy-MM-dd HH:mm:ss Z]`. The Configurator never writes to the `AttackStats` table directly — every read flows through `GetAttackStats`. Cross-tab "filter Live Events by this IP" is deferred (the existing Live Events page does not expose a public filter API). |
 
 ## Service distribution discovery
 
@@ -98,18 +99,92 @@ No new IPC ordinals are introduced in Stage 4.
 - WinForms-specific unit tests are not feasible in CI. Document manual verification steps in the PR description.
 - The Service-side IPC tests in `RdpAudit.Service.Tests` must continue to pass after any IPC contract change.
 
-## Attack Statistics page (Stage 6B — deferred)
+## Attack Statistics page (Stage 6B)
 
-The Configurator **Attack Statistics** tab is deferred to Stage 6B. Stage 6A delivers the back-end
-half of the subsystem only: the materialised `AttackStats` table, the `AttackStatsRefreshWorker`
-on a 60-second cadence, the deterministic `AttackThreatScoring` rules, and the `GetAttackStats`
-IPC command (ordinal `18`). The Stage 6A IPC contract is byte-stable and ready to be consumed by
-the Stage 6B UI without further ordinal or `[Key]` changes — see `docs/46-attack-statistics.md`
-and `docs/50-ipc.md`.
+The Configurator **Attack Statistics** tab consumes the Stage 6A `GetAttackStats` IPC command
+(ordinal `18`) only — every read flows through IPC, and the Configurator never opens the SQLite
+file directly. The tab is registered on `MainForm` immediately after the Firewall tab.
 
-Stage 6B will introduce `Forms/AttackStatisticsPage.cs` and register it on `MainForm` after the
-Firewall tab. The UI must reuse `Core/Util/AttackStatsFilter.cs` for client-side pre-filtering so
-the predicate matches the server-side `AttackStatsRequest` semantics, and must drive *only* IPC
-for both reads (`GetAttackStats`) and mutations (`AddToBlocklist` / `AddToWhitelist` /
-`BlockAddress` / `UnblockAddress`). The Configurator MUST NOT open the SQLite database directly
-for this tab.
+### Grid columns
+
+| Column | Source |
+|--------|--------|
+| `IP` | `AttackStatEntryDto.Ip` |
+| `Threat` | `ThreatScore` (one decimal) followed by `ThreatLevel` band in parentheses. |
+| `Total` | `TotalAttempts` |
+| `Failed` | `Failed` |
+| `Successful` | `Successful` |
+| `First Seen (UTC)` | `FirstSeenUtc` formatted `yyyy-MM-dd HH:mm:ss` |
+| `Last Seen (UTC)` | `LastSeenUtc` formatted `yyyy-MM-dd HH:mm:ss` |
+| `Duration` | `DurationSeconds` formatted `[d ]hh:mm:ss` via `AttackStatRowFormatter.FormatDuration`. |
+| `Top 10 Attempted Logins` | `Top10AttemptedLogins` JSON deserialised and joined with `, `. |
+| `Last LogonType` | `LastLoginType` (blank when null). |
+| `Blocked` | `IsBlocked` rendered `yes` / `no`. |
+
+### Row coloring
+
+The row background color is driven directly by the Stage 6A `ThreatLevel` value returned over the
+wire — the UI does NOT re-classify the numeric score. Bands match `AttackThreatScoring`:
+
+| Band | Server `ThreatScore` | Row background |
+|------|----------------------|----------------|
+| `Green` | `0..29` | Soft green (`#DCF5DC`). |
+| `Yellow` | `30..69` | Soft yellow (`#FFF8C8`). |
+| `Red` | `70..100` | Soft red (`#FFDCDC`). |
+
+### Filter toolbar
+
+| Control | Behaviour |
+|---------|-----------|
+| `IP search` | Case-insensitive substring on `Ip`. Forwarded to the request and also re-applied client-side via `AttackStatsFilter` while the operator types. |
+| `Min threat` | Inclusive lower bound on `ThreatScore` (0..100, step 5). |
+| `Recent period` | Maps to `AttackStatsRequest.SinceUtc` via `AttackStatsRecentRanges.ToSinceUtc`. Choices: `Last hour`, `Last 24 hours`, `Last 7 days` (default — matches the server default), `Last 30 days`, `All time`. |
+| `Limit` | Row limit (`100`, `250`, `500`, `1000`, `2000`). Server clamps to `1..2000`. |
+| `Only blocked` | When checked, restricts to rows where `IsBlocked == true`. |
+| `Auto refresh (5s)` | Optional 5-second refresh timer. Re-entry guarded — overlapping ticks are dropped, not queued. |
+| `Refresh` | Manual refresh button. |
+| `Clear filters` | Resets every control to its default and triggers a refresh. |
+
+### Context menu
+
+Right-click on a grid row opens a bounded menu whose items target the right-clicked row:
+
+| Item | Effect |
+|------|--------|
+| `Copy Row Details` | Copies a multiline labelled block produced by `AttackStatRowFormatter.FormatMultiline` to the clipboard. |
+| `Copy IP` | Copies the row's IP to the clipboard. |
+| `Block IP…` | Confirmation dialog → `AddToBlocklist` IPC. Disabled when the row is already blocked. |
+| `Whitelist IP…` | Confirmation dialog → `AddToWhitelist` IPC. Active blocks are not auto-removed; use the Firewall tab if required. |
+
+Both mutation actions reuse the existing Stage 5 IPC commands; no new ordinals are introduced.
+
+Cross-tab "Filter Live Events by this IP" is deferred — the existing `LiveEventsPage` does not
+expose a public filter API, and adding one would be out of scope for Stage 6B. SOC operators can
+copy the IP from Attack Statistics and paste it into the Live Events IP filter manually.
+
+### Status strip
+
+A `StatusStrip` along the bottom of the page reports every refresh outcome and operator action,
+pre-stamped with the UTC timestamp:
+
+```
+[2026-05-19 12:34:56Z] Refresh OK. rows=42 (matching=42, server limit=500, window=[2026-05-12 12:34:56Z..2026-05-19 12:34:56Z]).
+[2026-05-19 12:35:02Z] AddToBlocklist 203.0.113.5: OK
+[2026-05-19 12:35:50Z] Copy row details: OK.
+```
+
+### IPC commands consumed
+
+- `GetAttackStats` (18) — populates the grid (read).
+- `AddToBlocklist` (14) — context-menu "Block IP…".
+- `AddToWhitelist` (16) — context-menu "Whitelist IP…".
+
+No new IPC ordinals are introduced in Stage 6B.
+
+### Threading rules
+
+- `RefreshAsync` is guarded by a `_refreshing` flag so the auto-refresh timer and the manual
+  `Refresh` button cannot interleave.
+- All IPC calls are awaited with `ConfigureAwait(true)` so continuations land on the UI thread.
+- `_statusLabel.Text` updates honour `InvokeRequired` and marshal via `BeginInvoke`.
+- The UI never calls `.Result` / `.Wait()`.
