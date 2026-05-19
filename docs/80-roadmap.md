@@ -318,7 +318,7 @@ Before Stage 6 can start:
    continue to drive *only* IPC, and the provider id must be resolved server-side from
    `FirewallProviderKind` without UI knowledge of the underlying REST endpoint.
 
-## Stage 6A — Attack Statistics backend + IPC (this branch)
+## Stage 6A — Attack Statistics backend + IPC
 
 Stage 6A lights up the back-end half of the operator-facing attack dashboard. It deliberately
 ships **no Configurator UI tab** — the Attack Statistics tab is delivered in Stage 6B. Stage 6A
@@ -414,14 +414,70 @@ Before Stage 6B can start:
    MUST reuse `Core/Util/AttackStatsFilter.cs` for client-side pre-filtering rather than inlining
    a second predicate.
 
+## Stage 6B — Attack Statistics Configurator tab (this branch)
+
+Stage 6B delivers the operator-facing half of the Attack Statistics subsystem. It consumes the
+Stage 6A `GetAttackStats` IPC contract only and introduces no new IPC ordinals. With 6B landing,
+**Stage 6 is complete.** Remote RDP Clients, session control, AbuseIPDB, and MikroTik remain
+deferred to Stage 7+.
+
+Delivered:
+
+* **Tab** — `Configurator/Forms/AttackStatisticsPage.cs`: SOC-operator Attack Statistics tab
+  registered on `MainForm` immediately after the Firewall tab. Twelve grid columns (IP, Threat
+  score / band, Total, Failed, Successful, First Seen, Last Seen, Duration, Top 10 Attempted
+  Logins, Last LogonType, Blocked). Row backgrounds are painted from the server-returned
+  `ThreatLevel` (Green / Yellow / Red), so the UI cannot drift from the back-end thresholds.
+* **Filter toolbar** — IP-search, min-threat numeric, only-blocked checkbox, recent-period preset
+  (`Last hour` / `Last 24 hours` / `Last 7 days` / `Last 30 days` / `All time`), row-limit
+  selector, `Auto refresh (5s)` checkbox, `Refresh` button, `Clear filters` button. The recent
+  period maps to `AttackStatsRequest.SinceUtc` through `Core/Util/AttackStatsRecentRange.cs` so
+  the mapping is unit-tested without WinForms.
+* **Auto-refresh** — Optional 5-second timer; a re-entry guard drops overlapping ticks rather than
+  queuing them so a slow service cannot pile up background work.
+* **Context menu** — `Copy Row Details` (multiline labelled block via `Core/Models/AttackStatRowFormatter.cs`),
+  `Copy IP`, `Block IP…` (confirmation-gated `AddToBlocklist`), `Whitelist IP…` (confirmation-gated
+  `AddToWhitelist`). Mutations reuse Stage 5 IPC commands verbatim.
+* **Status strip** — UTC-stamped per-action and per-refresh outcome reporting; controlled error
+  messages on IPC failure (`Refresh FAILED: …`), never raw exception traces.
+* **Layering** — All reads go through `IpcCommand.GetAttackStats`. The Configurator never opens
+  the SQLite file directly for this tab. All IPC calls are awaited with `ConfigureAwait(true)`;
+  the UI never calls `.Result` / `.Wait()`.
+* **Tests**
+  * `AttackStatRowFormatterTests` — multiline + TSV clipboard output, top-logins serialisation,
+    duration formatter, TSV tab/newline sanitisation.
+  * `AttackStatsRecentRangeTests` — toolbar preset → `SinceUtc` mapping, display labels,
+    append-only enum ordinals.
+  * Stage 6A `AttackStatsFilterTests` and `IpcDispatcherStage6Tests` continue to lock the shared
+    filter predicate and IPC contract.
+* **Docs** — `docs/30-configurator.md` Attack Statistics page section, `docs/46-attack-statistics.md`
+  Stage 6B section + Windows validation checklist, this roadmap entry.
+
+Configuration surface: none. The 5-second auto-refresh cadence and 500-row default limit are
+hard-coded; future stages may expose them via `RdpAuditOptions` if operators ask.
+
+Cross-tab "Filter Live Events by this IP" is deferred — the existing `LiveEventsPage` does not
+expose a public filter API, and adding one was out of scope for Stage 6B. SOC operators can copy
+the IP from Attack Statistics and paste it into the Live Events IP filter manually.
+
+Deferred to Stage 7+ (explicitly NOT in Stage 6B):
+
+* Remote RDP Clients tab + session-control wiring (`DisconnectSession`, `LogoffSession`,
+  `ShadowSession`).
+* AbuseIPDB page and HTTP client.
+* MikroTik page and REST client.
+* Cross-tab filter linking between Attack Statistics and Live Events.
+
 ### Stage 7 prerequisites
 
 Before Stage 7 can start:
 
-1. **Windows manual validation of Stage 6B.** The Stage 6B tab (once delivered) must show one row
-   per attacker IP within one 60-second refresh cycle, colour rows correctly, and round-trip the
-   right-click `Block IP` / `Whitelist IP` actions through `netsh advfirewall firewall show rule
-   name=RdpAudit-Block-{ip}` verification.
+1. **Windows manual validation of Stage 6B.** The Stage 6B tab must show one row per attacker IP
+   within one 60-second refresh cycle, colour rows correctly per the server-returned
+   `ThreatLevel`, and round-trip the right-click `Block IP` / `Whitelist IP` actions through
+   `netsh advfirewall firewall show rule name=RdpAudit-Block-{ip}` verification. The auto-refresh
+   timer must drop overlapping ticks (no duplicated rows). See the validation checklist in
+   `docs/46-attack-statistics.md`.
 2. **Stage 7 IPC reservation.** `ListRdpSessions` (19), `DisconnectSession` (20),
    `LogoffSession` (21), and `ShadowSession` (22) are already reserved. Ordinals 38+ remain free
    for future allocations.

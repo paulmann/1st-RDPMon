@@ -2,12 +2,12 @@
 
 The Attack Statistics subsystem materialises one row per attacker IP with a deterministic
 `ThreatScore` and a cameyo-style green / yellow / red classification. The subsystem ships in two
-sub-stages:
+sub-stages, both now complete:
 
-* **Stage 6A** (this branch) — back-end aggregation worker, threat-scoring rules, and the
-  `GetAttackStats` IPC command. No Configurator UI tab.
-* **Stage 6B** (deferred) — the Configurator **Attack Statistics** tab consuming the IPC contract
-  delivered in Stage 6A.
+* **Stage 6A** — back-end aggregation worker, threat-scoring rules, and the `GetAttackStats` IPC
+  command.
+* **Stage 6B** (this branch) — the Configurator **Attack Statistics** tab consuming the IPC
+  contract delivered in Stage 6A. See `docs/30-configurator.md` for the operator-facing surface.
 
 ## Components
 
@@ -19,7 +19,9 @@ sub-stages:
 | Worker | `Service/Workers/AttackStatsRefreshWorker.cs` | Background service. Refreshes the table once at startup and then every 60 seconds. `SemaphoreSlim` guards against concurrent re-entry. | 6A |
 | IPC | `Service/Ipc/IpcDispatcher.cs::GetAttackStatsAsync` + `Core/Ipc/Contracts/AttackStatsRequest.cs` + `Core/Ipc/Contracts/AttackStatEntryDto.cs` + `Core/Ipc/Contracts/AttackStatsDto.cs` | Filtered / paged read surface. Returns controlled `IpcResponse` payloads — never raw exceptions. | 6A |
 | Filter helper | `Core/Util/AttackStatsFilter.cs` | Pure predicate mirroring `AttackStatsRequest`. Used by Stage 6B UI for client-side pre-filtering while the operator types. | 6A (helper) / 6B (UI consumer) |
-| UI | `Configurator/Forms/AttackStatisticsPage.cs` | Grid + filter toolbar + right-click menu. See `docs/30-configurator.md`. | 6B |
+| Recent-range helper | `Core/Util/AttackStatsRecentRange.cs` | Pure mapping from the toolbar `Recent period` dropdown to an absolute `SinceUtc` bound. | 6B |
+| Row formatter | `Core/Models/AttackStatRowFormatter.cs` | Pure clipboard formatters (multiline + TSV) and duration / top-logins UI helpers. | 6B |
+| UI | `Configurator/Forms/AttackStatisticsPage.cs` | Grid + filter toolbar + right-click menu + 5-second auto-refresh with re-entry guard + status strip. See `docs/30-configurator.md`. | 6B |
 
 ## Refresh cadence
 
@@ -146,31 +148,35 @@ IPC command.
 | `AttackThreatScoringTests` | Each scoring component, the clamp, classification boundaries, recentness buckets, clock-skew handling. |
 | `AttackStatsAggregatorTests` | Empty input, blank-IP skip, group-by-IP, success vs failure counting, top-N login cap, `IsBlocked` propagation, unknown event ids, deterministic ordering. |
 | `AttackStatsFilterTests` | Empty filter, null entry, IP substring, min-threat inclusive bound, only-blocked, since/until inclusive bounds, AND semantics. |
+| `AttackStatRowFormatterTests` | Multiline + TSV clipboard output, top-logins formatter, duration formatter, TSV tab/newline sanitisation. (Stage 6B) |
+| `AttackStatsRecentRangeTests` | Toolbar preset → `SinceUtc` mapping, display labels, append-only enum ordinals. (Stage 6B) |
 | `IpcDispatcherStage6Tests` | End-to-end dispatch + filter combinations + limit clamping + invalid-JSON path + worker re-entry guard + cancellation. |
 | `IpcCommandStabilityTests.Ordinal_IsStable` | Locks `GetAttackStats = 18`. |
 
 ## Roadmap
 
-Stage 6B will introduce the Configurator **Attack Statistics** tab that consumes the
-`GetAttackStats` IPC contract delivered in Stage 6A. Stage 7 will introduce the **Remote RDP
-Clients** tab and session-control IPC. Stage 6 deliberately omits AbuseIPDB / MikroTik integration.
-See `docs/80-roadmap.md`.
+Stage 6 (back-end aggregation, scoring, IPC, and Configurator UI) is complete. Stage 7 will
+introduce the **Remote RDP Clients** tab and session-control IPC. Stage 6 deliberately omits
+AbuseIPDB / MikroTik integration. See `docs/80-roadmap.md`.
 
-## Stage 6B prerequisites (UI delivery)
+## Stage 6B Windows validation checklist (UI smoke before sign-off)
 
-Before Stage 6B can start:
+The Stage 6B UI must be smoked on a Windows host with the Stage 6A service running:
 
-1. **Stage 6A is on a Windows host.** The service installed and running with the
-   `AttackStatsRefreshWorker` registered must materialise rows in `AttackStats` end-to-end. Smoke
-   the worker by:
-   * Seeding or driving a synthetic burst against the host and confirming one row per source IP
-     appears within one 60-second refresh cycle.
-   * `SELECT Ip, TotalAttempts, Failed, Successful, ThreatScore, IsBlocked, LastUpdatedUtc FROM
-     AttackStats ORDER BY LastUpdatedUtc DESC LIMIT 20;` returns the expected projection.
-2. **IPC contract is byte-stable.** `IpcCommandStabilityTests.Ordinal_IsStable` keeps
-   `GetAttackStats = 18`. All Stage 6A `[Key]` slots on `AttackStatsDto` /
-   `AttackStatEntryDto` / `AttackStatsRequest` are append-only; Stage 6B does not introduce new
-   keys for the tab work — the UI uses what 6A returns.
-3. **Filter helper is shared.** `Core/Util/AttackStatsFilter.cs` already mirrors the server-side
-   filter so the UI can pre-filter cached rows without an extra round-trip while the operator
-   types. Stage 6B reuses this without re-implementing the predicate.
+1. **Service health.** The Service is installed and running; `AttackStatsRefreshWorker` is
+   registered; `SELECT Ip, TotalAttempts, Failed, Successful, ThreatScore, IsBlocked,
+   LastUpdatedUtc FROM AttackStats ORDER BY LastUpdatedUtc DESC LIMIT 20;` returns the expected
+   projection.
+2. **Tab opens.** Launching the Configurator and clicking the **Attack Statistics** tab triggers a
+   refresh; the status strip prints `Refresh OK. rows=…` with a UTC timestamp.
+3. **Row coloring.** Rows with `ThreatLevel == Green` paint soft green, `Yellow` paint soft yellow,
+   and `Red` paint soft red. The colour reflects the server-side `ThreatLevel`, not a UI re-classification.
+4. **Filters.** Typing in `IP search`, raising `Min threat`, toggling `Only blocked`, and changing
+   `Recent period` / `Limit` filter the grid; `Clear filters` resets every control and refreshes.
+5. **Auto refresh.** Ticking `Auto refresh (5s)` starts a 5-second timer; ticks are dropped when a
+   refresh is already in flight (no duplicated rows, no overlapping status lines).
+6. **Context menu.** Right-click on a row enables `Copy Row Details`, `Copy IP`, `Block IP…`, and
+   `Whitelist IP…`. Block / whitelist actions prompt for confirmation; the resulting IPC outcome
+   is reported in the status strip.
+7. **No direct DB writes.** With ProcMon / Sysmon, confirm `RdpAudit.Configurator.exe` never
+   opens `rdpaudit.db` for write while the Attack Statistics tab is active.

@@ -38,7 +38,7 @@ public sealed class MainForm : Form
 		_tabs.TabPages.Add(new SettingsPage(_ipc) { Text = "Settings" });
 		_tabs.TabPages.Add(new LiveEventsPage(_ipc) { Text = "Live Events" });
 		_tabs.TabPages.Add(new FirewallPage(_ipc) { Text = "Firewall" });
-		// Attack Statistics tab lands in Stage 6B; Stage 6A delivers backend aggregation + IPC only.
+		_tabs.TabPages.Add(new AttackStatisticsPage(_ipc) { Text = "Attack Statistics" });
 
 		Controls.Add(_tabs);
 
