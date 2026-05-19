@@ -49,6 +49,20 @@ publish/Configurator/RdpAudit.Configurator.exe
 - 21 alert rules including `STICKY_KEYS_BACKDOOR`, `RDP_PORT_CHANGED`, `LSASS_PPL_TAMPER`,
   `LSASS_ACCESS` (bitwise mask check), `KERBEROS_SPRAY`, `BRUTE_FORCE_NTLM` with cooldown to
   prevent alert flood, `OFF_HOURS_LOGIN` with explicit time-zone (UTC by default).
+- **External provider integrations.** AbuseIPDB reputation reporting with local dedup and
+  rate-limit awareness (Stage 8); MikroTik RouterOS v7 REST firewall provider (Stage 9) with
+  DPAPI-protected credentials and idempotent rule management.
+- **Configurator UX.** Overview, Prerequisites, Audit Policy, Service, Settings, Live Events,
+  Firewall, Attack Statistics, Remote RDP Clients, AbuseIPDB, MikroTik — each tab surfaces
+  status / result feedback, destructive actions confirm with **No** as default, and no plaintext
+  secret is ever displayed or copied to the clipboard.
+- **Retention pruning** (Stage 10) for `RawEvents`, `Alerts`, `AbuseReports`, inactive
+  `ActiveBlocks` and stale `AttackStats`. All deletes are batched, cancellable, and tolerate
+  `SQLITE_BUSY` with exponential backoff so the writer lock is short on huge databases.
+- **Backup / restore.** Snapshots capture `appsettings.json` (DPAPI envelopes only, never
+  plaintext), audit policy CSV, RdpAudit registry keys (IFEO, RDP-Tcp, LSA, audit policy) and
+  `sc.exe qc` configuration. Restore never touches the audit event database and always captures
+  a pre-restore safety snapshot first.
 
 ### Build & test
 
@@ -57,6 +71,16 @@ dotnet build  RdpAudit.sln -c Release
 dotnet test   RdpAudit.sln -c Release
 ./publish.ps1
 ```
+
+### Windows validation & troubleshooting
+
+Stage 10 release-readiness ships two new operator-facing documents:
+
+- [`docs/90-windows-validation.md`](docs/90-windows-validation.md) — end-to-end manual checklist
+  to run on a Windows host before declaring a build shippable.
+- [`docs/91-troubleshooting.md`](docs/91-troubleshooting.md) — common failures (ProgramData
+  ACL, `sc.exe` 1639, locked publish files, audit-policy `?`, firewall unavailable, AbuseIPDB
+  HTTP 429, MikroTik TLS / auth) with copy-paste fixes.
 
 ---
 

@@ -67,7 +67,11 @@ public static class AppSettingsTemplate
 			"DatabasePath": "",
 			"EventRetentionDays": 365,
 			"LogRetentionDays": 90,
-			"AlertRetentionDays": 730
+			"AlertRetentionDays": 730,
+			"AbuseReportRetentionDays": 365,
+			"ActiveBlockRetentionDays": 90,
+			"AttackStatRetentionDays": 180,
+			"MaintenanceBatchSize": 50000
 		},
 		"Diagnostics": {
 			"DebugMode": false,

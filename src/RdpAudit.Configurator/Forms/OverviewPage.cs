@@ -357,7 +357,8 @@ public sealed class OverviewPage : TabPage
 				confirm,
 				"RdpAudit Restore",
 				MessageBoxButtons.YesNo,
-				MessageBoxIcon.Warning);
+				MessageBoxIcon.Warning,
+				MessageBoxDefaultButton.Button2);
 			if (choice != DialogResult.Yes)
 			{
 				_status.Text = "Restore cancelled by user.";
