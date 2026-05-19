@@ -29,6 +29,18 @@ public sealed class AuditDbContext : DbContext
 
 	public DbSet<DbProp> DbProps => Set<DbProp>();
 
+	public DbSet<BlocklistEntry> BlocklistEntries => Set<BlocklistEntry>();
+
+	public DbSet<WhitelistEntry> WhitelistEntries => Set<WhitelistEntry>();
+
+	public DbSet<LoginRule> LoginRules => Set<LoginRule>();
+
+	public DbSet<ActiveBlock> ActiveBlocks => Set<ActiveBlock>();
+
+	public DbSet<AbuseReport> AbuseReports => Set<AbuseReport>();
+
+	public DbSet<AttackStat> AttackStats => Set<AttackStat>();
+
 	protected override void OnModelCreating(ModelBuilder modelBuilder)
 	{
 		base.OnModelCreating(modelBuilder);
