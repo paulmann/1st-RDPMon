@@ -12,7 +12,6 @@ WinForms front-end for setup, monitoring, and configuration.
 | Service | `Forms/ServicePage.cs` | sc.exe lifecycle controls + 5-second IPC status refresh + recent-alerts grid with severity coloring. A dedicated "Process:" row shows the running service's PID, executable path, and start time (or `Not running` / `Not installed`), refreshed every 5 s. Start / Stop / Restart / Uninstall / Install each surface a `ServiceOperationResult` dialog containing the action name, per-step OK/FAIL, final service state, PID, executable, and a UTC timestamp. A read-only panel shows install destination, configured database path, and the sibling-distribution discovery result (Configurator → parent → `Service`). The "Install service" button calls `Services/InstallationService` so it shares logic with the Overview tab. |
 | Settings | `Forms/SettingsPage.cs` | Loads `RdpAuditOptions` via IPC (falls back to disk). Saves to `%ProgramData%\RdpAudit\appsettings.json`; the service hot-reloads via `IOptionsMonitor<T>`. |
 | Live Events | `Forms/LiveEventsPage.cs` + `Core/Events/LiveEventFilter.cs` + `Core/Events/LiveEventRowFormatter.cs` | Live tail of the most recent `RawEvent` rows fetched over `IPC.GetRecentEvents` (currently 200 rows). A filter bar above the grid combines IP / user / event-id / channel / free-text / time-range filters with AND semantics and a 350 ms debounce on text input. A per-cell right-click context menu offers `Copy Event Details` (multiline + TSV), `Copy Cell Value`, `Filter by This Value`, `Block IP in Windows Firewall and Add to Blocklist`, `Add IP to Whitelist and Unblock`, and `Add Login to Blocklist and Block IP`. Every operator action is recorded in a status strip with a UTC timestamp and per-step success/failure detail. All mutations go through IPC handlers — the page never writes to SQLite directly. |
-| Attack Statistics | `Forms/AttackStatisticsPage.cs` + `Core/Util/AttackStatsFilter.cs` + `Core/Models/AttackThreatScoring.cs` | Stage 6 of the roadmap. Operator-facing dashboard that mirrors cameyo / rdpmon connection summaries — one row per attacker IP with a deterministic `ThreatScore` and a green / yellow / red row colour. The page reads from the materialised `AttackStats` table over `GetAttackStats` (server-side filter / paging) and lets the operator pre-filter cached rows while typing. Right-click on a row offers `Copy row` (TSV), `Block IP` (routes through `AddToBlocklist` + legacy `BlockAddress`), and `Whitelist IP` (routes through `AddToWhitelist` + legacy `UnblockAddress`). Auto-refresh runs on a 5-second timer with a re-entry guard so a slow IPC round-trip never queues a backlog. |
 | Firewall | `Forms/FirewallPage.cs` + `Core/Util/AddressListFilter.cs` | Stage 5 of the roadmap. Surfaces provider status / availability (Windows / None for Stage 5; MikroTik and Both are reserved for Stage 6 and shown disabled), the auto-block policy knobs from `FirewallOptions` (auto-block toggle, threshold, default block duration as days/hours/minutes, blacklisted-login auto-block, private-address refusal), and four inner tabs (Blocklist, Whitelist, Login trip-wires, Active blocks) each with a search/filter box, validated Add / Remove buttons, and a 5-second refresh timer. Whitelisting offers a follow-up prompt to remove an installed Windows Firewall rule via `UnblockAddress`. Removing a whitelist entry never installs a new block. Login trip-wires are explicitly separate from blocklist IPs and the UI makes clear they do **not** disable local Windows accounts. Active blocks expose the full `ActiveBlocks` row shape (IP, provider, rule handle, created / expires UTC, status, reason, last error) and a confirmation-gated `Unblock selected` button that drives `UnblockActiveBlock`. Settings persistence reuses the existing `GetSettings` / `SaveSettings` IPC round-trip; the JSON document is fetched, the `Firewall` sub-tree is mutated in place, and the wrapped `{ "RdpAudit": ... }` envelope is sent back through `SaveSettings`. A status strip timestamps every action with `[HH:mm:ss Z]` and reports per-step OK / FAIL detail. |
 
 ## Service distribution discovery
@@ -99,71 +98,18 @@ No new IPC ordinals are introduced in Stage 4.
 - WinForms-specific unit tests are not feasible in CI. Document manual verification steps in the PR description.
 - The Service-side IPC tests in `RdpAudit.Service.Tests` must continue to pass after any IPC contract change.
 
-## Attack Statistics page (Stage 6)
+## Attack Statistics page (Stage 6B — deferred)
 
-`Forms/AttackStatisticsPage.cs` is the operator-facing attack dashboard. It is read-only with two
-mutation entry-points (Block IP / Whitelist IP) that reuse Stage 3 IPC; the page introduces **no
-new mutation surface** and the Configurator never writes to SQLite directly.
+The Configurator **Attack Statistics** tab is deferred to Stage 6B. Stage 6A delivers the back-end
+half of the subsystem only: the materialised `AttackStats` table, the `AttackStatsRefreshWorker`
+on a 60-second cadence, the deterministic `AttackThreatScoring` rules, and the `GetAttackStats`
+IPC command (ordinal `18`). The Stage 6A IPC contract is byte-stable and ready to be consumed by
+the Stage 6B UI without further ordinal or `[Key]` changes — see `docs/46-attack-statistics.md`
+and `docs/50-ipc.md`.
 
-### Grid columns
-
-| Column | Source | Notes |
-|--------|--------|-------|
-| IP | `AttackStatEntryDto.Ip` | Primary key on the row. |
-| Threat | `AttackStatEntryDto.ThreatScore` | Numeric `[0..100]` rendered with one decimal place. |
-| Status | `AttackStatEntryDto.ThreatLevel` | `Green` / `Yellow` / `Red`. Drives row colouring. |
-| Total | `AttackStatEntryDto.TotalAttempts` | Successful + failed. |
-| Failed | `AttackStatEntryDto.Failed` | |
-| Successful | `AttackStatEntryDto.Successful` | |
-| First seen (UTC) | `AttackStatEntryDto.FirstSeenUtc` | |
-| Last seen (UTC) | `AttackStatEntryDto.LastSeenUtc` | |
-| Duration | `AttackStatEntryDto.DurationSeconds` | `HH:MM:SS` or `Nd HH:MM:SS` for >= 1 day. |
-| Top logins | `AttackStatEntryDto.Top10AttemptedLogins` | Comma-separated, capped at 10 entries, deterministic order. |
-| Last logon type | `AttackStatEntryDto.LastLoginType` | Windows logon type captured on the most recent attempt. |
-| Blocked | `AttackStatEntryDto.IsBlocked` | `yes` when an Active / Pending `ActiveBlock` row exists. |
-
-### Row colouring
-
-| `ThreatLevel` | Row colour | Score band |
-|---------------|------------|------------|
-| Green | Soft green | `0 .. 29` |
-| Yellow | Soft yellow | `30 .. 69` |
-| Red | Soft red | `70 .. 100` |
-
-Thresholds live in `Core/Models/AttackThreatScoring.cs` and are mirrored in
-`docs/46-attack-statistics.md` plus the `AttackThreatScoringTests` suite.
-
-### Filter toolbar
-
-- **IP** — case-insensitive substring (applied both server-side via `AttackStatsRequest.IpQuery` and
-  client-side via `Core/Util/AttackStatsFilter.cs`).
-- **Min threat** — `[0..100]`, inclusive lower bound on `ThreatScore`.
-- **Only blocked** — when checked, only rows where `IsBlocked == true` are returned.
-- **Range** — `All time`, `Last 5 / 15 minutes`, `Last 1 / 24 hours`, `Last 7 days`. Anchored to
-  `LastSeenUtc`.
-- **Limit** — `[50..2000]`. The server clamps to `AttackStatsMaxLimit = 2000` regardless.
-- **Refresh** / **Auto-refresh** — Refresh forces a fresh round-trip; Auto-refresh runs the 5-second
-  timer (guarded by `Interlocked.CompareExchange` so a slow refresh never queues a backlog).
-
-### Right-click menu
-
-| Item | Enable condition | Action |
-|------|------------------|--------|
-| `Copy row` | Always | TSV of the row (IP, threat, status, totals, timestamps, top logins, last logon type, blocked) on the clipboard. |
-| `Block IP` | Row has a non-empty `IP`. | Confirmation dialog → `AddToBlocklist` (server-side whitelist precedence) + legacy `BlockAddress` (installs the Windows Firewall rule). Per-step OK / FAIL surfaced to the status strip. |
-| `Whitelist IP` | Row has a non-empty `IP`. | Confirmation dialog → `AddToWhitelist` (server-side blocklist soft-disable) + legacy `UnblockAddress` (removes the Windows Firewall rule). |
-
-Double-clicking a row copies it to the clipboard (same as `Copy row`).
-
-### Status strip
-
-Pre-stamped `[HH:mm:ss Z]` lines for every refresh and operator action. UI-thread marshalling uses
-`StatusStrip.BeginInvoke` so background continuations never touch the label directly.
-
-### IPC commands consumed
-
-- `GetAttackStats` (18) — paged / filtered listing of `AttackStatEntryDto`.
-- `AddToBlocklist` (14), `AddToWhitelist` (16) — Stage 3 mutation handlers.
-- `BlockAddress` (7), `UnblockAddress` (8) — legacy live-firewall toggles.
-
-No new IPC ordinals are introduced in Stage 6.
+Stage 6B will introduce `Forms/AttackStatisticsPage.cs` and register it on `MainForm` after the
+Firewall tab. The UI must reuse `Core/Util/AttackStatsFilter.cs` for client-side pre-filtering so
+the predicate matches the server-side `AttackStatsRequest` semantics, and must drive *only* IPC
+for both reads (`GetAttackStats`) and mutations (`AddToBlocklist` / `AddToWhitelist` /
+`BlockAddress` / `UnblockAddress`). The Configurator MUST NOT open the SQLite database directly
+for this tab.
