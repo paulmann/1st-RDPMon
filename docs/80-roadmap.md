@@ -485,6 +485,73 @@ Before Stage 7 can start:
    and MikroTik integrations land in a later stage; their abstractions must live in
    `RdpAudit.Core/` before any HTTP / REST client lands in `RdpAudit.Service/`.
 
+### Stage 7 (delivered) — Remote RDP Clients tab + shadow policy management
+
+Stage 7 delivers the operator surface for live RDP-session control and Terminal Services
+shadow-policy management. Stage 8 (AbuseIPDB / MikroTik integrations) remains deferred and is
+NOT touched by this stage.
+
+* **Backend / IPC contracts.** Eight Stage 1-reserved commands are now implemented end-to-end:
+  `ListRdpSessions` (19), `DisconnectSession` (20), `LogoffSession` (21), `ShadowSession` (22),
+  `GetShadowPolicyStatus` (23), `ApplyShadowPolicy` (24), `BackupShadowPolicy` (25),
+  `RestoreShadowPolicy` (26). MessagePack DTOs (`RdpSessionDto`, `RdpSessionListDto`,
+  `SessionActionRequest`, `SessionActionResult`, `ShadowPolicyValueDto`, `ShadowPolicyStatusDto`,
+  `ShadowPolicyApplyRequest`) use append-only integer keys.
+* **Service-side session control.** `RdpAudit.Service/Services/RdpSessionManager` shells out to
+  `qwinsta.exe`, `tsdiscon.exe` and `logoff.exe` via `ProcessStartInfo.ArgumentList` (never shell
+  concatenation). Session ids are validated against `[0, 65535]` by the pure
+  `Core/Util/SessionCommandBuilder` before any process is spawned. The Configurator's
+  `ShadowLauncher` handles `mstsc.exe /shadow:<id> [/control] [/noConsentPrompt]` because the
+  service runs under LocalSystem and cannot launch UI in the operator's desktop — but the service
+  still gates the action via its `ShadowSession` handler against the live policy.
+* **Shadow policy management.** `RdpAudit.Service/Services/ShadowPolicyManager` reads / writes
+  the tracked registry values (`HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services\Shadow`
+  and per-machine fallback) using `Microsoft.Win32.RegistryKey`. Apply / Restore always take a
+  snapshot first; the snapshots are JSON files under
+  `%ProgramData%\RdpAudit\Backups\<yyyyMMdd-HHmmss>\shadow-policy.json` so the existing backup
+  layout still works.
+* **Configurator UI.** `RdpAudit.Configurator/Forms/RemoteRdpClientsPage` lists sessions, colours
+  them by state (green = active, orange = disconnected, grey = inactive), supports filters /
+  auto-refresh, exposes the right-click menu (Disconnect / Logoff / Shadow view / Shadow +
+  control / Shadow + control NO CONSENT), and hosts the shadow-policy panel with `Enable all
+  permissions…`, `Backup`, `Restore latest…` and `Refresh policy` buttons. Every destructive or
+  policy-mutating action is confirmation-gated with the **No** button as the default.
+* **Tests.** `QwinstaParserTests` (header / current-session marker / empty input / state
+  normalisation), `SessionCommandBuilderTests` (id validation, disconnect / logoff / shadow
+  argument shapes), `ShadowPolicyModelTests` (value classification, mode-vs-policy predicate,
+  preset constant), `IpcDispatcherStage7Tests` (per-command validation + controlled error paths).
+  All existing tests still pass.
+* **Docs.** `docs/30-configurator.md` Remote RDP Clients tab row, `docs/47-remote-rdp-clients.md`
+  surface map and command semantics, `docs/50-ipc.md` Stage 7 section and the Stage 7 IPC
+  semantics list, this roadmap entry.
+
+Configuration surface: existing `RdpAuditOptions.SessionControl` (`Enabled`, `AllowDisconnect`,
+`AllowLogoff`, `AllowShadow`, `RequireShadowPolicy`, `BackupShadowPolicyOnApply`,
+`ShadowPolicyMode`) is now actually consumed by the IPC handlers. Defaults remain safe:
+shadowing is OFF (`AllowShadow = false`), disconnect / logoff are ON, and policy backups are ON.
+
+Deferred to Stage 8+ (explicitly NOT in Stage 7):
+
+* AbuseIPDB page and HTTP client.
+* MikroTik page and REST client.
+* Cross-tab filter linking between Attack Statistics / Remote RDP Clients and Live Events.
+
+### Stage 8 prerequisites
+
+Before Stage 8 can start:
+
+1. **Windows manual validation of Stage 7.** Sessions must enumerate within one 5-second refresh
+   cycle; disconnect / logoff / shadow flows must round-trip end-to-end against a live RDP
+   session. The shadow-policy backup file must appear in the timestamped snapshot directory
+   alongside the existing registry / audit-policy backups, and Restore must return the pre-Apply
+   state. See the validation checklist in `docs/47-remote-rdp-clients.md`.
+2. **Stage 8 IPC reservation.** Ordinals 27..30 remain reserved for AbuseIPDB / MikroTik
+   provider commands (`GetAbuseIpDbStatus`, `TestAbuseIpDbKey`, `GetMikroTikStatus`,
+   `TestMikroTik`). Ordinals 38+ remain free for future allocations.
+3. **Provider abstractions.** A reputation-provider abstraction (`IReputationProvider` or
+   similar) must live in `RdpAudit.Core/` before any HTTP client lands in `RdpAudit.Service/`.
+   The Stage 5 `IFirewallProvider` pattern is the reference template.
+
 ## LLM-safe extension rules
 
 When implementing later stages:

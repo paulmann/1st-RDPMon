@@ -37,6 +37,8 @@ public sealed class IpcDispatcher
 	private readonly FirewallManager _firewall;
 	private readonly IEnumerable<IFirewallProvider> _providers;
 	private readonly ILogger<IpcDispatcher> _logger;
+	private readonly RdpSessionManager? _sessions;
+	private readonly ShadowPolicyManager? _shadow;
 
 	public IpcDispatcher(
 		IDbContextFactory<AuditDbContext> factory,
@@ -45,7 +47,9 @@ public sealed class IpcDispatcher
 		SettingsManager settings,
 		FirewallManager firewall,
 		IEnumerable<IFirewallProvider> providers,
-		ILogger<IpcDispatcher> logger)
+		ILogger<IpcDispatcher> logger,
+		RdpSessionManager? sessions = null,
+		ShadowPolicyManager? shadow = null)
 	{
 		_factory = factory;
 		_metrics = metrics;
@@ -54,6 +58,8 @@ public sealed class IpcDispatcher
 		_firewall = firewall;
 		_providers = providers;
 		_logger = logger;
+		_sessions = sessions;
+		_shadow = shadow;
 	}
 
 	public async Task<IpcResponse> DispatchAsync(IpcRequest request, CancellationToken ct)
@@ -95,16 +101,18 @@ public sealed class IpcDispatcher
 				// --- Stage 6 handlers (Attack Statistics tab). ---
 				IpcCommand.GetAttackStats => await GetAttackStatsAsync(request.Payload, ct).ConfigureAwait(false),
 
+				// --- Stage 7 handlers (Remote RDP Clients tab). ---
+				IpcCommand.ListRdpSessions => await ListRdpSessionsAsync(ct).ConfigureAwait(false),
+				IpcCommand.DisconnectSession => await DisconnectSessionAsync(request.Payload, ct).ConfigureAwait(false),
+				IpcCommand.LogoffSession => await LogoffSessionAsync(request.Payload, ct).ConfigureAwait(false),
+				IpcCommand.ShadowSession => ShadowSessionPolicyCheck(request.Payload),
+				IpcCommand.GetShadowPolicyStatus => GetShadowPolicyStatusHandler(),
+				IpcCommand.ApplyShadowPolicy => ApplyShadowPolicyHandler(request.Payload),
+				IpcCommand.BackupShadowPolicy => BackupShadowPolicyHandler(),
+				IpcCommand.RestoreShadowPolicy => RestoreShadowPolicyHandler(request.Payload),
+
 				// --- Reserved Stage 1 commands still awaiting later-stage implementations. ---
-				IpcCommand.ListRdpSessions
-					or IpcCommand.DisconnectSession
-					or IpcCommand.LogoffSession
-					or IpcCommand.ShadowSession
-					or IpcCommand.GetShadowPolicyStatus
-					or IpcCommand.ApplyShadowPolicy
-					or IpcCommand.BackupShadowPolicy
-					or IpcCommand.RestoreShadowPolicy
-					or IpcCommand.GetAbuseIpDbStatus
+				IpcCommand.GetAbuseIpDbStatus
 					or IpcCommand.TestAbuseIpDbKey
 					or IpcCommand.GetMikroTikStatus
 					or IpcCommand.TestMikroTik => NotImplementedResult(request.Command),
@@ -958,6 +966,314 @@ public sealed class IpcDispatcher
 		catch (JsonException ex)
 		{
 			throw new IpcException("GetAttackStats payload is not valid JSON: " + ex.Message);
+		}
+	}
+
+	// ----------------------------------------------------------------------------------------------
+	// Stage 7 handlers — Remote RDP Clients tab.
+	// ----------------------------------------------------------------------------------------------
+
+	private async Task<object?> ListRdpSessionsAsync(CancellationToken ct)
+	{
+		if (!OperatingSystem.IsWindows() || _sessions is null)
+		{
+			return new RdpSessionListDto
+			{
+				Status = IpcResultStatus.Unavailable,
+				Message = "Session enumeration is only available on Windows hosts.",
+				QueriedUtc = DateTime.UtcNow,
+			};
+		}
+
+		RdpSessionListDto list = await _sessions.ListAsync(ct).ConfigureAwait(false);
+
+		// Best-effort source IP correlation from the RawEvents table for active sessions.
+		if (list.Sessions.Count > 0)
+		{
+			await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+			DateTime cutoff = DateTime.UtcNow - TimeSpan.FromDays(1);
+			Dictionary<string, string> userToIp = new(StringComparer.OrdinalIgnoreCase);
+			List<(string User, string? Ip)> recent = await db.RawEvents
+				.AsNoTracking()
+				.Where(e => e.TimeUtc >= cutoff && e.UserName != null && e.SourceIp != null && e.SourceIp != string.Empty)
+				.OrderByDescending(e => e.TimeUtc)
+				.Take(2000)
+				.Select(e => new ValueTuple<string, string?>(e.UserName!, e.SourceIp))
+				.ToListAsync(ct).ConfigureAwait(false);
+			foreach ((string user, string? ip) in recent)
+			{
+				if (!string.IsNullOrEmpty(ip) && !userToIp.ContainsKey(user))
+				{
+					userToIp[user] = ip!;
+				}
+			}
+
+			foreach (RdpSessionDto session in list.Sessions)
+			{
+				if (string.IsNullOrEmpty(session.ClientAddress)
+					&& !string.IsNullOrEmpty(session.UserName)
+					&& userToIp.TryGetValue(session.UserName, out string? ip))
+				{
+					session.ClientAddress = ip;
+				}
+			}
+		}
+
+		return list;
+	}
+
+	private async Task<object?> DisconnectSessionAsync(string? payload, CancellationToken ct)
+	{
+		SessionActionRequest req = DeserializeSessionRequest(payload, "DisconnectSession");
+		if (!OperatingSystem.IsWindows() || _sessions is null)
+		{
+			return new SessionActionResult
+			{
+				Status = IpcResultStatus.Unavailable,
+				SessionId = req.SessionId,
+				Message = "Session control is only available on Windows hosts.",
+			};
+		}
+
+		if (!_options.CurrentValue.SessionControl.Enabled || !_options.CurrentValue.SessionControl.AllowDisconnect)
+		{
+			return new SessionActionResult
+			{
+				Status = IpcResultStatus.Refused,
+				SessionId = req.SessionId,
+				Message = "Disconnect is disabled by SessionControl policy.",
+			};
+		}
+
+		_logger.LogInformation("Operator-issued disconnect for session {Id} reason='{Reason}'",
+			req.SessionId, req.Reason ?? string.Empty);
+		return await _sessions.DisconnectAsync(req.SessionId, ct).ConfigureAwait(false);
+	}
+
+	private async Task<object?> LogoffSessionAsync(string? payload, CancellationToken ct)
+	{
+		SessionActionRequest req = DeserializeSessionRequest(payload, "LogoffSession");
+		if (!OperatingSystem.IsWindows() || _sessions is null)
+		{
+			return new SessionActionResult
+			{
+				Status = IpcResultStatus.Unavailable,
+				SessionId = req.SessionId,
+				Message = "Session control is only available on Windows hosts.",
+			};
+		}
+
+		if (!_options.CurrentValue.SessionControl.Enabled || !_options.CurrentValue.SessionControl.AllowLogoff)
+		{
+			return new SessionActionResult
+			{
+				Status = IpcResultStatus.Refused,
+				SessionId = req.SessionId,
+				Message = "Logoff is disabled by SessionControl policy.",
+			};
+		}
+
+		_logger.LogInformation("Operator-issued logoff for session {Id} reason='{Reason}'",
+			req.SessionId, req.Reason ?? string.Empty);
+		return await _sessions.LogoffAsync(req.SessionId, ct).ConfigureAwait(false);
+	}
+
+	/// <summary>The actual <c>mstsc.exe /shadow</c> spawn must happen in the operator's interactive
+	/// desktop session — the service runs under LocalSystem and cannot launch interactive UI. This
+	/// handler therefore only enforces policy and returns a Success/Refused result; the Configurator
+	/// is responsible for spawning mstsc with sanitized arguments built by the same Core helper.</summary>
+	private SessionActionResult ShadowSessionPolicyCheck(string? payload)
+	{
+		SessionActionRequest req = DeserializeSessionRequest(payload, "ShadowSession");
+		if (!OperatingSystem.IsWindows())
+		{
+			return new SessionActionResult
+			{
+				Status = IpcResultStatus.Unavailable,
+				SessionId = req.SessionId,
+				Message = "Shadow is only available on Windows hosts.",
+			};
+		}
+
+		SessionControlOptions cfg = _options.CurrentValue.SessionControl;
+		if (!cfg.Enabled || !cfg.AllowShadow)
+		{
+			return new SessionActionResult
+			{
+				Status = IpcResultStatus.Refused,
+				SessionId = req.SessionId,
+				Message = "Shadow is disabled by SessionControl policy.",
+			};
+		}
+
+		SessionIdValidation v = SessionCommandBuilder.ValidateSessionId(req.SessionId);
+		if (!v.Ok)
+		{
+			return new SessionActionResult
+			{
+				Status = IpcResultStatus.InvalidRequest,
+				SessionId = req.SessionId,
+				Message = v.Error,
+			};
+		}
+
+		if (cfg.RequireShadowPolicy && _shadow is not null)
+		{
+			ShadowPolicyStatusDto status = _shadow.GetStatus();
+			ShadowPolicyMode policy = ShadowPolicyModel.FromRawValue(status.ShadowMode);
+			SessionCommandBuilder.ShadowMode requested = req.ShadowMode switch
+			{
+				1 => SessionCommandBuilder.ShadowMode.Control,
+				2 => SessionCommandBuilder.ShadowMode.ControlNoConsent,
+				_ => SessionCommandBuilder.ShadowMode.ViewOnly,
+			};
+			if (!ShadowPolicyModel.AllowsMode(policy, requested))
+			{
+				return new SessionActionResult
+				{
+					Status = IpcResultStatus.Refused,
+					SessionId = req.SessionId,
+					Message = string.Format(CultureInfo.InvariantCulture,
+						"Shadow {0} refused — current policy '{1}' does not permit it. Use Apply Shadow Policy first.",
+						requested, ShadowPolicyModel.Describe(policy)),
+				};
+			}
+		}
+
+		_logger.LogInformation("Operator-approved shadow request for session {Id} mode={Mode} reason='{Reason}'",
+			req.SessionId, req.ShadowMode, req.Reason ?? string.Empty);
+		return new SessionActionResult
+		{
+			Status = IpcResultStatus.Success,
+			SessionId = req.SessionId,
+			Message = "Shadow request approved by policy. Configurator must launch mstsc in the operator's desktop.",
+		};
+	}
+
+	private ShadowPolicyStatusDto GetShadowPolicyStatusHandler()
+	{
+		if (!OperatingSystem.IsWindows() || _shadow is null)
+		{
+			return new ShadowPolicyStatusDto
+			{
+				Status = IpcResultStatus.Unavailable,
+				Message = "Shadow policy management is only available on Windows hosts.",
+			};
+		}
+
+		return _shadow.GetStatus();
+	}
+
+	private ShadowPolicyStatusDto ApplyShadowPolicyHandler(string? payload)
+	{
+		if (!OperatingSystem.IsWindows() || _shadow is null)
+		{
+			return new ShadowPolicyStatusDto
+			{
+				Status = IpcResultStatus.Unavailable,
+				Message = "Shadow policy management is only available on Windows hosts.",
+			};
+		}
+
+		ShadowPolicyApplyRequest req = DeserializeApplyRequest(payload);
+		_logger.LogInformation(
+			"Operator-issued ApplyShadowPolicy mode={Mode} enableAll={Enable} backup={Backup} reason='{Reason}'",
+			req.ShadowMode, req.EnableAllPermissions, req.TakeBackupFirst, req.Reason ?? string.Empty);
+		return _shadow.Apply(req);
+	}
+
+	private ShadowPolicyStatusDto BackupShadowPolicyHandler()
+	{
+		if (!OperatingSystem.IsWindows() || _shadow is null)
+		{
+			return new ShadowPolicyStatusDto
+			{
+				Status = IpcResultStatus.Unavailable,
+				Message = "Shadow policy management is only available on Windows hosts.",
+			};
+		}
+
+		_logger.LogInformation("Operator-issued BackupShadowPolicy");
+		return _shadow.Backup();
+	}
+
+	private ShadowPolicyStatusDto RestoreShadowPolicyHandler(string? payload)
+	{
+		if (!OperatingSystem.IsWindows() || _shadow is null)
+		{
+			return new ShadowPolicyStatusDto
+			{
+				Status = IpcResultStatus.Unavailable,
+				Message = "Shadow policy management is only available on Windows hosts.",
+			};
+		}
+
+		string? snapshotId = null;
+		if (!string.IsNullOrWhiteSpace(payload))
+		{
+			try
+			{
+				snapshotId = JsonSerializer.Deserialize<string>(payload, JsonOptions.Default);
+			}
+			catch (JsonException ex)
+			{
+				throw new IpcException("RestoreShadowPolicy payload is not a valid JSON string: " + ex.Message);
+			}
+		}
+
+		_logger.LogInformation("Operator-issued RestoreShadowPolicy snapshot='{Snapshot}'", snapshotId ?? string.Empty);
+		return _shadow.Restore(snapshotId);
+	}
+
+	private static SessionActionRequest DeserializeSessionRequest(string? payload, string commandName)
+	{
+		if (string.IsNullOrWhiteSpace(payload))
+		{
+			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
+				"{0} requires a JSON payload with the SessionId.", commandName));
+		}
+
+		SessionActionRequest? parsed;
+		try
+		{
+			parsed = JsonSerializer.Deserialize<SessionActionRequest>(payload, JsonOptions.Default);
+		}
+		catch (JsonException ex)
+		{
+			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
+				"{0} payload is not valid JSON: {1}", commandName, ex.Message));
+		}
+
+		if (parsed is null)
+		{
+			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
+				"{0} payload could not be parsed.", commandName));
+		}
+
+		SessionIdValidation v = SessionCommandBuilder.ValidateSessionId(parsed.SessionId);
+		if (!v.Ok)
+		{
+			throw new IpcException(v.Error ?? "Invalid SessionId.");
+		}
+
+		return parsed;
+	}
+
+	private static ShadowPolicyApplyRequest DeserializeApplyRequest(string? payload)
+	{
+		if (string.IsNullOrWhiteSpace(payload))
+		{
+			return new ShadowPolicyApplyRequest();
+		}
+
+		try
+		{
+			ShadowPolicyApplyRequest? parsed = JsonSerializer.Deserialize<ShadowPolicyApplyRequest>(payload, JsonOptions.Default);
+			return parsed ?? new ShadowPolicyApplyRequest();
+		}
+		catch (JsonException ex)
+		{
+			throw new IpcException("ApplyShadowPolicy payload is not valid JSON: " + ex.Message);
 		}
 	}
 

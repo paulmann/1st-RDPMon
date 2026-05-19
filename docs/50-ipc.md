@@ -77,18 +77,33 @@ Stage 6A implemented commands (backend aggregation + IPC; the Configurator Attac
 |---------|---------|-----------|---------|---------|
 | `GetAttackStats` | 18 | C→S | `AttackStatsRequest` (optional) | `AttackStatsDto` (includes `Entries`, `TotalMatching`, `AppliedLimit`; see `docs/46-attack-statistics.md`) |
 
+Stage 7 implemented commands (Remote RDP Clients tab in the Configurator drives these):
+
+| Command | Ordinal | Direction | Payload | Returns |
+|---------|---------|-----------|---------|---------|
+| `ListRdpSessions` | 19 | C→S | – | `RdpSessionListDto` (`{ Status, Sessions[], Message, QueriedUtc }`) |
+| `DisconnectSession` | 20 | C→S | `SessionActionRequest` | `SessionActionResult` |
+| `LogoffSession` | 21 | C→S | `SessionActionRequest` | `SessionActionResult` |
+| `ShadowSession` | 22 | C→S | `SessionActionRequest` (carries `ShadowMode`: 0=ViewOnly, 1=Control, 2=ControlNoConsent) | `SessionActionResult` (policy approval only — Configurator launches mstsc itself) |
+| `GetShadowPolicyStatus` | 23 | C→S | – | `ShadowPolicyStatusDto` |
+| `ApplyShadowPolicy` | 24 | C→S | `ShadowPolicyApplyRequest` | `ShadowPolicyStatusDto` |
+| `BackupShadowPolicy` | 25 | C→S | – | `ShadowPolicyStatusDto` |
+| `RestoreShadowPolicy` | 26 | C→S | `string` (optional snapshot id; null = use latest) | `ShadowPolicyStatusDto` |
+
+Stage 7 IPC semantics:
+
+* `ListRdpSessions` runs `qwinsta.exe` via `ProcessStartInfo.ArgumentList` and parses the output with the pure `Core/Util/QwinstaParser`. Each row carries `IsActive`, `IsDisconnected` and `IsCurrent` so the UI can pick a colour and glyph without re-parsing the state string. The handler best-effort backfills `ClientAddress` from recent `RawEvents` rows when qwinsta does not surface it.
+* `DisconnectSession` / `LogoffSession` validate the session id (`>= 0`, `<= 65535`) and refuse the request when `SessionControlOptions.AllowDisconnect` / `AllowLogoff` is false. Output is captured (stdout/stderr/exit code) and the resulting `SessionActionResult` always carries a stable `IpcResultStatus` enum value.
+* `ShadowSession` is approval-only: the service refuses when `AllowShadow` is false, when the session id is invalid, or when `RequireShadowPolicy = true` and the current `Shadow` value does not permit the requested mode (`ShadowPolicyModel.AllowsMode`). On approval the Configurator spawns `mstsc.exe /shadow:<id> [/control] [/noConsentPrompt]` through `Configurator/Services/ShadowLauncher`, because the service runs under LocalSystem and cannot launch UI in the operator's desktop.
+* `GetShadowPolicyStatus` reads the tracked registry values (`HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services\Shadow` and per-machine fallback) without writing anything and reports `HasBackup` + `LatestSnapshotId`.
+* `ApplyShadowPolicy` accepts a desired `ShadowMode` (0..4) or the `EnableAllPermissions` preset (full control with no consent prompt = value 2). It writes the value under the group-policy key only; the per-machine value is left intact so group-policy refresh continues to work normally. `TakeBackupFirst = true` (default) captures the current state into a fresh snapshot directory before mutating the registry.
+* `BackupShadowPolicy` captures every tracked registry value into `%ProgramData%\RdpAudit\Backups\<yyyyMMdd-HHmmss>\shadow-policy.json`. The snapshot directory layout matches `BackupRunner` so the global backup workflow can include the shadow policy in the same folder hierarchy.
+* `RestoreShadowPolicy` accepts an optional snapshot id (or null = latest). Missing values in the snapshot are deleted from the registry on restore, exactly mirroring the captured pre-change state.
+
 Reserved Stage 1 commands still pending later stages:
 
 | Command | Ordinal | Direction | Payload | Returns |
 |---------|---------|-----------|---------|---------|
-| `ListRdpSessions` | 19 | C→S | – | `RdpSessionDto[]` |
-| `DisconnectSession` | 20 | C→S | `SessionActionRequest` | `SessionActionResult` |
-| `LogoffSession` | 21 | C→S | `SessionActionRequest` | `SessionActionResult` |
-| `ShadowSession` | 22 | C→S | `SessionActionRequest` | `SessionActionResult` |
-| `GetShadowPolicyStatus` | 23 | C→S | – | `ShadowPolicyStatusDto` |
-| `ApplyShadowPolicy` | 24 | C→S | – | `ShadowPolicyStatusDto` |
-| `BackupShadowPolicy` | 25 | C→S | – | `ShadowPolicyStatusDto` |
-| `RestoreShadowPolicy` | 26 | C→S | – | `ShadowPolicyStatusDto` |
 | `GetAbuseIpDbStatus` | 27 | C→S | – | `ProviderStatusDto` |
 | `TestAbuseIpDbKey` | 28 | C→S | – | `ProviderTestResult` |
 | `GetMikroTikStatus` | 29 | C→S | – | `ProviderStatusDto` |

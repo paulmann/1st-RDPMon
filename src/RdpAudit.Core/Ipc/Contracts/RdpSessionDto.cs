@@ -37,4 +37,37 @@ public sealed class RdpSessionDto
 
 	[Key(7)]
 	public DateTime? LastInputTimeUtc { get; set; }
+
+	/// <summary>Station / WinStation name reported by qwinsta (e.g. "rdp-tcp#3", "console").</summary>
+	[Key(8)]
+	public string? SessionName { get; set; }
+
+	/// <summary>True when this row corresponds to the session the query was issued from.</summary>
+	[Key(9)]
+	public bool IsCurrent { get; set; }
+
+	/// <summary>True when the session row is currently in an active connected state.</summary>
+	[Key(10)]
+	public bool IsActive { get; set; }
+
+	/// <summary>True when the session is in a disconnected state and may be reconnected.</summary>
+	[Key(11)]
+	public bool IsDisconnected { get; set; }
+}
+
+/// <summary>List wrapper for <c>ListRdpSessions</c> so the response carries an operation status.</summary>
+[MessagePackObject(keyAsPropertyName: false)]
+public sealed class RdpSessionListDto
+{
+	[Key(0)]
+	public IpcResultStatus Status { get; set; } = IpcResultStatus.Success;
+
+	[Key(1)]
+	public List<RdpSessionDto> Sessions { get; set; } = new();
+
+	[Key(2)]
+	public string? Message { get; set; }
+
+	[Key(3)]
+	public DateTime QueriedUtc { get; set; }
 }
