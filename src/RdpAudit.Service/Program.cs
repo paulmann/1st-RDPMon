@@ -13,11 +13,13 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using RdpAudit.Core.AbuseIpDb;
 using RdpAudit.Core.Config;
 using RdpAudit.Core.Data;
 using RdpAudit.Core.Events;
 using RdpAudit.Core.Firewall;
 using RdpAudit.Core.Security;
+using RdpAudit.Service.AbuseIpDb;
 using RdpAudit.Service.Alerts;
 using RdpAudit.Service.Collectors;
 using RdpAudit.Service.Firewall;
@@ -151,6 +153,9 @@ public static class Program
 			services.AddSingleton<RdpSessionManager>();
 			services.AddSingleton<ShadowPolicyManager>();
 		}
+		services.AddHttpClient("AbuseIpDb");
+		services.AddSingleton<IAbuseIpDbClient, AbuseIpDbClient>();
+
 		services.AddScoped<IpcDispatcher>();
 
 		AlertRuleRegistration.Register(services);
@@ -163,6 +168,7 @@ public static class Program
 		services.AddHostedService<FirewallAutoBlockWorker>();
 		services.AddHostedService<FirewallExpirationWorker>();
 		services.AddHostedService<AttackStatsRefreshWorker>();
+		services.AddHostedService<AbuseIpDbReportWorker>();
 	}
 
 	private static ISecretProtector CreateSecretProtector()

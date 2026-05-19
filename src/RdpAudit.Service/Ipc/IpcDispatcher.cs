@@ -16,12 +16,14 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using RdpAudit.Core.AbuseIpDb;
 using RdpAudit.Core.Config;
 using RdpAudit.Core.Data;
 using RdpAudit.Core.Firewall;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
 using RdpAudit.Core.Models;
+using RdpAudit.Core.Security;
 using RdpAudit.Core.Util;
 using RdpAudit.Service.Services;
 
@@ -39,6 +41,8 @@ public sealed class IpcDispatcher
 	private readonly ILogger<IpcDispatcher> _logger;
 	private readonly RdpSessionManager? _sessions;
 	private readonly ShadowPolicyManager? _shadow;
+	private readonly IAbuseIpDbClient? _abuseClient;
+	private readonly ISecretProtector? _protector;
 
 	public IpcDispatcher(
 		IDbContextFactory<AuditDbContext> factory,
@@ -49,7 +53,9 @@ public sealed class IpcDispatcher
 		IEnumerable<IFirewallProvider> providers,
 		ILogger<IpcDispatcher> logger,
 		RdpSessionManager? sessions = null,
-		ShadowPolicyManager? shadow = null)
+		ShadowPolicyManager? shadow = null,
+		IAbuseIpDbClient? abuseClient = null,
+		ISecretProtector? protector = null)
 	{
 		_factory = factory;
 		_metrics = metrics;
@@ -60,6 +66,8 @@ public sealed class IpcDispatcher
 		_logger = logger;
 		_sessions = sessions;
 		_shadow = shadow;
+		_abuseClient = abuseClient;
+		_protector = protector;
 	}
 
 	public async Task<IpcResponse> DispatchAsync(IpcRequest request, CancellationToken ct)
@@ -77,7 +85,7 @@ public sealed class IpcDispatcher
 				IpcCommand.AcknowledgeAlert => await AcknowledgeAsync(request.Payload, ct).ConfigureAwait(false),
 				IpcCommand.BlockAddress => await BlockAddressAsync(request.Payload, true, ct).ConfigureAwait(false),
 				IpcCommand.UnblockAddress => await BlockAddressAsync(request.Payload, false, ct).ConfigureAwait(false),
-				IpcCommand.GetSettings => _options.CurrentValue,
+				IpcCommand.GetSettings => GetMaskedSettings(),
 				IpcCommand.SaveSettings => SaveSettings(request.Payload),
 
 				// --- Stage 3 handlers (backend-only). UI is deferred to a later stage. ---
@@ -111,10 +119,12 @@ public sealed class IpcDispatcher
 				IpcCommand.BackupShadowPolicy => BackupShadowPolicyHandler(),
 				IpcCommand.RestoreShadowPolicy => RestoreShadowPolicyHandler(request.Payload),
 
+				// --- Stage 8 handlers (AbuseIPDB integration). ---
+				IpcCommand.GetAbuseIpDbStatus => await GetAbuseIpDbStatusAsync(ct).ConfigureAwait(false),
+				IpcCommand.TestAbuseIpDbKey => await TestAbuseIpDbKeyAsync(ct).ConfigureAwait(false),
+
 				// --- Reserved Stage 1 commands still awaiting later-stage implementations. ---
-				IpcCommand.GetAbuseIpDbStatus
-					or IpcCommand.TestAbuseIpDbKey
-					or IpcCommand.GetMikroTikStatus
+				IpcCommand.GetMikroTikStatus
 					or IpcCommand.TestMikroTik => NotImplementedResult(request.Command),
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
@@ -1275,6 +1285,220 @@ public sealed class IpcDispatcher
 		{
 			throw new IpcException("ApplyShadowPolicy payload is not valid JSON: " + ex.Message);
 		}
+	}
+
+	// ----------------------------------------------------------------------------------------------
+
+	/// <summary>Returns a copy of the current settings with every secret field masked.</summary>
+	private RdpAuditOptions GetMaskedSettings()
+	{
+		RdpAuditOptions src = _options.CurrentValue;
+		RdpAuditOptions copy = new()
+		{
+			Monitoring = src.Monitoring,
+			Alerts = src.Alerts,
+			Firewall = src.Firewall,
+			Storage = src.Storage,
+			Diagnostics = src.Diagnostics,
+			SessionControl = src.SessionControl,
+			AbuseIpDb = CloneAbuse(src.AbuseIpDb),
+			MikroTik = CloneMikroTik(src.MikroTik),
+		};
+		copy.AbuseIpDb.ApiKey = MaskSecret(src.AbuseIpDb.ApiKey);
+		copy.MikroTik.Password = MaskSecret(src.MikroTik.Password);
+		return copy;
+	}
+
+	private static AbuseIpDbOptions CloneAbuse(AbuseIpDbOptions src) => new()
+	{
+		Enabled = src.Enabled,
+		ReportAttacks = src.ReportAttacks,
+		ApiKey = src.ApiKey,
+		BaseUrl = src.BaseUrl,
+		EndpointUrl = src.EndpointUrl,
+		TimeoutSeconds = src.TimeoutSeconds,
+		MaxReportsPerMinute = src.MaxReportsPerMinute,
+		MaxReportsPerHour = src.MaxReportsPerHour,
+		MaxReportsPerDay = src.MaxReportsPerDay,
+		DeduplicationWindowMinutes = src.DeduplicationWindowMinutes,
+		CacheLookups = src.CacheLookups,
+		CacheTtlMinutes = src.CacheTtlMinutes,
+		ReportThreshold = src.ReportThreshold,
+		MinThreatScore = src.MinThreatScore,
+		MinFailedAttempts = src.MinFailedAttempts,
+		ReportCategories = new List<int>(src.ReportCategories),
+	};
+
+	private static MikroTikOptions CloneMikroTik(MikroTikOptions src) => new()
+	{
+		Enabled = src.Enabled,
+		BaseUrl = src.BaseUrl,
+		UserName = src.UserName,
+		Password = src.Password,
+		TimeoutSeconds = src.TimeoutSeconds,
+		AddressList = src.AddressList,
+		CommentTemplate = src.CommentTemplate,
+		ValidateServerCertificate = src.ValidateServerCertificate,
+		MaxOperationsPerMinute = src.MaxOperationsPerMinute,
+	};
+
+	private static string MaskSecret(string raw)
+	{
+		if (string.IsNullOrWhiteSpace(raw))
+		{
+			return string.Empty;
+		}
+		// Never echo the protected envelope or the plaintext. Just signal that a value is set.
+		return "***configured***";
+	}
+
+	// ----------------------------------------------------------------------------------------------
+	// Stage 8 handlers — AbuseIPDB integration.
+	// ----------------------------------------------------------------------------------------------
+
+	private async Task<object?> GetAbuseIpDbStatusAsync(CancellationToken ct)
+	{
+		AbuseIpDbOptions opts = _options.CurrentValue.AbuseIpDb;
+		AbuseIpDbStatusDto dto = new()
+		{
+			Status = IpcResultStatus.Success,
+			CredentialPresent = !string.IsNullOrWhiteSpace(opts.ApiKey),
+			ReportingEnabled = opts.Enabled && opts.ReportAttacks,
+			EndpointUrl = string.IsNullOrWhiteSpace(opts.EndpointUrl)
+				? "https://api.abuseipdb.com/api/v2/report"
+				: opts.EndpointUrl,
+			DeduplicationWindowMinutes = Math.Max(15, opts.DeduplicationWindowMinutes),
+			MaxReportsPerHour = Math.Max(1, opts.MaxReportsPerHour),
+			MaxReportsPerDay = Math.Max(1, opts.MaxReportsPerDay),
+		};
+
+		try
+		{
+			await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+			DateTime nowUtc = DateTime.UtcNow;
+
+			dto.TotalReports = await db.AbuseReports.AsNoTracking().LongCountAsync(ct).ConfigureAwait(false);
+			dto.ReportsLastHour = await db.AbuseReports.AsNoTracking()
+				.LongCountAsync(r => r.ReportedUtc >= nowUtc.AddHours(-1), ct).ConfigureAwait(false);
+			dto.ReportsLastDay = await db.AbuseReports.AsNoTracking()
+				.LongCountAsync(r => r.ReportedUtc >= nowUtc.AddDays(-1), ct).ConfigureAwait(false);
+
+			AbuseReport? last = await db.AbuseReports.AsNoTracking()
+				.OrderByDescending(r => r.ReportedUtc)
+				.FirstOrDefaultAsync(ct)
+				.ConfigureAwait(false);
+			if (last is not null)
+			{
+				dto.LastResponseCode = last.ResponseCode;
+				dto.LastReportUtc = last.ReportedUtc;
+				dto.LastReportedIp = last.Ip;
+				if (!string.IsNullOrEmpty(last.Error))
+				{
+					dto.LastError = last.Error;
+				}
+			}
+
+			dto.RateLimited = dto.ReportsLastHour >= dto.MaxReportsPerHour
+				|| dto.ReportsLastDay >= dto.MaxReportsPerDay;
+
+			dto.Message = string.Format(CultureInfo.InvariantCulture,
+				"AbuseIPDB status: enabled={0} reportAttacks={1} credential={2} lastHour={3} lastDay={4}",
+				opts.Enabled,
+				opts.ReportAttacks,
+				dto.CredentialPresent ? "configured" : "missing",
+				dto.ReportsLastHour,
+				dto.ReportsLastDay);
+		}
+		catch (OperationCanceledException) when (ct.IsCancellationRequested)
+		{
+			throw;
+		}
+		catch (Exception ex)
+		{
+			_logger.LogWarning(ex, "GetAbuseIpDbStatus database lookup failed");
+			dto.Status = IpcResultStatus.Unavailable;
+			dto.Message = "AbuseIPDB status: database lookup failed.";
+		}
+
+		return dto;
+	}
+
+	private async Task<object?> TestAbuseIpDbKeyAsync(CancellationToken ct)
+	{
+		AbuseIpDbOptions opts = _options.CurrentValue.AbuseIpDb;
+		AbuseIpDbTestResult result = new();
+
+		if (string.IsNullOrWhiteSpace(opts.ApiKey))
+		{
+			result.Status = IpcResultStatus.InvalidRequest;
+			result.KeyFormatValid = false;
+			result.RemoteVerified = false;
+			result.ResponseCode = 0;
+			result.Message = "No API key configured.";
+			return result;
+		}
+
+		string? plaintext = null;
+		if (_protector is not null)
+		{
+			try
+			{
+				plaintext = _protector.Unprotect(opts.ApiKey);
+			}
+			catch (SecretProtectionException)
+			{
+				plaintext = null;
+			}
+		}
+		else
+		{
+			plaintext = opts.ApiKey;
+		}
+
+		bool formatOk = AbuseIpDbApiKeyValidator.IsLikelyValid(plaintext);
+		result.KeyFormatValid = formatOk;
+
+		if (!formatOk)
+		{
+			result.Status = IpcResultStatus.Refused;
+			result.Message = "Key format check failed.";
+			return result;
+		}
+
+		if (_abuseClient is null)
+		{
+			result.Status = IpcResultStatus.Unavailable;
+			result.Message = "AbuseIPDB client is not registered on this host.";
+			return result;
+		}
+
+		AbuseIpDbReportResult probe = await _abuseClient.ValidateKeyAsync(ct).ConfigureAwait(false);
+		result.ResponseCode = probe.ResponseCode;
+		result.Message = probe.Message;
+		switch (probe.Outcome)
+		{
+			case AbuseIpDbReportOutcome.Accepted:
+				result.RemoteVerified = true;
+				result.Status = IpcResultStatus.Success;
+				break;
+			case AbuseIpDbReportOutcome.Rejected:
+				result.RemoteVerified = false;
+				result.Status = IpcResultStatus.Refused;
+				break;
+			case AbuseIpDbReportOutcome.RateLimited:
+				result.RemoteVerified = false;
+				result.Status = IpcResultStatus.Unavailable;
+				break;
+			case AbuseIpDbReportOutcome.NotConfigured:
+				result.RemoteVerified = false;
+				result.Status = IpcResultStatus.InvalidRequest;
+				break;
+			default:
+				result.RemoteVerified = false;
+				result.Status = IpcResultStatus.Unavailable;
+				break;
+		}
+		return result;
 	}
 
 	// ----------------------------------------------------------------------------------------------
