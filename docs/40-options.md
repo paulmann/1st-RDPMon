@@ -31,6 +31,9 @@ Backward-compatible with pre-Stage-1 deployments — new fields default to safe 
 | `InstantBlockLogins` | `[]` | User names (e.g. `guest`, `admin`) whose successful logon triggers an immediate block of the source IP. |
 | `DefaultBlockDurationMinutes` | `0` | `0` or negative means permanent until manually removed. |
 | `MaxActiveBlocks` | `10000` | Guardrail against rule-table flooding. |
+| `WhitelistIps` | `[]` | Flat list of literal IPs in addition to `Whitelist` (CIDR entries). Consumed by the auto-block worker. |
+| `RefusePrivateAddressBlock` | `true` | Windows provider refuses to block loopback / RFC1918 / multicast / link-local addresses. |
+| `AutoBlockDebounceSeconds` | `60` | Per-IP debounce window applied by the auto-block worker to avoid block storms. |
 
 ## AbuseIpDbOptions
 

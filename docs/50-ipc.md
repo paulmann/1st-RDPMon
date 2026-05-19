@@ -29,17 +29,32 @@ Existing commands (Stage 0):
 | `GetSettings` | 9 | C→S | – | `RdpAuditOptions` |
 | `SaveSettings` | 10 | C→S | JSON document | `{ saved: true }` |
 
-Stage 1 reservations (handlers return a stable `NotImplemented` payload until later stages):
+Stage 3 implemented commands (backend-only — Configurator UI lands in a later stage):
 
 | Command | Ordinal | Direction | Payload | Returns |
 |---------|---------|-----------|---------|---------|
 | `GetFirewallStatus` | 11 | C→S | – | `FirewallStatusDto` |
 | `ListBlocklist` | 12 | C→S | – | `AddressListEntryDto[]` |
 | `ListWhitelist` | 13 | C→S | – | `AddressListEntryDto[]` |
-| `AddToBlocklist` | 14 | C→S | `AddressListMutationRequest` | `IpcResultStatus` |
-| `RemoveFromBlocklist` | 15 | C→S | `AddressListMutationRequest` | `IpcResultStatus` |
-| `AddToWhitelist` | 16 | C→S | `AddressListMutationRequest` | `IpcResultStatus` |
-| `RemoveFromWhitelist` | 17 | C→S | `AddressListMutationRequest` | `IpcResultStatus` |
+| `AddToBlocklist` | 14 | C→S | `AddressListMutationRequest` | `{ status, address }` |
+| `RemoveFromBlocklist` | 15 | C→S | `AddressListMutationRequest` | `{ status, address, removed }` |
+| `AddToWhitelist` | 16 | C→S | `AddressListMutationRequest` | `{ status, address }` |
+| `RemoveFromWhitelist` | 17 | C→S | `AddressListMutationRequest` | `{ status, address, removed }` |
+| `ListActiveBlocks` | 31 | C→S | – | `AddressListEntryDto[]` |
+
+Stage 3 IPC semantics:
+
+* Every mutation handler validates the supplied address with `IPAddress.TryParse` and refuses non-IP input with a controlled `IpcException` message (no raw exceptions surface to the client).
+* `AddToBlocklist` refuses an address that already has a `WhitelistEntries` row. Whitelist precedence is enforced server-side, not by the Configurator.
+* `AddToWhitelist` soft-disables any conflicting `BlocklistEntries` rows (`IsEnabled = false`) so the whitelist always wins.
+* `RemoveFromBlocklist` is a soft-disable that sets `IsEnabled = false` and retains the row for audit. `RemoveFromWhitelist` is a hard delete.
+* `ListActiveBlocks` returns `AddressListEntryDto` records whose `Source` field encodes `Provider:Status` (e.g. `Windows:Active`). `Note` carries the audit reason and any provider error.
+* All writes go through the service's `AuditDbContext` via EF Core parameterised APIs; the Configurator never opens the SQLite database for writes.
+
+Reserved Stage 1 commands still pending later stages:
+
+| Command | Ordinal | Direction | Payload | Returns |
+|---------|---------|-----------|---------|---------|
 | `GetAttackStats` | 18 | C→S | – | `AttackStatsDto` |
 | `ListRdpSessions` | 19 | C→S | – | `RdpSessionDto[]` |
 | `DisconnectSession` | 20 | C→S | `SessionActionRequest` | `SessionActionResult` |
@@ -53,7 +68,6 @@ Stage 1 reservations (handlers return a stable `NotImplemented` payload until la
 | `TestAbuseIpDbKey` | 28 | C→S | – | `ProviderTestResult` |
 | `GetMikroTikStatus` | 29 | C→S | – | `ProviderStatusDto` |
 | `TestMikroTik` | 30 | C→S | – | `ProviderTestResult` |
-| `ListActiveBlocks` | 31 | C→S | – | `FirewallBlockEntry[]` |
 
 Reserved-but-not-implemented commands receive an `IpcResponse` with `Success = true` and a payload of the shape `{ "status": "NotImplemented", "command": "...", "message": "..." }`. Clients MUST treat unknown status discriminators conservatively and surface them as "feature not available in this build".
 

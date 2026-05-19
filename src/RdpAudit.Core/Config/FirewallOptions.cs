@@ -47,4 +47,26 @@ public sealed class FirewallOptions
 	/// <summary>Maximum number of distinct simultaneous block rules the provider is allowed to create.</summary>
 	/// <remarks>Acts as a guardrail against rule-table flooding from a runaway worker or scripted attack.</remarks>
 	public int MaxActiveBlocks { get; set; } = 10000;
+
+	/// <summary>Static IP list consumed by the auto-block worker as an additional whitelist surface.</summary>
+	/// <remarks>
+	/// Flat list of literal addresses; CIDR matching belongs to <see cref="Whitelist"/>.
+	/// Defaults are empty so deployments retain Stage 1 behaviour until an operator opts in.
+	/// </remarks>
+	public List<string> WhitelistIps { get; set; } = new();
+
+	/// <summary>When true, the Windows provider refuses to block loopback / private / multicast addresses.</summary>
+	/// <remarks>
+	/// Default is true: blocking loopback or RFC1918 ranges on the host firewall can lock the
+	/// operator out of their own network and is almost never the intent of an automatic rule.
+	/// Set to <c>false</c> only with full understanding of the consequences.
+	/// </remarks>
+	public bool RefusePrivateAddressBlock { get; set; } = true;
+
+	/// <summary>Debounce window in seconds applied per IP / provider to avoid auto-block storms.</summary>
+	/// <remarks>
+	/// When a block is already active for an IP the auto-block worker waits this long before
+	/// considering the same IP again. Defaults to 60 seconds; lower values risk thrashing.
+	/// </remarks>
+	public int AutoBlockDebounceSeconds { get; set; } = 60;
 }

@@ -23,4 +23,7 @@
 	<ItemGroup>
 		<ProjectReference Include="..\RdpAudit.Core\RdpAudit.Core.csproj" />
 	</ItemGroup>
+	<ItemGroup>
+		<InternalsVisibleTo Include="RdpAudit.Service.Tests" />
+	</ItemGroup>
 </Project>

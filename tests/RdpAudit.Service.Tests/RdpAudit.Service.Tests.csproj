@@ -2,12 +2,13 @@
 	<PropertyGroup>
 		<IsPackable>false</IsPackable>
 		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-		<NoWarn>$(NoWarn);CA1707;CA1062</NoWarn>
+		<NoWarn>$(NoWarn);CA1707;CA1062;CA1859;CA1812</NoWarn>
 	</PropertyGroup>
 	<ItemGroup>
 		<PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
 		<PackageReference Include="xunit" Version="2.9.2" />
 		<PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+		<PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.10" />
 	</ItemGroup>
 	<ItemGroup>
 		<ProjectReference Include="..\..\src\RdpAudit.Core\RdpAudit.Core.csproj" />
