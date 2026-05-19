@@ -51,7 +51,14 @@ public static class AppSettingsTemplate
 		"Firewall": {
 			"AutoBlockBruteForce": false,
 			"AutoBlockThreshold": 50,
-			"BlockRuleName": "RdpAudit-Block"
+			"BlockRuleName": "RdpAudit-Block",
+			"Provider": "Windows",
+			"Whitelist": [],
+			"Blacklist": [],
+			"BlockOnBlacklistedLogin": false,
+			"InstantBlockLogins": [],
+			"DefaultBlockDurationMinutes": 0,
+			"MaxActiveBlocks": 10000
 		},
 		"Storage": {
 			"DatabasePath": "",
@@ -64,6 +71,39 @@ public static class AppSettingsTemplate
 			"LogEventXmlAtDebug": false,
 			"LogChannelDrops": true,
 			"LogAlertEvaluationTimings": false
+		},
+		"AbuseIpDb": {
+			"Enabled": false,
+			"ApiKey": "",
+			"BaseUrl": "https://api.abuseipdb.com",
+			"TimeoutSeconds": 15,
+			"MaxReportsPerMinute": 60,
+			"CacheLookups": true,
+			"CacheTtlMinutes": 60,
+			"ReportThreshold": 80,
+			"ReportCategories": [18, 22]
+		},
+		"MikroTik": {
+			"Enabled": false,
+			"BaseUrl": "",
+			"UserName": "",
+			"Password": "",
+			"TimeoutSeconds": 15,
+			"AddressList": "rdpaudit-block",
+			"CommentTemplate": "RdpAudit auto-block",
+			"ValidateServerCertificate": true,
+			"MaxOperationsPerMinute": 120
+		},
+		"SessionControl": {
+			"Enabled": true,
+			"AllowDisconnect": true,
+			"AllowLogoff": true,
+			"AllowShadow": false,
+			"RequireShadowPolicy": true,
+			"BackupShadowPolicyOnApply": true,
+			"ShadowPolicyMode": 1,
+			"MaxOperationsPerMinute": 30,
+			"AuditAllOperations": true
 		}
 	}
 }

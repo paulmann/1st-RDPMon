@@ -19,5 +19,6 @@
 		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
 		<PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="8.0.0" />
 		<PackageReference Include="MessagePack" Version="2.5.187" />
+		<PackageReference Include="System.Security.Cryptography.ProtectedData" Version="8.0.0" />
 	</ItemGroup>
 </Project>
