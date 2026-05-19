@@ -3,12 +3,14 @@
 // Purpose: Service status panel, lifecycle controls, and recent alerts grid.
 //          Service install computes the absolute service binary path, never literal %ProgramFiles%.
 //          All Process.Start + WaitForExit calls are wrapped in Task.Run so the UI thread is free.
+//          Every lifecycle button (Start / Stop / Restart / Uninstall / Install) reports a
+//          consistent ServiceOperationResult including the action, per-step outcomes, the final
+//          service state, the hosting PID, the executable path, and a UTC timestamp.
 // Extends: System.Windows.Forms.TabPage
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
 
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.Versioning;
@@ -27,12 +29,15 @@ namespace RdpAudit.Configurator.Forms;
 public sealed class ServicePage : TabPage
 {
 	private const string ServiceName = InstallationService.ServiceName;
+	private const string ServiceDisplayName = InstallationService.ServiceDisplayName;
 
 	private readonly IpcClient _ipc;
 	private readonly Label _status;
+	private readonly Label _process;
 	private readonly TextBox _layoutPanel;
 	private readonly DataGridView _alertsGrid;
 	private readonly System.Windows.Forms.Timer _timer;
+	private readonly ServiceControlRunner _runner = new(ServiceName, ServiceDisplayName);
 
 	public ServicePage(IpcClient ipc)
 	{
@@ -48,18 +53,24 @@ public sealed class ServicePage : TabPage
 		Button restore = new() { Text = "Restore Registry/Policy", Width = 180 };
 
 		install.Click += async (_, _) => await InstallServiceAsync().ConfigureAwait(true);
-		uninstall.Click += async (_, _) => await ScAsync("delete", new[] { ServiceName }).ConfigureAwait(true);
-		start.Click += async (_, _) => await ScAsync("start", new[] { ServiceName }).ConfigureAwait(true);
-		stop.Click += async (_, _) => await ScAsync("stop", new[] { ServiceName }).ConfigureAwait(true);
-		restart.Click += async (_, _) =>
-		{
-			await ScAsync("stop", new[] { ServiceName }).ConfigureAwait(true);
-			await ScAsync("start", new[] { ServiceName }).ConfigureAwait(true);
-		};
+		uninstall.Click += async (_, _) => await RunLifecycleAsync(uninstall, _runner.UninstallAsync, "RdpAudit Uninstall").ConfigureAwait(true);
+		start.Click += async (_, _) => await RunLifecycleAsync(start, _runner.StartAsync, "RdpAudit Start").ConfigureAwait(true);
+		stop.Click += async (_, _) => await RunLifecycleAsync(stop, _runner.StopAsync, "RdpAudit Stop").ConfigureAwait(true);
+		restart.Click += async (_, _) => await RunLifecycleAsync(restart, _runner.RestartAsync, "RdpAudit Restart").ConfigureAwait(true);
 		backup.Click += async (_, _) => await BackupAsync().ConfigureAwait(true);
 		restore.Click += async (_, _) => await RestoreAsync().ConfigureAwait(true);
 
 		buttons.Controls.AddRange(new Control[] { install, uninstall, start, stop, restart, backup, restore });
+
+		_process = new Label
+		{
+			Dock = DockStyle.Top,
+			Height = 22,
+			Text = "Process: probing…",
+			AutoSize = false,
+			TextAlign = ContentAlignment.MiddleLeft,
+			Padding = new Padding(4, 2, 4, 2),
+		};
 
 		_status = new Label { Dock = DockStyle.Top, Height = 80, Text = "Connecting…", AutoSize = false };
 		_layoutPanel = new TextBox
@@ -93,6 +104,7 @@ public sealed class ServicePage : TabPage
 
 		Controls.Add(_alertsGrid);
 		Controls.Add(_layoutPanel);
+		Controls.Add(_process);
 		Controls.Add(_status);
 		Controls.Add(buttons);
 
@@ -137,10 +149,45 @@ public sealed class ServicePage : TabPage
 
 		List<Alert>? alerts = await _ipc.SendAsync<List<Alert>>(IpcCommand.GetRecentAlerts).ConfigureAwait(true);
 		ServiceLayoutInfo layout = await Task.Run(() => ServiceLayout.Discover(AppContext.BaseDirectory)).ConfigureAwait(true);
+		ServiceProcessInfo processInfo = await _runner.QueryAsync().ConfigureAwait(true);
 
 		_status.Text = label;
+		_process.Text = FormatProcessInfo(processInfo);
 		_layoutPanel.Text = FormatLayout(layout);
 		_alertsGrid.DataSource = alerts ?? new List<Alert>();
+	}
+
+	private static string FormatProcessInfo(ServiceProcessInfo info)
+	{
+		if (!info.Installed)
+		{
+			return "Process: Not installed";
+		}
+
+		if (info.ProcessId is null)
+		{
+			return $"Process: Not running (state: {info.FinalState})";
+		}
+
+		StringBuilder sb = new();
+		sb.Append("Process: PID ").Append(info.ProcessId.Value.ToString(CultureInfo.InvariantCulture));
+		sb.Append("  state ").Append(info.FinalState);
+		if (info.StartTimeUtc is DateTime started)
+		{
+			sb.Append("  started ").Append(started.ToString("yyyy-MM-dd HH:mm:ss 'UTC'", CultureInfo.InvariantCulture));
+		}
+
+		if (!string.IsNullOrEmpty(info.ExecutablePath))
+		{
+			sb.Append("  exe ").Append(info.ExecutablePath);
+		}
+
+		if (!string.IsNullOrEmpty(info.Detail))
+		{
+			sb.Append("  (").Append(info.Detail).Append(')');
+		}
+
+		return sb.ToString();
 	}
 
 	private static string FormatLayout(ServiceLayoutInfo layout)
@@ -167,6 +214,33 @@ public sealed class ServicePage : TabPage
 			layout.ConfiguratorDirectory,
 			source,
 			distLine);
+	}
+
+	private async Task RunLifecycleAsync(
+		Button trigger,
+		Func<CancellationToken, Task<ServiceOperationResult>> action,
+		string title)
+	{
+		trigger.Enabled = false;
+		try
+		{
+			ServiceOperationResult result = await action(CancellationToken.None).ConfigureAwait(true);
+			MessageBox.Show(result.Format(), title, MessageBoxButtons.OK,
+				result.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+			await RefreshAsync().ConfigureAwait(true);
+		}
+		catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
+		{
+			MessageBox.Show("UAC was cancelled.", title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+		}
+		catch (Exception ex)
+		{
+			MessageBox.Show(ex.Message, title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+		}
+		finally
+		{
+			trigger.Enabled = true;
+		}
 	}
 
 	/// <summary>Discover the sibling Service distribution, copy it under Program Files,
@@ -210,6 +284,7 @@ public sealed class ServicePage : TabPage
 
 		MessageBox.Show(sb.ToString(), "RdpAudit Install", MessageBoxButtons.OK,
 			outcome.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+		await RefreshAsync().ConfigureAwait(true);
 	}
 
 	private async Task BackupAsync()
@@ -314,43 +389,6 @@ public sealed class ServicePage : TabPage
 		MessageBox.Show(sb.ToString(), "RdpAudit Restore",
 			MessageBoxButtons.OK,
 			outcome.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
-	}
-
-	private static async Task ScAsync(string? leadingVerb, IReadOnlyList<string> args)
-	{
-		try
-		{
-			ProcessStartInfo psi = new("sc.exe")
-			{
-				UseShellExecute = false,
-				CreateNoWindow = true,
-				RedirectStandardError = true,
-				RedirectStandardOutput = true,
-			};
-			if (leadingVerb is not null)
-			{
-				psi.ArgumentList.Add(leadingVerb);
-			}
-
-			foreach (string a in args)
-			{
-				psi.ArgumentList.Add(a);
-			}
-
-			await Task.Run(() =>
-			{
-				using Process? p = Process.Start(psi);
-				p?.WaitForExit(30_000);
-			}).ConfigureAwait(true);
-		}
-		catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
-		{
-			MessageBox.Show("UAC was cancelled.", "RdpAudit", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-		}
-		catch (Exception ex)
-		{
-			MessageBox.Show(ex.Message, "RdpAudit", MessageBoxButtons.OK, MessageBoxIcon.Error);
-		}
 	}
 
 	protected override void Dispose(bool disposing)
