@@ -87,4 +87,13 @@ public static class ScCommandBuilder
 		ArgumentException.ThrowIfNullOrEmpty(serviceName);
 		return new[] { "query", serviceName };
 	}
+
+	/// <summary>Builds the argv for <c>sc.exe queryex</c>, which additionally exposes the
+	/// hosting process PID for running services. Required by the Service tab to display
+	/// the running service's process id alongside lifecycle controls.</summary>
+	public static IReadOnlyList<string> BuildQueryExtended(string serviceName)
+	{
+		ArgumentException.ThrowIfNullOrEmpty(serviceName);
+		return new[] { "queryex", serviceName };
+	}
 }
