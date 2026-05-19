@@ -12,8 +12,10 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.Versioning;
+using System.Text;
 using RdpAudit.Configurator.Ipc;
 using RdpAudit.Configurator.Services;
+using RdpAudit.Core.Backup;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Models;
 using RdpAudit.Core.Util;
@@ -42,6 +44,8 @@ public sealed class ServicePage : TabPage
 		Button start = new() { Text = "Start", Width = 80 };
 		Button stop = new() { Text = "Stop", Width = 80 };
 		Button restart = new() { Text = "Restart", Width = 80 };
+		Button backup = new() { Text = "Backup Settings", Width = 140 };
+		Button restore = new() { Text = "Restore Registry/Policy", Width = 180 };
 
 		install.Click += async (_, _) => await InstallServiceAsync().ConfigureAwait(true);
 		uninstall.Click += async (_, _) => await ScAsync("delete", new[] { ServiceName }).ConfigureAwait(true);
@@ -52,8 +56,10 @@ public sealed class ServicePage : TabPage
 			await ScAsync("stop", new[] { ServiceName }).ConfigureAwait(true);
 			await ScAsync("start", new[] { ServiceName }).ConfigureAwait(true);
 		};
+		backup.Click += async (_, _) => await BackupAsync().ConfigureAwait(true);
+		restore.Click += async (_, _) => await RestoreAsync().ConfigureAwait(true);
 
-		buttons.Controls.AddRange(new Control[] { install, uninstall, start, stop, restart });
+		buttons.Controls.AddRange(new Control[] { install, uninstall, start, stop, restart, backup, restore });
 
 		_status = new Label { Dock = DockStyle.Top, Height = 80, Text = "Connecting…", AutoSize = false };
 		_layoutPanel = new TextBox
@@ -203,6 +209,110 @@ public sealed class ServicePage : TabPage
 		}
 
 		MessageBox.Show(sb.ToString(), "RdpAudit Install", MessageBoxButtons.OK,
+			outcome.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+	}
+
+	private async Task BackupAsync()
+	{
+		try
+		{
+			ServiceLayoutInfo layout = await Task.Run(() => ServiceLayout.Discover(AppContext.BaseDirectory)).ConfigureAwait(true);
+			BackupRunner runner = new(layout);
+			BackupOutcome outcome = await runner.RunAsync(BackupReason.Manual).ConfigureAwait(true);
+			ShowBackupOutcome(outcome);
+		}
+		catch (Exception ex)
+		{
+			MessageBox.Show(ex.Message, "RdpAudit Backup", MessageBoxButtons.OK, MessageBoxIcon.Error);
+		}
+	}
+
+	private async Task RestoreAsync()
+	{
+		try
+		{
+			ServiceLayoutInfo layout = await Task.Run(() => ServiceLayout.Discover(AppContext.BaseDirectory)).ConfigureAwait(true);
+			BackupRunner runner = new(layout);
+			IReadOnlyList<string> snapshots = await Task.Run(runner.ListSnapshots).ConfigureAwait(true);
+			if (snapshots.Count == 0)
+			{
+				MessageBox.Show(
+					"No backup snapshots available. Use Backup Settings to create one first.",
+					"RdpAudit Restore",
+					MessageBoxButtons.OK,
+					MessageBoxIcon.Information);
+				return;
+			}
+
+			string selected = snapshots[0];
+			string confirm = string.Format(CultureInfo.InvariantCulture,
+				"Restore registry/SACL and audit policy settings from snapshot {0}?\r\n\r\n"
+				+ "A pre-restore safety snapshot will be captured first. The audit event database is NOT modified.",
+				selected);
+			DialogResult choice = MessageBox.Show(
+				confirm,
+				"RdpAudit Restore",
+				MessageBoxButtons.YesNo,
+				MessageBoxIcon.Warning);
+			if (choice != DialogResult.Yes)
+			{
+				return;
+			}
+
+			RestoreRunner restorer = new(layout, runner);
+			RestoreOutcome outcome = await restorer.RunAsync(selected, RestoreScope.PoliciesAndRegistry).ConfigureAwait(true);
+			ShowRestoreOutcome(outcome, selected);
+		}
+		catch (Exception ex)
+		{
+			MessageBox.Show(ex.Message, "RdpAudit Restore", MessageBoxButtons.OK, MessageBoxIcon.Error);
+		}
+	}
+
+	private static void ShowBackupOutcome(BackupOutcome outcome)
+	{
+		StringBuilder sb = new();
+		sb.AppendLine("Snapshot folder:");
+		sb.AppendLine("  " + outcome.Snapshot.SnapshotDirectory);
+		sb.AppendLine();
+		foreach (BackupStep step in outcome.Steps)
+		{
+			sb.Append(step.Ok ? "OK   " : "FAIL ");
+			sb.Append(step.Description);
+			if (!string.IsNullOrEmpty(step.Detail))
+			{
+				sb.Append(" — ").Append(step.Detail);
+			}
+
+			sb.AppendLine();
+		}
+
+		MessageBox.Show(sb.ToString(), "RdpAudit Backup",
+			MessageBoxButtons.OK,
+			outcome.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+	}
+
+	private static void ShowRestoreOutcome(RestoreOutcome outcome, string snapshotName)
+	{
+		StringBuilder sb = new();
+		sb.AppendLine("Source snapshot: " + snapshotName);
+		sb.AppendLine("Safety snapshot:");
+		sb.AppendLine("  " + outcome.SafetySnapshot.SnapshotDirectory);
+		sb.AppendLine();
+		foreach (RestoreStep step in outcome.Steps)
+		{
+			sb.Append(step.Ok ? "OK   " : "FAIL ");
+			sb.Append(step.Description);
+			if (!string.IsNullOrEmpty(step.Detail))
+			{
+				sb.Append(" — ").Append(step.Detail);
+			}
+
+			sb.AppendLine();
+		}
+
+		MessageBox.Show(sb.ToString(), "RdpAudit Restore",
+			MessageBoxButtons.OK,
 			outcome.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
 	}
 

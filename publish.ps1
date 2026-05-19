@@ -25,26 +25,56 @@ function Get-ProcessesUsingPath {
 
 	$normalized = [System.IO.Path]::GetFullPath($Path).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
 	$candidates = @("RdpAudit.Configurator", "RdpAudit.Service")
-	$found = @()
+	$found = [System.Collections.Generic.List[pscustomobject]]::new()
 
 	foreach ($name in $candidates) {
-		$procs = Get-Process -Name $name -ErrorAction SilentlyContinue
+		$procs = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
 		foreach ($proc in $procs) {
+			if ($null -eq $proc) { continue }
+
+			# Read all properties defensively inside ONE try/catch so a process that
+			# exited mid-iteration (or whose MainModule is inaccessible) never produces
+			# a half-built pscustomobject. Format-Table under StrictMode rejects items
+			# whose declared property is missing — building objects atomically prevents
+			# that failure mode.
+			$procName = $null
+			$procId = $null
 			$procPath = $null
-			try { $procPath = $proc.Path } catch { $procPath = $null }
-			if (-not $procPath) { continue }
-			$fullProcPath = [System.IO.Path]::GetFullPath($procPath)
+			try {
+				$procName = [string]$proc.ProcessName
+				$procId = [int]$proc.Id
+				try { $procPath = [string]$proc.Path } catch { $procPath = $null }
+			} catch {
+				Write-Verbose ("Skipping inaccessible {0} process (PID query failed): {1}" -f $name, $_.Exception.Message)
+				continue
+			}
+
+			if ([string]::IsNullOrWhiteSpace($procPath)) { continue }
+
+			$fullProcPath = $null
+			try { $fullProcPath = [System.IO.Path]::GetFullPath($procPath) } catch { $fullProcPath = $null }
+			if ([string]::IsNullOrWhiteSpace($fullProcPath)) { continue }
+
 			if ($fullProcPath.StartsWith($normalized, [System.StringComparison]::OrdinalIgnoreCase)) {
-				$found += [pscustomobject]@{
-					ProcessName = $proc.ProcessName
-					Id          = $proc.Id
+				$entry = [pscustomobject]@{
+					ProcessName = $procName
+					Id          = $procId
 					ExePath     = $fullProcPath
 				}
+				$found.Add($entry)
 			}
 		}
 	}
 
-	return ,$found
+	return ,$found.ToArray()
+}
+
+function Format-LockingProcess {
+	param([Parameter(Mandatory = $true)]$Item)
+	$name = if ($Item.PSObject.Properties['ProcessName']) { $Item.ProcessName } else { '<unknown>' }
+	$id = if ($Item.PSObject.Properties['Id']) { $Item.Id } else { '?' }
+	$path = if ($Item.PSObject.Properties['ExePath']) { $Item.ExePath } else { '<unknown path>' }
+	return ("{0} (PID {1}) -> {2}" -f $name, $id, $path)
 }
 
 function Remove-PublishOutput {
@@ -55,14 +85,20 @@ function Remove-PublishOutput {
 	$locking = @(Get-ProcessesUsingPath -Path $Path)
 	if ($locking.Count -gt 0) {
 		Write-Host "The following RdpAudit processes are running from the publish folder and will block deletion:" -ForegroundColor Yellow
-		$locking | Format-Table ProcessName, Id, ExePath -AutoSize | Out-Host
+		foreach ($entry in $locking) {
+			Write-Host ("  " + (Format-LockingProcess -Item $entry)) -ForegroundColor Yellow
+		}
 		if ($Force) {
 			foreach ($p in $locking) {
-				Write-Host "Stopping $($p.ProcessName) (PID $($p.Id)) ..." -ForegroundColor Yellow
+				$pName = if ($p.PSObject.Properties['ProcessName']) { $p.ProcessName } else { '<unknown>' }
+				$pId = if ($p.PSObject.Properties['Id']) { $p.Id } else { -1 }
+				Write-Host ("Stopping {0} (PID {1}) ..." -f $pName, $pId) -ForegroundColor Yellow
 				try {
-					Stop-Process -Id $p.Id -Force -ErrorAction Stop
+					if ($pId -ge 0) {
+						Stop-Process -Id $pId -Force -ErrorAction Stop
+					}
 				} catch {
-					throw "Failed to stop $($p.ProcessName) (PID $($p.Id)): $($_.Exception.Message)"
+					throw ("Failed to stop {0} (PID {1}): {2}" -f $pName, $pId, $_.Exception.Message)
 				}
 			}
 			Start-Sleep -Milliseconds 500
@@ -81,12 +117,14 @@ function Remove-PublishOutput {
 		} catch {
 			if ($attempts -ge $maxAttempts) {
 				$still = @(Get-ProcessesUsingPath -Path $Path)
-				$hint = if ($still.Count -gt 0) {
-					"Still locked by: " + (($still | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))" }) -join ", ")
+				$hint = ""
+				if ($still.Count -gt 0) {
+					$descriptions = foreach ($s in $still) { Format-LockingProcess -Item $s }
+					$hint = "Still locked by: " + ($descriptions -join "; ")
 				} else {
-					"No RdpAudit processes detected from publish; the file may be held by Explorer, an antivirus scanner, or another tool. Close any window or shell open in '$Path' and retry."
+					$hint = "No RdpAudit processes detected from publish; the file may be held by Explorer, an antivirus scanner, or another tool. Close any window or shell open in '$Path' and retry."
 				}
-				throw "Unable to remove '$Path' after $maxAttempts attempts. $hint Original error: $($_.Exception.Message)"
+				throw ("Unable to remove '{0}' after {1} attempts. {2} Original error: {3}" -f $Path, $maxAttempts, $hint, $_.Exception.Message)
 			}
 			Start-Sleep -Milliseconds (250 * $attempts)
 		}
