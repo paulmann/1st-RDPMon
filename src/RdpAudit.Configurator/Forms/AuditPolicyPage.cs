@@ -18,11 +18,35 @@ namespace RdpAudit.Configurator.Forms;
 [SupportedOSPlatform("windows")]
 public sealed class AuditPolicyPage : TabPage
 {
+	private const string HelpText =
+		"What these buttons do:\r\n"
+		+ "  • Apply audit policy — runs auditpol.exe to enable the Success/Failure "
+		+ "flags required by RdpAudit on every subcategory shown above. Requires Administrator.\r\n"
+		+ "  • Configure SACL — writes System Access Control List entries on the "
+		+ "IFEO, RDP-Tcp and Lsa registry keys so Windows generates 4657/4663 audit "
+		+ "events for the rules STICKY_KEYS_BACKDOOR, RDP_PORT_CHANGED and "
+		+ "LSASS_PPL_TAMPER. Requires Administrator.\r\n"
+		+ "  • Refresh — re-reads the current audit policy via the Windows "
+		+ "AuditQuerySystemPolicy API (locale-stable, falls back to auditpol /r CSV).\r\n"
+		+ "\r\n"
+		+ "Column legend:\r\n"
+		+ "  • Required column shows the policy RdpAudit needs.\r\n"
+		+ "  • Current column shows what Windows actually has.\r\n"
+		+ "  • S=Y means Success auditing is enabled, S=N means disabled.\r\n"
+		+ "  • F=Y means Failure auditing is enabled, F=N means disabled.\r\n"
+		+ "Rows turn green when Current matches Required, yellow otherwise.\r\n"
+		+ "\r\n"
+		+ "SACL = System Access Control List. Registry/object auditing rules that "
+		+ "tell Windows to emit object-access events (4657/4663/4660) when watched "
+		+ "keys or files are read/modified. Audit Policy enables the subcategory; "
+		+ "SACL chooses which specific objects produce events within that subcategory.";
+
 	private readonly ListView _list;
 	private readonly Button _apply;
 	private readonly Button _applySacl;
 	private readonly Button _refresh;
 	private readonly Label _status;
+	private readonly TextBox _help;
 	private readonly AuditPolicyManager _policy = new();
 	private readonly SaclManager _sacl = new();
 
@@ -54,7 +78,20 @@ public sealed class AuditPolicyPage : TabPage
 
 		_status = new Label { Dock = DockStyle.Top, Height = 24, Text = "Ready" };
 
+		_help = new TextBox
+		{
+			Dock = DockStyle.Bottom,
+			Height = 220,
+			Multiline = true,
+			ReadOnly = true,
+			ScrollBars = ScrollBars.Vertical,
+			WordWrap = true,
+			Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9f),
+			Text = HelpText,
+		};
+
 		Controls.Add(_list);
+		Controls.Add(_help);
 		Controls.Add(_status);
 		Controls.Add(buttons);
 
