@@ -318,6 +318,106 @@ Before Stage 6 can start:
    continue to drive *only* IPC, and the provider id must be resolved server-side from
    `FirewallProviderKind` without UI knowledge of the underlying REST endpoint.
 
+## Stage 6 — Attack Statistics backend + Configurator tab (this branch)
+
+Stage 6 lights up the operator-facing attack dashboard. It deliberately ships **no Remote RDP
+Clients tab, no session shadow actions, no AbuseIPDB integration, and no MikroTik integration**;
+those remain deferred to Stage 7+.
+
+Delivered:
+
+* **Threat scoring** — `Core/Models/AttackThreatScoring.cs`: pure, deterministic
+  `ComputeScore(failed, successful, durationSeconds, isBlocked, lastSeenUtc, nowUtc) → [0..100]`
+  built from five additive components (failure pressure, success-after-fail signal, intensity,
+  active-block bonus, recentness). `ClassifyScore(double) → AttackThreatLevel` maps the score to
+  cameyo-style `Green / Yellow / Red` bands using public threshold constants. Full algorithm,
+  worked examples, and validation guidance in `docs/46-attack-statistics.md`.
+* **Aggregation** — `Core/Models/AttackStatsAggregator.cs`: pure projection from a bounded slice
+  of `RawEvents` and a set of currently-blocked IPs into one `AttackStat` per distinct source
+  IP. Logon-success (`4624`) and logon-failure (`4625`) ids drive success / failure tallies;
+  unknown event ids count toward `Failed`. Output ordering is deterministic so tests can pin
+  byte-stable expectations.
+* **Worker** — `Service/Workers/AttackStatsRefreshWorker.cs`: `BackgroundService` registered in
+  `Service/Program.cs` alongside the existing workers. Refreshes at startup, then every
+  `60 seconds`. Bounds each pass by a 30-day look-back window and a hard
+  `MaxRawEventsPerPass = 50,000` ceiling. Uses `IDbContextFactory<AuditDbContext>` with
+  `AsNoTracking()` reads. `SemaphoreSlim(1, 1)` guards against concurrent re-entry.
+* **IPC** — `IpcCommand.GetAttackStats` (ordinal `18`, Stage 1 reservation) is now implemented in
+  `Service/Ipc/IpcDispatcher.cs::GetAttackStatsAsync`. Accepts an optional `AttackStatsRequest`
+  filter (IP substring, min threat score, only-blocked, since / until window, limit clamped to
+  `[1..2000]`). Returns `AttackStatsDto` extended with three append-only `[Key]` slots:
+  `Entries: List<AttackStatEntryDto>`, `TotalMatching: int`, `AppliedLimit: int`. No new IPC
+  ordinals are introduced.
+* **Contracts** — `Core/Ipc/Contracts/AttackStatEntryDto.cs` (new), `AttackStatsRequest.cs` (new),
+  extended `AttackStatsDto.cs`. Every new field lands at the next free `[Key]` index. The Stage 1
+  reservation contract is preserved verbatim at keys `0..8`.
+* **Configurator tab** — `Configurator/Forms/AttackStatisticsPage.cs`, added to `MainForm` after
+  the Firewall tab. Grid columns: IP, Threat, Status, Total, Failed, Successful, First seen,
+  Last seen, Duration, Top logins, Last logon type, Blocked. Row colouring: soft green / yellow /
+  red against the `ThreatLevel`. Filter toolbar: IP substring, min-threat numeric, only-blocked
+  checkbox, time-range drop-down (`All time`, `Last 5 / 15 minutes`, `Last 1 / 24 hours`,
+  `Last 7 days`), row-limit numeric, `Refresh` and `Auto-refresh` controls. Auto-refresh runs on
+  a 5-second timer with an `Interlocked.CompareExchange` re-entry guard so a slow IPC round-trip
+  never queues a backlog. Right-click on a row offers `Copy row` (TSV), `Block IP` (routes
+  through `AddToBlocklist` + legacy `BlockAddress`), and `Whitelist IP` (routes through
+  `AddToWhitelist` + legacy `UnblockAddress`). Status strip is pre-stamped `[HH:mm:ss Z]` and
+  marshalled to the UI thread via `BeginInvoke`.
+* **UI helper** — `Core/Util/AttackStatsFilter.cs`: pure predicate used by the tab to pre-filter
+  cached rows while the operator types, mirroring the server-side `AttackStatsRequest` semantics
+  so the UI and the IPC handler agree on edge cases.
+* **Tests**
+  * `AttackThreatScoringTests` — each scoring component, the clamp, classification boundaries,
+    recentness buckets, clock-skew handling, parameterised classification bounds.
+  * `AttackStatsAggregatorTests` — empty input, blank-IP skip, group-by-IP, success vs failure
+    counting, top-N login cap, `IsBlocked` propagation, unknown event ids, deterministic
+    ordering.
+  * `AttackStatsFilterTests` — empty filter, null entry, IP substring, min-threat inclusive
+    bound, only-blocked, since / until inclusive bounds, AND semantics.
+  * `IpcDispatcherStage6Tests` — end-to-end dispatch + filter combinations + limit clamping +
+    invalid-JSON path + worker cancellation propagation + serial-call stability.
+* **Docs** — `docs/30-configurator.md` (tab row + Stage 6 section), new `docs/46-attack-statistics.md`
+  (subsystem overview, scoring algorithm, validation guidance), `docs/50-ipc.md` (Stage 6 command
+  table + `AttackStatsRequest` / `AttackStatsDto` shapes), this roadmap entry.
+
+Configuration surface: none. The worker hard-codes its cadence and bounds; future stages may
+expose them via `RdpAuditOptions` if operators ask.
+
+Deferred to Stage 7+ (explicitly NOT in Stage 6):
+
+* Remote RDP Clients tab + session-control wiring (`DisconnectSession`, `LogoffSession`,
+  `ShadowSession`).
+* AbuseIPDB page and HTTP client.
+* MikroTik page and REST client.
+
+### Stage 7 prerequisites
+
+Before Stage 7 can start:
+
+1. **Windows manual validation of Stage 6.** On a Windows host with the service installed and
+   running:
+   * Drive a synthetic brute-force burst against the host (or seed `RawEvents` via the service
+     under test) and confirm the Attack Statistics tab shows one row per source IP within one
+     60-second worker cycle.
+   * Confirm row colouring matches the score bands: a green row stays green, a row with > 30
+     failures and a Windows Firewall block lands in yellow / red, a sustained burst saturates to
+     red.
+   * Type into the **IP** filter and confirm both the cached client-side filter and the
+     server-side IPC round-trip return the same rows.
+   * Toggle **Only blocked** and confirm only rows with `IsBlocked == true` remain.
+   * Cycle the **Range** drop-down and confirm rows outside the window disappear.
+   * Right-click an attacker row and execute **Block IP** — confirm `netsh advfirewall firewall
+     show rule name=RdpAudit-Block-{ip}` lists the rule and the `BlocklistEntries` table grows.
+   * Right-click the same row and execute **Whitelist IP** — confirm the rule disappears and
+     the `WhitelistEntries` row exists.
+   * Watch the status strip: every action must surface a `[HH:mm:ss Z]` line with per-step OK /
+     FAIL detail.
+2. **Stage 7 IPC reservation.** `ListRdpSessions` (19), `DisconnectSession` (20),
+   `LogoffSession` (21), and `ShadowSession` (22) are already reserved. Ordinals 38+ remain free
+   for future allocations.
+3. **AbuseIPDB / MikroTik provider abstractions.** Stage 7 introduces session control. AbuseIPDB
+   and MikroTik integrations land in a later stage; their abstractions must live in
+   `RdpAudit.Core/` before any HTTP / REST client lands in `RdpAudit.Service/`.
+
 ## LLM-safe extension rules
 
 When implementing later stages:

@@ -1,6 +1,7 @@
 // File:    src/RdpAudit.Core/Ipc/Contracts/AttackStatsDto.cs
 // Module:  RdpAudit.Core.Ipc.Contracts
-// Purpose: DTO returned by GetAttackStats summarising recent attack-related metrics.
+// Purpose: DTO returned by GetAttackStats. Carries both a window summary (Stage 1 reservation) and,
+//          as of Stage 6, the per-IP entries collection that drives the Attack Statistics tab.
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
@@ -39,4 +40,18 @@ public sealed class AttackStatsDto
 
 	[Key(8)]
 	public string? Message { get; set; }
+
+	// --- Stage 6 additions (append-only — new keys must land at the end). ---
+
+	/// <summary>Per-IP rows materialised by the Attack Statistics worker, filtered by the request.</summary>
+	[Key(9)]
+	public List<AttackStatEntryDto> Entries { get; set; } = new();
+
+	/// <summary>Total number of rows in the AttackStats table after the filter is applied, before the limit is taken.</summary>
+	[Key(10)]
+	public int TotalMatching { get; set; }
+
+	/// <summary>Limit the server clamped the response to (number of rows in <see cref="Entries"/>).</summary>
+	[Key(11)]
+	public int AppliedLimit { get; set; }
 }

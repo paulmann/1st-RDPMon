@@ -157,6 +157,7 @@ public static class Program
 		services.AddHostedService<MaintenanceWorker>();
 		services.AddHostedService<FirewallAutoBlockWorker>();
 		services.AddHostedService<FirewallExpirationWorker>();
+		services.AddHostedService<AttackStatsRefreshWorker>();
 	}
 
 	private static ISecretProtector CreateSecretProtector()
