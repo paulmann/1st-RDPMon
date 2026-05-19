@@ -41,6 +41,7 @@ public sealed class MainForm : Form
 		_tabs.TabPages.Add(new AttackStatisticsPage(_ipc) { Text = "Attack Statistics" });
 		_tabs.TabPages.Add(new RemoteRdpClientsPage(_ipc) { Text = "Remote RDP Clients" });
 		_tabs.TabPages.Add(new AbuseIpDbPage(_ipc) { Text = "AbuseIPDB" });
+		_tabs.TabPages.Add(new MikroTikPage(_ipc) { Text = "MikroTik" });
 
 		Controls.Add(_tabs);
 

@@ -113,14 +113,18 @@ Stage 8 IPC semantics:
 * `TestAbuseIpDbKey` performs a structural check (40..128 hex characters, canonical 80) against the unprotected key. On a passing format check the dispatcher issues a read-only `GET /api/v2/check?ipAddress=127.0.0.1` request to the configured BaseUrl; a 2xx response means AbuseIPDB accepted the credential, 401/403 means it was rejected, 429 means rate-limited. The handler NEVER submits an abuse report.
 * `SaveSettings` continues to handle AbuseIPDB persistence: a plaintext key supplied by the Configurator is wrapped by `ISecretProtector` (DPAPI on Windows, `InMemorySecretProtector` for non-Windows CI) before atomic-write replacement of `appsettings.json`. Already-protected envelopes are passed through unchanged.
 
-Reserved Stage 1 commands still pending later stages:
+Stage 9 implemented commands (MikroTik RouterOS v7 integration — Configurator MikroTik tab drives these):
 
 | Command | Ordinal | Direction | Payload | Returns |
 |---------|---------|-----------|---------|---------|
-| `GetMikroTikStatus` | 29 | C→S | – | `ProviderStatusDto` |
-| `TestMikroTik` | 30 | C→S | – | `ProviderTestResult` |
+| `GetMikroTikStatus` | 29 | C→S | – | `MikroTikStatusDto` |
+| `TestMikroTik` | 30 | C→S | – | `MikroTikTestResult` |
 
-Reserved-but-not-implemented commands receive an `IpcResponse` with `Success = true` and a payload of the shape `{ "status": "NotImplemented", "command": "...", "message": "..." }`. Clients MUST treat unknown status discriminators conservatively and surface them as "feature not available in this build".
+Stage 9 IPC semantics:
+
+* `GetMikroTikStatus` returns `MikroTikStatusDto` carrying `Configured`, `CredentialPresent`, `Enabled`, `AddAttackerRules`, the sanitised `Endpoint` / `Scheme` / `Host` / `Port`, the `ProviderStatus` resolved from the registered `IFirewallProvider` (`Available`, `Unreachable`, `Disabled`, `NotConfigured`, `NotImplemented`), the count of active MikroTik rows in `ActiveBlocks`, the configured filter chain / action / comment prefix, the composed `BlockDurationSeconds`, the TLS-validation flag and the last sanitised error. The DTO NEVER contains the password or the protected envelope payload.
+* `TestMikroTik` performs a controlled read-only probe (`GET /rest/system/resource`) and returns a `MikroTikTestResult` with `CredentialFormatValid`, `RemoteVerified`, the HTTP `ResponseCode`, the sanitised `Endpoint` and a controlled `Message`. The handler NEVER writes any firewall rule and NEVER echoes the password.
+* `SaveSettings` continues to handle MikroTik persistence: a plaintext password supplied by the Configurator is wrapped by `ISecretProtector` before atomic-write replacement of `appsettings.json`. Already-protected envelopes are passed through unchanged. The Configurator MUST submit the literal string `***configured***` as a placeholder when the operator does not want to change the existing envelope.
 
 ## DTO contracts
 

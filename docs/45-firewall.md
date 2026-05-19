@@ -151,3 +151,17 @@ See `docs/40-options.md` for the full `Firewall` block. New Stage 3 fields:
 * `WhitelistIps` — flat list of literal addresses (in addition to `Whitelist` for CIDRs).
 * `AutoBlockDebounceSeconds` (default `60`) — minimum elapsed time between two block decisions
   for the same IP.
+
+## Stage 9 — MikroTik RouterOS v7 provider
+
+Stage 9 wires the MikroTik provider end-to-end (see `docs/49-mikrotik.md`). Key points relevant to
+the firewall pipeline:
+
+* `FirewallOptions.Provider` may now be set to `MikroTik` or `Both`.
+* When `Both`, the `FirewallAutoBlockWorker` writes one `ActiveBlock` row per provider so each
+  rule keeps its own `RuleHandle` and its own expiry timeline.
+* `FirewallExpirationWorker` continues to wake for the earliest `ExpiresUtc` and calls
+  `IFirewallProvider.UnblockAsync` on the matching provider. No hot polling.
+* The MikroTik provider only deletes firewall filter rules whose comment starts with
+  `MikroTikOptions.CommentPrefix` (default `RdpAudit`); existing matching rules are reused
+  (idempotent), never duplicated.

@@ -95,14 +95,24 @@ public static class AppSettingsTemplate
 		},
 		"MikroTik": {
 			"Enabled": false,
+			"AddAttackerRules": true,
 			"BaseUrl": "",
+			"UseHttps": true,
+			"Host": "",
+			"Port": 0,
 			"UserName": "",
 			"Password": "",
 			"TimeoutSeconds": 15,
 			"AddressList": "rdpaudit-block",
+			"FilterChain": "input",
+			"FilterAction": "drop",
 			"CommentTemplate": "RdpAudit auto-block",
+			"CommentPrefix": "RdpAudit",
 			"ValidateServerCertificate": true,
-			"MaxOperationsPerMinute": 120
+			"MaxOperationsPerMinute": 120,
+			"BlockDurationDays": 0,
+			"BlockDurationHours": 1,
+			"BlockDurationMinutes": 0
 		},
 		"SessionControl": {
 			"Enabled": true,

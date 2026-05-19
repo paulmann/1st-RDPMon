@@ -192,11 +192,12 @@ public sealed class FirewallExpirationWorker : BackgroundService
 
 	private IFirewallProvider? ResolveProvider(FirewallProviderKind kind)
 	{
+		// Each ActiveBlock row carries exactly one provider kind by Stage 9 — the auto-block worker
+		// splits Both into one row per provider so the expiration worker never needs to fan out here.
 		string id = kind switch
 		{
 			FirewallProviderKind.Windows => "Windows",
 			FirewallProviderKind.MikroTik => "MikroTik",
-			FirewallProviderKind.Both => "Windows",
 			_ => string.Empty,
 		};
 

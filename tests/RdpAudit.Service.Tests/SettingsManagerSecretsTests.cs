@@ -112,6 +112,46 @@ public class SettingsManagerSecretsTests
 	}
 
 	[Fact]
+	public void Save_ProtectsMikroTikPassword_BeforePersistence()
+	{
+		string targetPath = CreateTempPath();
+		string json = """
+		{
+			"RdpAudit": {
+				"MikroTik": { "Enabled": true, "Host": "router.lab", "UserName": "u", "Password": "ROUTER_PLAINTEXT_xyz" }
+			}
+		}
+		""";
+
+		InMemorySecretProtector protector = new();
+		SettingsManager mgr = new(NullLogger<SettingsManager>.Instance, protector, targetPath);
+
+		try
+		{
+			mgr.Save(json);
+
+			string persisted = File.ReadAllText(targetPath);
+			Assert.DoesNotContain("ROUTER_PLAINTEXT_xyz", persisted, StringComparison.Ordinal);
+			Assert.Contains("$protected", persisted, StringComparison.Ordinal);
+		}
+		finally
+		{
+			try
+			{
+				string? dir = Path.GetDirectoryName(targetPath);
+				if (dir is not null && Directory.Exists(dir))
+				{
+					Directory.Delete(dir, recursive: true);
+				}
+			}
+			catch
+			{
+				// best effort.
+			}
+		}
+	}
+
+	[Fact]
 	public void Save_NoSecretProtector_LeavesPlaintextWithWarning()
 	{
 		// Without an ISecretProtector, the manager should leave the field as-is (the operator was

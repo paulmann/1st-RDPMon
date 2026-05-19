@@ -60,19 +60,29 @@ The `ApiKey` field is stored as a protected envelope (see "Secret protection"). 
 
 ## MikroTikOptions
 
-The `Password` field is stored as a protected envelope. Plaintext is unwrapped only at HTTP-send time and discarded immediately.
+The `Password` field is stored as a protected envelope. Plaintext is unwrapped only at HTTP-send time and discarded immediately. See `docs/49-mikrotik.md` for the full Stage 9 surface map.
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `Enabled` | `false` | Master switch. |
-| `BaseUrl` | `""` | RouterOS REST endpoint (`https://10.0.0.1`). |
+| `Enabled` | `false` | Master switch for the integration. |
+| `AddAttackerRules` | `true` | When false the client is wired but no firewall rules are written. |
+| `BaseUrl` | `""` | Optional fully-formed RouterOS REST endpoint (`https://10.0.0.1:8443`). Wins over `Scheme/Host/Port` when set. |
+| `UseHttps` | `true` | Selects HTTPS when `BaseUrl` is empty. |
+| `Host` | `""` | Router host name or IP literal. |
+| `Port` | `0` | Explicit TCP port. `0` means "scheme default" (443 / 80). |
 | `UserName` | `""` | REST API user. |
 | `Password` | `""` | Protected envelope holding the REST password. |
-| `TimeoutSeconds` | `15` | HTTP timeout. |
-| `AddressList` | `"rdpaudit-block"` | RouterOS address list that receives blocked IPs. |
-| `CommentTemplate` | `"RdpAudit auto-block"` | Comment attached to every entry. |
+| `TimeoutSeconds` | `15` | HTTP timeout (clamped to `[1..60]`). |
+| `AddressList` | `"rdpaudit-block"` | Address list name (reserved for operators who want to wire it into a router-side rule). |
+| `FilterChain` | `"input"` | Firewall filter chain (`input` / `forward`). |
+| `FilterAction` | `"drop"` | Firewall filter action (`drop` / `reject`). |
+| `CommentTemplate` | `"RdpAudit auto-block"` | Body of the rule comment. |
+| `CommentPrefix` | `"RdpAudit"` | Prefix recognised on existing rules so the provider only removes its own entries. |
 | `ValidateServerCertificate` | `true` | Disable only for lab / staging. |
 | `MaxOperationsPerMinute` | `120` | Rate limit guardrail. |
+| `BlockDurationDays` | `0` | Days component of the block duration. |
+| `BlockDurationHours` | `1` | Hours component of the block duration. |
+| `BlockDurationMinutes` | `0` | Minutes component of the block duration. |
 
 ## SessionControlOptions
 
