@@ -16,8 +16,11 @@ using Microsoft.Extensions.Options;
 using RdpAudit.Core.Config;
 using RdpAudit.Core.Data;
 using RdpAudit.Core.Events;
+using RdpAudit.Core.Firewall;
+using RdpAudit.Core.Security;
 using RdpAudit.Service.Alerts;
 using RdpAudit.Service.Collectors;
+using RdpAudit.Service.Firewall;
 using RdpAudit.Service.Ipc;
 using RdpAudit.Service.Processors;
 using RdpAudit.Service.Services;
@@ -139,6 +142,9 @@ public static class Program
 		services.AddSingleton<SettingsManager>();
 		services.AddSingleton<FirewallManager>();
 		services.AddSingleton<FirewallAutoBlockWorker>();
+		services.AddSingleton<ISecretProtector>(_ => CreateSecretProtector());
+		services.AddSingleton<IFirewallProvider, WindowsFirewallProvider>();
+		services.AddSingleton<MikroTikFirewallProvider>();
 		services.AddScoped<IpcDispatcher>();
 
 		AlertRuleRegistration.Register(services);
@@ -149,5 +155,17 @@ public static class Program
 		services.AddHostedService<IpcServerWorker>();
 		services.AddHostedService<MaintenanceWorker>();
 		services.AddHostedService(sp => sp.GetRequiredService<FirewallAutoBlockWorker>());
+	}
+
+	private static ISecretProtector CreateSecretProtector()
+	{
+		if (OperatingSystem.IsWindows())
+		{
+			return new DpapiSecretProtector();
+		}
+
+		// Non-production fallback so the host can boot under non-Windows CI / test rigs without
+		// resolving DPAPI. Service production deployments always run on Windows.
+		return new InMemorySecretProtector();
 	}
 }

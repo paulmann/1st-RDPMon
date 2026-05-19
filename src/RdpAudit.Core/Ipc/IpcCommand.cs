@@ -8,6 +8,12 @@
 namespace RdpAudit.Core.Ipc;
 
 /// <summary>Enumeration of IPC commands sent from Configurator to Service.</summary>
+/// <remarks>
+/// APPEND-ONLY ABI: ordinal values must NEVER be reused, reordered, or renumbered. Retired
+/// commands are deprecated in place but keep their ordinal forever so deployed clients and
+/// services across version skew never collide. Stage 1 reserves ordinals 11..31 even when the
+/// corresponding handlers are not yet implemented in <c>IpcDispatcher</c>.
+/// </remarks>
 public enum IpcCommand
 {
 	Ping = 0,
@@ -21,4 +27,27 @@ public enum IpcCommand
 	UnblockAddress = 8,
 	GetSettings = 9,
 	SaveSettings = 10,
+
+	// --- Stage 1 reservations (append-only). Handlers may return NotImplemented until later stages. ---
+	GetFirewallStatus = 11,
+	ListBlocklist = 12,
+	ListWhitelist = 13,
+	AddToBlocklist = 14,
+	RemoveFromBlocklist = 15,
+	AddToWhitelist = 16,
+	RemoveFromWhitelist = 17,
+	GetAttackStats = 18,
+	ListRdpSessions = 19,
+	DisconnectSession = 20,
+	LogoffSession = 21,
+	ShadowSession = 22,
+	GetShadowPolicyStatus = 23,
+	ApplyShadowPolicy = 24,
+	BackupShadowPolicy = 25,
+	RestoreShadowPolicy = 26,
+	GetAbuseIpDbStatus = 27,
+	TestAbuseIpDbKey = 28,
+	GetMikroTikStatus = 29,
+	TestMikroTik = 30,
+	ListActiveBlocks = 31,
 }

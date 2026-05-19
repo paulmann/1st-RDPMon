@@ -18,6 +18,7 @@ using Microsoft.Extensions.Options;
 using RdpAudit.Core.Config;
 using RdpAudit.Core.Data;
 using RdpAudit.Core.Ipc;
+using RdpAudit.Core.Ipc.Contracts;
 using RdpAudit.Core.Util;
 using RdpAudit.Service.Services;
 
@@ -66,6 +67,29 @@ public sealed class IpcDispatcher
 				IpcCommand.UnblockAddress => await BlockAddressAsync(request.Payload, false, ct).ConfigureAwait(false),
 				IpcCommand.GetSettings => _options.CurrentValue,
 				IpcCommand.SaveSettings => SaveSettings(request.Payload),
+
+				// --- Stage 1 reservations: stable command surface, handlers deferred to later stages. ---
+				IpcCommand.GetFirewallStatus
+					or IpcCommand.ListBlocklist
+					or IpcCommand.ListWhitelist
+					or IpcCommand.AddToBlocklist
+					or IpcCommand.RemoveFromBlocklist
+					or IpcCommand.AddToWhitelist
+					or IpcCommand.RemoveFromWhitelist
+					or IpcCommand.GetAttackStats
+					or IpcCommand.ListRdpSessions
+					or IpcCommand.DisconnectSession
+					or IpcCommand.LogoffSession
+					or IpcCommand.ShadowSession
+					or IpcCommand.GetShadowPolicyStatus
+					or IpcCommand.ApplyShadowPolicy
+					or IpcCommand.BackupShadowPolicy
+					or IpcCommand.RestoreShadowPolicy
+					or IpcCommand.GetAbuseIpDbStatus
+					or IpcCommand.TestAbuseIpDbKey
+					or IpcCommand.GetMikroTikStatus
+					or IpcCommand.TestMikroTik
+					or IpcCommand.ListActiveBlocks => NotImplementedResult(request.Command),
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
 
@@ -98,6 +122,13 @@ public sealed class IpcDispatcher
 			};
 		}
 	}
+
+	private static object NotImplementedResult(IpcCommand command) => new
+	{
+		status = IpcResultStatus.NotImplemented.ToString(),
+		command = command.ToString(),
+		message = "Command is reserved in Stage 1 but its handler is not yet implemented.",
+	};
 
 	private ServiceStatus BuildStatus()
 	{

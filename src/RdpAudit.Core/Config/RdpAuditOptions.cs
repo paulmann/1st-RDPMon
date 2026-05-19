@@ -21,4 +21,13 @@ public sealed class RdpAuditOptions
 	public StorageOptions Storage { get; set; } = new();
 
 	public DiagnosticsOptions Diagnostics { get; set; } = new();
+
+	/// <summary>AbuseIPDB external reputation / reporting provider settings.</summary>
+	public AbuseIpDbOptions AbuseIpDb { get; set; } = new();
+
+	/// <summary>MikroTik RouterOS external firewall provider settings.</summary>
+	public MikroTikOptions MikroTik { get; set; } = new();
+
+	/// <summary>RDP session control (disconnect, logoff, shadow) policy settings.</summary>
+	public SessionControlOptions SessionControl { get; set; } = new();
 }
