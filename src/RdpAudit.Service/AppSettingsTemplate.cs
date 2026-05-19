@@ -58,7 +58,10 @@ public static class AppSettingsTemplate
 			"BlockOnBlacklistedLogin": false,
 			"InstantBlockLogins": [],
 			"DefaultBlockDurationMinutes": 0,
-			"MaxActiveBlocks": 10000
+			"MaxActiveBlocks": 10000,
+			"WhitelistIps": [],
+			"RefusePrivateAddressBlock": true,
+			"AutoBlockDebounceSeconds": 60
 		},
 		"Storage": {
 			"DatabasePath": "",

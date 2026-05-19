@@ -141,10 +141,11 @@ public static class Program
 		services.AddSingleton<AlertCooldownTracker>();
 		services.AddSingleton<SettingsManager>();
 		services.AddSingleton<FirewallManager>();
-		services.AddSingleton<FirewallAutoBlockWorker>();
 		services.AddSingleton<ISecretProtector>(_ => CreateSecretProtector());
-		services.AddSingleton<IFirewallProvider, WindowsFirewallProvider>();
+		services.AddSingleton<WindowsFirewallProvider>();
 		services.AddSingleton<MikroTikFirewallProvider>();
+		services.AddSingleton<IFirewallProvider>(sp => sp.GetRequiredService<WindowsFirewallProvider>());
+		services.AddSingleton<IFirewallProvider>(sp => sp.GetRequiredService<MikroTikFirewallProvider>());
 		services.AddScoped<IpcDispatcher>();
 
 		AlertRuleRegistration.Register(services);
@@ -154,7 +155,8 @@ public static class Program
 		services.AddHostedService<AlertWorker>();
 		services.AddHostedService<IpcServerWorker>();
 		services.AddHostedService<MaintenanceWorker>();
-		services.AddHostedService(sp => sp.GetRequiredService<FirewallAutoBlockWorker>());
+		services.AddHostedService<FirewallAutoBlockWorker>();
+		services.AddHostedService<FirewallExpirationWorker>();
 	}
 
 	private static ISecretProtector CreateSecretProtector()

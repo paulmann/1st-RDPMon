@@ -9,6 +9,7 @@
 
 using System.Diagnostics;
 using System.Globalization;
+using System.Net;
 using System.Reflection;
 using System.Runtime.Versioning;
 using System.Text.Json;
@@ -17,8 +18,10 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RdpAudit.Core.Config;
 using RdpAudit.Core.Data;
+using RdpAudit.Core.Firewall;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
+using RdpAudit.Core.Models;
 using RdpAudit.Core.Util;
 using RdpAudit.Service.Services;
 
@@ -32,6 +35,7 @@ public sealed class IpcDispatcher
 	private readonly IOptionsMonitor<RdpAuditOptions> _options;
 	private readonly SettingsManager _settings;
 	private readonly FirewallManager _firewall;
+	private readonly IEnumerable<IFirewallProvider> _providers;
 	private readonly ILogger<IpcDispatcher> _logger;
 
 	public IpcDispatcher(
@@ -40,6 +44,7 @@ public sealed class IpcDispatcher
 		IOptionsMonitor<RdpAuditOptions> options,
 		SettingsManager settings,
 		FirewallManager firewall,
+		IEnumerable<IFirewallProvider> providers,
 		ILogger<IpcDispatcher> logger)
 	{
 		_factory = factory;
@@ -47,6 +52,7 @@ public sealed class IpcDispatcher
 		_options = options;
 		_settings = settings;
 		_firewall = firewall;
+		_providers = providers;
 		_logger = logger;
 	}
 
@@ -68,15 +74,18 @@ public sealed class IpcDispatcher
 				IpcCommand.GetSettings => _options.CurrentValue,
 				IpcCommand.SaveSettings => SaveSettings(request.Payload),
 
-				// --- Stage 1 reservations: stable command surface, handlers deferred to later stages. ---
-				IpcCommand.GetFirewallStatus
-					or IpcCommand.ListBlocklist
-					or IpcCommand.ListWhitelist
-					or IpcCommand.AddToBlocklist
-					or IpcCommand.RemoveFromBlocklist
-					or IpcCommand.AddToWhitelist
-					or IpcCommand.RemoveFromWhitelist
-					or IpcCommand.GetAttackStats
+				// --- Stage 3 handlers (backend-only). UI is deferred to a later stage. ---
+				IpcCommand.GetFirewallStatus => await GetFirewallStatusAsync(ct).ConfigureAwait(false),
+				IpcCommand.ListBlocklist => await ListBlocklistAsync(ct).ConfigureAwait(false),
+				IpcCommand.ListWhitelist => await ListWhitelistAsync(ct).ConfigureAwait(false),
+				IpcCommand.AddToBlocklist => await AddToBlocklistAsync(request.Payload, ct).ConfigureAwait(false),
+				IpcCommand.RemoveFromBlocklist => await RemoveFromBlocklistAsync(request.Payload, ct).ConfigureAwait(false),
+				IpcCommand.AddToWhitelist => await AddToWhitelistAsync(request.Payload, ct).ConfigureAwait(false),
+				IpcCommand.RemoveFromWhitelist => await RemoveFromWhitelistAsync(request.Payload, ct).ConfigureAwait(false),
+				IpcCommand.ListActiveBlocks => await ListActiveBlocksAsync(ct).ConfigureAwait(false),
+
+				// --- Reserved Stage 1 commands still awaiting later-stage implementations. ---
+				IpcCommand.GetAttackStats
 					or IpcCommand.ListRdpSessions
 					or IpcCommand.DisconnectSession
 					or IpcCommand.LogoffSession
@@ -88,8 +97,7 @@ public sealed class IpcDispatcher
 					or IpcCommand.GetAbuseIpDbStatus
 					or IpcCommand.TestAbuseIpDbKey
 					or IpcCommand.GetMikroTikStatus
-					or IpcCommand.TestMikroTik
-					or IpcCommand.ListActiveBlocks => NotImplementedResult(request.Command),
+					or IpcCommand.TestMikroTik => NotImplementedResult(request.Command),
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
 
@@ -308,5 +316,266 @@ public sealed class IpcDispatcher
 		{
 			throw new IpcException(ex.Message);
 		}
+	}
+
+	// ----------------------------------------------------------------------------------------------
+	// Stage 3 handlers
+	// ----------------------------------------------------------------------------------------------
+
+	private async Task<object?> GetFirewallStatusAsync(CancellationToken ct)
+	{
+		FirewallOptions cfg = _options.CurrentValue.Firewall;
+		FirewallStatusDto dto = new()
+		{
+			Status = IpcResultStatus.Success,
+			ConfiguredProvider = cfg.Provider,
+		};
+
+		foreach (IFirewallProvider provider in _providers)
+		{
+			FirewallStatusReport report;
+			try
+			{
+				report = await provider.GetStatusAsync(ct).ConfigureAwait(false);
+			}
+			catch (Exception ex)
+			{
+				_logger.LogWarning(ex, "Failed to query provider {ProviderId}", provider.ProviderId);
+				continue;
+			}
+
+			bool available = report.Status == FirewallProviderStatus.Available;
+			if (string.Equals(provider.ProviderId, "Windows", StringComparison.OrdinalIgnoreCase))
+			{
+				dto.WindowsAvailable = available;
+			}
+			else if (string.Equals(provider.ProviderId, "MikroTik", StringComparison.OrdinalIgnoreCase))
+			{
+				dto.MikroTikAvailable = available;
+			}
+		}
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+		dto.ActiveBlockCount = await db.ActiveBlocks
+			.CountAsync(b => b.Status == ActiveBlockStatus.Active || b.Status == ActiveBlockStatus.Pending, ct)
+			.ConfigureAwait(false);
+		dto.WhitelistCount = await db.WhitelistEntries.CountAsync(ct).ConfigureAwait(false);
+		dto.BlacklistCount = await db.BlocklistEntries.CountAsync(b => b.IsEnabled, ct).ConfigureAwait(false);
+		dto.Message = "Stage 3 firewall status snapshot.";
+		return dto;
+	}
+
+	private async Task<object?> ListBlocklistAsync(CancellationToken ct)
+	{
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+		List<BlocklistEntry> rows = await db.BlocklistEntries.AsNoTracking()
+			.OrderByDescending(b => b.AddedUtc)
+			.Take(2000)
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		return rows.ConvertAll(b => new AddressListEntryDto
+		{
+			Address = b.Ip ?? b.Login ?? string.Empty,
+			Note = b.Reason,
+			AddedUtc = b.AddedUtc,
+			ExpiresUtc = b.ExpiresUtc,
+			Source = b.Source.ToString(),
+		});
+	}
+
+	private async Task<object?> ListWhitelistAsync(CancellationToken ct)
+	{
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+		List<WhitelistEntry> rows = await db.WhitelistEntries.AsNoTracking()
+			.OrderByDescending(w => w.AddedUtc)
+			.Take(2000)
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		return rows.ConvertAll(w => new AddressListEntryDto
+		{
+			Address = w.Ip,
+			Note = w.Note,
+			AddedUtc = w.AddedUtc,
+			ExpiresUtc = null,
+			Source = w.AddedBy ?? "Configurator",
+		});
+	}
+
+	private async Task<object?> AddToBlocklistAsync(string? payload, CancellationToken ct)
+	{
+		AddressListMutationRequest req = DeserializeMutation(payload, "AddToBlocklist");
+		string ip = NormalizeAndValidateAddress(req.Address);
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+
+		// Whitelist precedence: refuse to add a row that contradicts an active whitelist entry.
+		bool whitelisted = await db.WhitelistEntries.AnyAsync(w => w.Ip == ip, ct).ConfigureAwait(false);
+		if (whitelisted)
+		{
+			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
+				"Cannot add {0} to blocklist: it is whitelisted.", ip));
+		}
+
+		DateTime nowUtc = DateTime.UtcNow;
+		DateTime? expiresUtc = req.DurationMinutes > 0 ? nowUtc.AddMinutes(req.DurationMinutes) : null;
+
+		BlocklistEntry? existing = await db.BlocklistEntries
+			.FirstOrDefaultAsync(b => b.Ip == ip && b.IsEnabled, ct).ConfigureAwait(false);
+
+		if (existing is null)
+		{
+			db.BlocklistEntries.Add(new BlocklistEntry
+			{
+				Ip = ip,
+				Reason = string.IsNullOrWhiteSpace(req.Note) ? "Configurator manual add" : req.Note!,
+				AddedUtc = nowUtc,
+				ExpiresUtc = expiresUtc,
+				Source = BlocklistSource.Manual,
+				IsEnabled = true,
+			});
+		}
+		else
+		{
+			existing.ExpiresUtc = expiresUtc;
+			if (!string.IsNullOrWhiteSpace(req.Note))
+			{
+				existing.Reason = req.Note!;
+			}
+		}
+
+		await db.SaveChangesAsync(ct).ConfigureAwait(false);
+		return new { status = IpcResultStatus.Success.ToString(), address = ip };
+	}
+
+	private async Task<object?> RemoveFromBlocklistAsync(string? payload, CancellationToken ct)
+	{
+		AddressListMutationRequest req = DeserializeMutation(payload, "RemoveFromBlocklist");
+		string ip = NormalizeAndValidateAddress(req.Address);
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+		List<BlocklistEntry> rows = await db.BlocklistEntries
+			.Where(b => b.Ip == ip && b.IsEnabled).ToListAsync(ct).ConfigureAwait(false);
+		foreach (BlocklistEntry row in rows)
+		{
+			row.IsEnabled = false;
+		}
+
+		await db.SaveChangesAsync(ct).ConfigureAwait(false);
+		return new { status = IpcResultStatus.Success.ToString(), address = ip, removed = rows.Count };
+	}
+
+	private async Task<object?> AddToWhitelistAsync(string? payload, CancellationToken ct)
+	{
+		AddressListMutationRequest req = DeserializeMutation(payload, "AddToWhitelist");
+		string ip = NormalizeAndValidateAddress(req.Address);
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+
+		WhitelistEntry? existing = await db.WhitelistEntries
+			.FirstOrDefaultAsync(w => w.Ip == ip, ct).ConfigureAwait(false);
+		if (existing is null)
+		{
+			db.WhitelistEntries.Add(new WhitelistEntry
+			{
+				Ip = ip,
+				Note = string.IsNullOrWhiteSpace(req.Note) ? "Configurator manual add" : req.Note,
+				AddedUtc = DateTime.UtcNow,
+				AddedBy = "Configurator",
+			});
+		}
+		else
+		{
+			existing.Note = string.IsNullOrWhiteSpace(req.Note) ? existing.Note : req.Note;
+		}
+
+		// Whitelist precedence: disable any active blocklist rows that reference this IP.
+		List<BlocklistEntry> conflicting = await db.BlocklistEntries
+			.Where(b => b.Ip == ip && b.IsEnabled).ToListAsync(ct).ConfigureAwait(false);
+		foreach (BlocklistEntry row in conflicting)
+		{
+			row.IsEnabled = false;
+		}
+
+		await db.SaveChangesAsync(ct).ConfigureAwait(false);
+		return new { status = IpcResultStatus.Success.ToString(), address = ip };
+	}
+
+	private async Task<object?> RemoveFromWhitelistAsync(string? payload, CancellationToken ct)
+	{
+		AddressListMutationRequest req = DeserializeMutation(payload, "RemoveFromWhitelist");
+		string ip = NormalizeAndValidateAddress(req.Address);
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+		WhitelistEntry? existing = await db.WhitelistEntries
+			.FirstOrDefaultAsync(w => w.Ip == ip, ct).ConfigureAwait(false);
+
+		if (existing is not null)
+		{
+			db.WhitelistEntries.Remove(existing);
+			await db.SaveChangesAsync(ct).ConfigureAwait(false);
+		}
+
+		return new { status = IpcResultStatus.Success.ToString(), address = ip, removed = existing is not null };
+	}
+
+	private async Task<object?> ListActiveBlocksAsync(CancellationToken ct)
+	{
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+		List<ActiveBlock> rows = await db.ActiveBlocks.AsNoTracking()
+			.OrderByDescending(b => b.CreatedUtc)
+			.Take(2000)
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		return rows.ConvertAll(b => new AddressListEntryDto
+		{
+			Address = b.Ip,
+			Note = string.IsNullOrEmpty(b.LastError) ? b.Reason : b.Reason + " (" + b.LastError + ")",
+			AddedUtc = b.CreatedUtc,
+			ExpiresUtc = b.ExpiresUtc,
+			Source = b.Provider.ToString() + ":" + b.Status,
+		});
+	}
+
+	private static AddressListMutationRequest DeserializeMutation(string? payload, string commandName)
+	{
+		if (string.IsNullOrWhiteSpace(payload))
+		{
+			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
+				"{0} requires a JSON payload with an Address field.", commandName));
+		}
+
+		AddressListMutationRequest? parsed;
+		try
+		{
+			parsed = JsonSerializer.Deserialize<AddressListMutationRequest>(payload, JsonOptions.Default);
+		}
+		catch (JsonException ex)
+		{
+			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
+				"{0} payload is not valid JSON: {1}", commandName, ex.Message));
+		}
+
+		if (parsed is null || string.IsNullOrWhiteSpace(parsed.Address))
+		{
+			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
+				"{0} requires an Address field.", commandName));
+		}
+		return parsed;
+	}
+
+	private static string NormalizeAndValidateAddress(string address)
+	{
+		if (string.IsNullOrWhiteSpace(address))
+		{
+			throw new IpcException("Address must not be empty.");
+		}
+
+		string trimmed = address.Trim();
+		if (!IPAddress.TryParse(trimmed, out IPAddress? parsed))
+		{
+			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
+				"Address '{0}' is not a valid IPv4 / IPv6 address.", trimmed));
+		}
+		return parsed.ToString();
 	}
 }
