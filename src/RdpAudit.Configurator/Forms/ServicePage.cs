@@ -13,8 +13,10 @@ using System.Globalization;
 using System.IO;
 using System.Runtime.Versioning;
 using RdpAudit.Configurator.Ipc;
+using RdpAudit.Configurator.Services;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Models;
+using RdpAudit.Core.Util;
 
 namespace RdpAudit.Configurator.Forms;
 
@@ -22,10 +24,11 @@ namespace RdpAudit.Configurator.Forms;
 [SupportedOSPlatform("windows")]
 public sealed class ServicePage : TabPage
 {
-	private const string ServiceName = "RdpAuditService";
+	private const string ServiceName = InstallationService.ServiceName;
 
 	private readonly IpcClient _ipc;
 	private readonly Label _status;
+	private readonly TextBox _layoutPanel;
 	private readonly DataGridView _alertsGrid;
 	private readonly System.Windows.Forms.Timer _timer;
 
@@ -53,6 +56,16 @@ public sealed class ServicePage : TabPage
 		buttons.Controls.AddRange(new Control[] { install, uninstall, start, stop, restart });
 
 		_status = new Label { Dock = DockStyle.Top, Height = 80, Text = "Connecting…", AutoSize = false };
+		_layoutPanel = new TextBox
+		{
+			Dock = DockStyle.Top,
+			Height = 160,
+			Multiline = true,
+			ReadOnly = true,
+			ScrollBars = ScrollBars.Vertical,
+			WordWrap = true,
+			Font = new Font(FontFamily.GenericMonospace, 9f),
+		};
 
 		_alertsGrid = new DataGridView
 		{
@@ -73,6 +86,7 @@ public sealed class ServicePage : TabPage
 		_alertsGrid.CellFormatting += SeverityColoring;
 
 		Controls.Add(_alertsGrid);
+		Controls.Add(_layoutPanel);
 		Controls.Add(_status);
 		Controls.Add(buttons);
 
@@ -116,53 +130,81 @@ public sealed class ServicePage : TabPage
 			: $"Version: {status.Version}\r\nUptime: {status.Uptime}\r\nEvents captured: {status.EventsCaptured} (dropped {status.EventsDropped})\r\nAlerts raised: {status.AlertsRaised}";
 
 		List<Alert>? alerts = await _ipc.SendAsync<List<Alert>>(IpcCommand.GetRecentAlerts).ConfigureAwait(true);
+		ServiceLayoutInfo layout = await Task.Run(() => ServiceLayout.Discover(AppContext.BaseDirectory)).ConfigureAwait(true);
 
 		_status.Text = label;
+		_layoutPanel.Text = FormatLayout(layout);
 		_alertsGrid.DataSource = alerts ?? new List<Alert>();
 	}
 
-	/// <summary>Resolve the absolute path to the installed service binary, validate it, and call sc create.</summary>
+	private static string FormatLayout(ServiceLayoutInfo layout)
+	{
+		string source = layout.DistributionDirectory ?? ServiceLayout.ResolveSiblingDistribution(layout.ConfiguratorDirectory);
+		string distLine = layout.DistributionExists
+			? (layout.ServiceExecutableExists
+				? $"present (RdpAudit.Service.exe found at {layout.ExpectedServiceExecutable})"
+				: $"present but missing executable {layout.ExpectedServiceExecutable}")
+			: "NOT FOUND — sc install will refuse to run";
+
+		return string.Format(CultureInfo.InvariantCulture,
+			"Install destination: {0}\r\n"
+			+ "Database path:       {1}\r\n"
+			+ "appsettings.json:    {2}\r\n"
+			+ "\r\n"
+			+ "Service distribution source\r\n"
+			+ "  Configurator dir: {3}\r\n"
+			+ "  Distribution dir: {4}\r\n"
+			+ "  Status:           {5}",
+			layout.InstallDirectory,
+			layout.DefaultDatabasePath,
+			layout.AppSettingsPath,
+			layout.ConfiguratorDirectory,
+			source,
+			distLine);
+	}
+
+	/// <summary>Discover the sibling Service distribution, copy it under Program Files,
+	/// and register/start the Windows service via the shared <see cref="InstallationService"/>.</summary>
 	private async Task InstallServiceAsync()
 	{
-		string binaryPath = ResolveServiceBinaryPath();
-		if (!File.Exists(binaryPath))
+		ServiceLayoutInfo layout = await Task.Run(() => ServiceLayout.Discover(AppContext.BaseDirectory)).ConfigureAwait(true);
+		if (!layout.DistributionExists || !layout.ServiceExecutableExists)
 		{
 			MessageBox.Show(
 				string.Format(CultureInfo.InvariantCulture,
-					"Service binary not found at:\r\n{0}\r\n\r\nCopy the published Service folder under Program Files first.",
-					binaryPath),
+					"Service distribution not found at:\r\n{0}\r\n"
+					+ "Run publish.ps1 so the Configurator can copy {1} to {2}.",
+					ServiceLayout.ResolveSiblingDistribution(layout.ConfiguratorDirectory),
+					ServiceLayout.ServiceExeName,
+					layout.InstallDirectory),
 				"RdpAudit",
 				MessageBoxButtons.OK,
 				MessageBoxIcon.Warning);
 			return;
 		}
 
-		// sc.exe expects: name= value pairs separated by spaces. The binPath value, if quoted, must
-		// have its quoted absolute path embedded inside the quoted argument (sc parses one whitespace
-		// after the "="). ProcessStartInfo.ArgumentList handles quoting per-argument.
-		string[] args =
+		InstallationService installer = new(layout);
+		InstallationOutcome outcome = await installer.RunAsync().ConfigureAwait(true);
+
+		System.Text.StringBuilder sb = new();
+		foreach (string step in outcome.Steps)
 		{
-			"create",
-			ServiceName,
-			"binPath= " + Quote(binaryPath),
-			"start= auto",
-			"obj= LocalSystem",
-			"DisplayName= RdpAudit Service",
-		};
+			sb.AppendLine("OK   " + step);
+		}
 
-		await ScAsync(null, args).ConfigureAwait(true);
-		// Configure failure restart policy: restart 60s, 60s, 60s
-		await ScAsync(null, new[] { "failure", ServiceName, "reset= 86400", "actions= restart/60000/restart/60000/restart/60000" }).ConfigureAwait(true);
+		foreach (string warning in outcome.Warnings)
+		{
+			sb.AppendLine("WARN " + warning);
+		}
+
+		foreach (string error in outcome.Errors)
+		{
+			sb.AppendLine("FAIL " + error);
+		}
+
+		MessageBox.Show(sb.ToString(), "RdpAudit Install", MessageBoxButtons.OK,
+			outcome.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
 	}
-
-	internal static string ResolveServiceBinaryPath()
-	{
-		string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-		return Path.Combine(programFiles, "RdpAudit", "Service", "RdpAudit.Service.exe");
-	}
-
-	private static string Quote(string value) =>
-		value.Contains(' ', StringComparison.Ordinal) ? "\"" + value + "\"" : value;
 
 	private static async Task ScAsync(string? leadingVerb, IReadOnlyList<string> args)
 	{

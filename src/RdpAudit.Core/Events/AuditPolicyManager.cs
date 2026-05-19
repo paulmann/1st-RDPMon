@@ -11,6 +11,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
+using RdpAudit.Core.Interop;
 
 namespace RdpAudit.Core.Events;
 
@@ -86,12 +87,75 @@ public sealed class AuditPolicyManager
 		return results;
 	}
 
-	/// <summary>Reads the current Success/Failure flags for a subcategory by GUID using exit-code parsing
-	/// (no English string parsing). Returns null on failure.</summary>
+	/// <summary>Reads the current Success/Failure flags for a subcategory by GUID.
+	/// Primary path: AuditQuerySystemPolicy advapi32 API — fully locale-stable.
+	/// Fallback path: parse <c>auditpol /r</c> CSV "Inclusion Setting" column
+	/// using locale-tolerant heuristics. Returns null on failure.</summary>
 	[SupportedOSPlatform("windows")]
 	public static AuditPolicyState? ReadSubcategoryState(string guid)
 	{
 		ArgumentException.ThrowIfNullOrWhiteSpace(guid);
+
+		AuditPolicyState? viaApi = ReadViaAuditQuerySystemPolicy(guid);
+		if (viaApi is not null)
+		{
+			return viaApi;
+		}
+
+		return ReadViaAuditpolCsv(guid);
+	}
+
+	/// <summary>Reads the inclusion bits directly from the Windows audit subsystem.
+	/// Locale-stable; requires SE_SECURITY_NAME (granted to Administrators).</summary>
+	[SupportedOSPlatform("windows")]
+	private static AuditPolicyState? ReadViaAuditQuerySystemPolicy(string guid)
+	{
+		if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+		{
+			return null;
+		}
+
+		if (!Guid.TryParse(guid, out Guid parsed))
+		{
+			return null;
+		}
+
+		Guid[] ids = { parsed };
+		IntPtr buffer = IntPtr.Zero;
+		try
+		{
+			if (!NativeMethods.AuditQuerySystemPolicy(ids, 1, out buffer) || buffer == IntPtr.Zero)
+			{
+				return null;
+			}
+
+			NativeMethods.AUDIT_POLICY_INFORMATION info =
+				Marshal.PtrToStructure<NativeMethods.AUDIT_POLICY_INFORMATION>(buffer);
+
+			bool success = (info.AuditingInformation & NativeMethods.POLICY_AUDIT_EVENT_SUCCESS) != 0;
+			bool failure = (info.AuditingInformation & NativeMethods.POLICY_AUDIT_EVENT_FAILURE) != 0;
+			return new AuditPolicyState(success, failure);
+		}
+		catch (Exception)
+		{
+			return null;
+		}
+		finally
+		{
+			if (buffer != IntPtr.Zero)
+			{
+				NativeMethods.AuditFree(buffer);
+			}
+		}
+	}
+
+	/// <summary>Locale-tolerant parser for <c>auditpol /get /subcategory:{guid} /r</c> CSV output.
+	/// Expected schema: <c>Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting</c>.
+	/// The "Inclusion Setting" value is localized text — we match the GUID column to the requested GUID,
+	/// then decode the inclusion column via keyword heuristics that work in EN/RU/DE/FR/ES Windows builds.</summary>
+	[SupportedOSPlatform("windows")]
+	private static AuditPolicyState? ReadViaAuditpolCsv(string guid)
+	{
 		string args = string.Format(CultureInfo.InvariantCulture, "/get /subcategory:{0} /r", guid);
 		try
 		{
@@ -115,27 +179,61 @@ public sealed class AuditPolicyManager
 				return null;
 			}
 
-			// /r outputs CSV with header row; the last numeric column "Inclusion Setting" carries values
-			// 0 = No Auditing, 1 = Success, 2 = Failure, 3 = Success and Failure (locale-stable bitfield).
-			foreach (string line in stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+			string[] lines = stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+			// Find the header line that names the columns; the GUID column index is stable but locale-named.
+			int guidColumn = -1;
+			int inclusionColumn = -1;
+			int headerIndex = -1;
+			for (int i = 0; i < lines.Length; i++)
 			{
-				string trimmed = line.Trim();
-				if (trimmed.Length == 0 || trimmed.StartsWith("Machine Name", StringComparison.Ordinal) || trimmed.StartsWith("Policy Target", StringComparison.Ordinal))
+				string[] cells = SplitCsv(lines[i]);
+				for (int c = 0; c < cells.Length; c++)
+				{
+					string cell = cells[c].Trim();
+					if (cell.IndexOf("GUID", StringComparison.OrdinalIgnoreCase) >= 0)
+					{
+						guidColumn = c;
+					}
+					else if (cell.IndexOf("Inclusion", StringComparison.OrdinalIgnoreCase) >= 0
+						|| cell.IndexOf("включения", StringComparison.OrdinalIgnoreCase) >= 0
+						|| cell.IndexOf("Einbezug", StringComparison.OrdinalIgnoreCase) >= 0)
+					{
+						inclusionColumn = c;
+					}
+				}
+
+				if (guidColumn >= 0 && inclusionColumn >= 0)
+				{
+					headerIndex = i;
+					break;
+				}
+			}
+
+			// Default to the canonical column layout if the header could not be parsed by name.
+			if (guidColumn < 0 || inclusionColumn < 0)
+			{
+				guidColumn = 3;
+				inclusionColumn = 4;
+			}
+
+			for (int i = headerIndex < 0 ? 0 : headerIndex + 1; i < lines.Length; i++)
+			{
+				string[] cells = SplitCsv(lines[i]);
+				if (cells.Length <= Math.Max(guidColumn, inclusionColumn))
 				{
 					continue;
 				}
 
-				string[] parts = trimmed.Split(',');
-				if (parts.Length < 5)
+				string cellGuid = cells[guidColumn].Trim();
+				if (cellGuid.Length == 0
+					|| !string.Equals(NormalizeGuid(cellGuid), NormalizeGuid(guid), StringComparison.OrdinalIgnoreCase))
 				{
 					continue;
 				}
 
-				string lastField = parts[parts.Length - 1].Trim();
-				if (int.TryParse(lastField, NumberStyles.Integer, CultureInfo.InvariantCulture, out int bits))
-				{
-					return new AuditPolicyState((bits & 1) != 0, (bits & 2) != 0);
-				}
+				string inclusion = cells[inclusionColumn].Trim();
+				return DecodeInclusion(inclusion);
 			}
 
 			return null;
@@ -144,6 +242,70 @@ public sealed class AuditPolicyManager
 		{
 			return null;
 		}
+	}
+
+	/// <summary>Decodes the localized "Inclusion Setting" text into success/failure flags.
+	/// Treats the value as a bitfield first (some Windows builds emit numeric inclusion in /r output),
+	/// then falls back to locale-tolerant keyword matching covering EN/RU/DE/FR/ES.</summary>
+	internal static AuditPolicyState DecodeInclusion(string inclusion)
+	{
+		if (int.TryParse(inclusion, NumberStyles.Integer, CultureInfo.InvariantCulture, out int bits))
+		{
+			return new AuditPolicyState((bits & 1) != 0, (bits & 2) != 0);
+		}
+
+		string lower = inclusion.ToLowerInvariant();
+		bool hasSuccess =
+			lower.Contains("success", StringComparison.Ordinal)
+			|| lower.Contains("успех", StringComparison.Ordinal)
+			|| lower.Contains("erfolg", StringComparison.Ordinal)
+			|| lower.Contains("succès", StringComparison.Ordinal)
+			|| lower.Contains("éxito", StringComparison.Ordinal)
+			|| lower.Contains("correcto", StringComparison.Ordinal);
+		bool hasFailure =
+			lower.Contains("failure", StringComparison.Ordinal)
+			|| lower.Contains("отказ", StringComparison.Ordinal)
+			|| lower.Contains("fehl", StringComparison.Ordinal)
+			|| lower.Contains("échec", StringComparison.Ordinal)
+			|| lower.Contains("fallo", StringComparison.Ordinal)
+			|| lower.Contains("error", StringComparison.Ordinal);
+
+		// "No Auditing" and the empty string both reduce to (false, false).
+		return new AuditPolicyState(hasSuccess, hasFailure);
+	}
+
+	internal static string NormalizeGuid(string value)
+	{
+		string trimmed = value.Trim();
+		return Guid.TryParse(trimmed, out Guid g) ? g.ToString("B", CultureInfo.InvariantCulture).ToUpperInvariant() : trimmed.ToUpperInvariant();
+	}
+
+	private static string[] SplitCsv(string line)
+	{
+		List<string> result = new();
+		System.Text.StringBuilder current = new();
+		bool inQuotes = false;
+		for (int i = 0; i < line.Length; i++)
+		{
+			char c = line[i];
+			if (c == '"')
+			{
+				inQuotes = !inQuotes;
+				continue;
+			}
+
+			if (c == ',' && !inQuotes)
+			{
+				result.Add(current.ToString());
+				current.Clear();
+				continue;
+			}
+
+			current.Append(c);
+		}
+
+		result.Add(current.ToString());
+		return result.ToArray();
 	}
 
 	private static (int Code, string? Error) RunAuditpol(string args)
