@@ -1,19 +1,25 @@
 # Attack Statistics (Stage 6)
 
 The Attack Statistics subsystem materialises one row per attacker IP with a deterministic
-`ThreatScore` and a cameyo-style green / yellow / red classification. It is the back-end for the
-Configurator **Attack Statistics** tab (`docs/30-configurator.md`).
+`ThreatScore` and a cameyo-style green / yellow / red classification. The subsystem ships in two
+sub-stages:
+
+* **Stage 6A** (this branch) — back-end aggregation worker, threat-scoring rules, and the
+  `GetAttackStats` IPC command. No Configurator UI tab.
+* **Stage 6B** (deferred) — the Configurator **Attack Statistics** tab consuming the IPC contract
+  delivered in Stage 6A.
 
 ## Components
 
-| Layer | Code | Responsibility |
-|-------|------|----------------|
-| Schema | `Core/Models/AttackStat.cs` + `Core/Data/Configurations/AttackStatConfiguration.cs` | One row per source IP. Primary key is `Ip`. Materialised by the worker. |
-| Aggregation | `Core/Models/AttackStatsAggregator.cs` | Pure projection from a bounded slice of `RawEvents` and a set of currently-blocked IPs into one `AttackStat` per distinct source IP. |
-| Scoring | `Core/Models/AttackThreatScoring.cs` | Pure, deterministic `ThreatScore` in `[0..100]` and a `AttackThreatLevel` classification. |
-| Worker | `Service/Workers/AttackStatsRefreshWorker.cs` | Background service. Refreshes the table once at startup and then every 60 seconds. `SemaphoreSlim` guards against concurrent re-entry. |
-| IPC | `Service/Ipc/IpcDispatcher.cs::GetAttackStatsAsync` + `Core/Ipc/Contracts/AttackStatsRequest.cs` + `Core/Ipc/Contracts/AttackStatEntryDto.cs` + `Core/Ipc/Contracts/AttackStatsDto.cs` | Filtered / paged read surface used by the Configurator tab. |
-| UI | `Configurator/Forms/AttackStatisticsPage.cs` + `Core/Util/AttackStatsFilter.cs` | Grid + filter toolbar + right-click menu. See `docs/30-configurator.md`. |
+| Layer | Code | Responsibility | Stage |
+|-------|------|----------------|-------|
+| Schema | `Core/Models/AttackStat.cs` + `Core/Data/Configurations/AttackStatConfiguration.cs` | One row per source IP. Primary key is `Ip`. Materialised by the worker. | 2 |
+| Aggregation | `Core/Models/AttackStatsAggregator.cs` | Pure projection from a bounded slice of `RawEvents` and a set of currently-blocked IPs into one `AttackStat` per distinct source IP. | 6A |
+| Scoring | `Core/Models/AttackThreatScoring.cs` | Pure, deterministic `ThreatScore` in `[0..100]` and a `AttackThreatLevel` classification. | 6A |
+| Worker | `Service/Workers/AttackStatsRefreshWorker.cs` | Background service. Refreshes the table once at startup and then every 60 seconds. `SemaphoreSlim` guards against concurrent re-entry. | 6A |
+| IPC | `Service/Ipc/IpcDispatcher.cs::GetAttackStatsAsync` + `Core/Ipc/Contracts/AttackStatsRequest.cs` + `Core/Ipc/Contracts/AttackStatEntryDto.cs` + `Core/Ipc/Contracts/AttackStatsDto.cs` | Filtered / paged read surface. Returns controlled `IpcResponse` payloads — never raw exceptions. | 6A |
+| Filter helper | `Core/Util/AttackStatsFilter.cs` | Pure predicate mirroring `AttackStatsRequest`. Used by Stage 6B UI for client-side pre-filtering while the operator types. | 6A (helper) / 6B (UI consumer) |
+| UI | `Configurator/Forms/AttackStatisticsPage.cs` | Grid + filter toolbar + right-click menu. See `docs/30-configurator.md`. | 6B |
 
 ## Refresh cadence
 
@@ -145,5 +151,26 @@ IPC command.
 
 ## Roadmap
 
-Stage 7 will introduce the **Remote RDP Clients** tab and session-control IPC. Stage 6 deliberately
-omits AbuseIPDB / MikroTik integration. See `docs/80-roadmap.md`.
+Stage 6B will introduce the Configurator **Attack Statistics** tab that consumes the
+`GetAttackStats` IPC contract delivered in Stage 6A. Stage 7 will introduce the **Remote RDP
+Clients** tab and session-control IPC. Stage 6 deliberately omits AbuseIPDB / MikroTik integration.
+See `docs/80-roadmap.md`.
+
+## Stage 6B prerequisites (UI delivery)
+
+Before Stage 6B can start:
+
+1. **Stage 6A is on a Windows host.** The service installed and running with the
+   `AttackStatsRefreshWorker` registered must materialise rows in `AttackStats` end-to-end. Smoke
+   the worker by:
+   * Seeding or driving a synthetic burst against the host and confirming one row per source IP
+     appears within one 60-second refresh cycle.
+   * `SELECT Ip, TotalAttempts, Failed, Successful, ThreatScore, IsBlocked, LastUpdatedUtc FROM
+     AttackStats ORDER BY LastUpdatedUtc DESC LIMIT 20;` returns the expected projection.
+2. **IPC contract is byte-stable.** `IpcCommandStabilityTests.Ordinal_IsStable` keeps
+   `GetAttackStats = 18`. All Stage 6A `[Key]` slots on `AttackStatsDto` /
+   `AttackStatEntryDto` / `AttackStatsRequest` are append-only; Stage 6B does not introduce new
+   keys for the tab work — the UI uses what 6A returns.
+3. **Filter helper is shared.** `Core/Util/AttackStatsFilter.cs` already mirrors the server-side
+   filter so the UI can pre-filter cached rows without an extra round-trip while the operator
+   types. Stage 6B reuses this without re-implementing the predicate.
