@@ -75,6 +75,10 @@ public sealed class InstallationService
 		List<string> warnings = new();
 		List<string> errors = new();
 
+		// Snapshot before any audit policy / SACL / service / appsettings change is made,
+		// so a misbehaving repair can be undone via the Restore button.
+		await TakePreInstallBackupAsync(steps, warnings, ct).ConfigureAwait(false);
+
 		Record(EnsureProgramDataLayout, steps, errors);
 		Record(EnsureAppSettings, steps, errors);
 
@@ -94,6 +98,30 @@ public sealed class InstallationService
 		}
 
 		return new InstallationOutcome(errors.Count == 0, steps, warnings, errors);
+	}
+
+	internal async Task TakePreInstallBackupAsync(List<string> steps, List<string> warnings, CancellationToken ct)
+	{
+		try
+		{
+			// Backup runner needs the ProgramData folder; create it without ACLs first so the
+			// snapshot directory can be written. Full ACL hardening still runs as a regular install step.
+			Directory.CreateDirectory(_layout.ProgramDataDirectory);
+			BackupRunner runner = new(_layout);
+			BackupOutcome outcome = await runner.RunAsync(BackupReason.FirstRunInstall, ct).ConfigureAwait(false);
+			steps.Add($"Pre-install backup snapshot: {outcome.Snapshot.SnapshotDirectory}");
+			foreach (BackupStep step in outcome.Steps)
+			{
+				if (!step.Ok)
+				{
+					warnings.Add($"Backup step '{step.Description}' did not complete: {step.Detail ?? "(no detail)"}");
+				}
+			}
+		}
+		catch (Exception ex)
+		{
+			warnings.Add($"Pre-install backup could not run: {ex.Message}");
+		}
 	}
 
 	internal InstallStep EnsureProgramDataLayout()

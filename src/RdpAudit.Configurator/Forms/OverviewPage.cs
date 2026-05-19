@@ -13,6 +13,7 @@ using System.Reflection;
 using System.Runtime.Versioning;
 using System.Text;
 using RdpAudit.Configurator.Services;
+using RdpAudit.Core.Backup;
 
 namespace RdpAudit.Configurator.Forms;
 
@@ -35,6 +36,8 @@ public sealed class OverviewPage : TabPage
 	private readonly TextBox _statusReport;
 	private readonly Button _install;
 	private readonly Button _refresh;
+	private readonly Button _backup;
+	private readonly Button _restore;
 	private readonly Label _status;
 	private readonly OverviewProbe _probe = new();
 
@@ -121,6 +124,24 @@ public sealed class OverviewPage : TabPage
 		};
 		_refresh.Click += async (_, _) => await RefreshAsync().ConfigureAwait(true);
 
+		_backup = new Button
+		{
+			Text = "Backup Settings",
+			Width = 160,
+			Height = 32,
+			Location = new Point(352, 236),
+		};
+		_backup.Click += async (_, _) => await OnBackupClickAsync().ConfigureAwait(true);
+
+		_restore = new Button
+		{
+			Text = "Restore Registry/Policy Settings",
+			Width = 260,
+			Height = 32,
+			Location = new Point(524, 236),
+		};
+		_restore.Click += async (_, _) => await OnRestoreClickAsync().ConfigureAwait(true);
+
 		_status = new Label
 		{
 			Text = "Ready",
@@ -151,6 +172,8 @@ public sealed class OverviewPage : TabPage
 		Controls.Add(_emailLink);
 		Controls.Add(_install);
 		Controls.Add(_refresh);
+		Controls.Add(_backup);
+		Controls.Add(_restore);
 		Controls.Add(_status);
 		Controls.Add(_statusReport);
 
@@ -259,6 +282,121 @@ public sealed class OverviewPage : TabPage
 		{
 			_install.Enabled = true;
 			await RefreshAsync().ConfigureAwait(true);
+		}
+	}
+
+	private async Task OnBackupClickAsync()
+	{
+		_backup.Enabled = false;
+		_status.Text = "Capturing backup snapshot...";
+		try
+		{
+			OverviewSnapshot snapshot = await Task.Run(() => _probe.Capture()).ConfigureAwait(true);
+			BackupRunner runner = new(snapshot.Layout);
+			BackupOutcome outcome = await runner.RunAsync(BackupReason.Manual).ConfigureAwait(true);
+
+			StringBuilder sb = new();
+			sb.AppendLine("=== Backup snapshot ===");
+			sb.AppendLine("Folder: " + outcome.Snapshot.SnapshotDirectory);
+			sb.AppendLine();
+			foreach (BackupStep step in outcome.Steps)
+			{
+				sb.Append(step.Ok ? "OK   " : "FAIL ");
+				sb.Append(step.Description);
+				if (!string.IsNullOrEmpty(step.Detail))
+				{
+					sb.Append(" — ").Append(step.Detail);
+				}
+
+				sb.AppendLine();
+			}
+
+			_statusReport.Text = sb.ToString();
+			_status.Text = outcome.Success
+				? "Backup completed: " + outcome.Snapshot.SnapshotDirectory
+				: "Backup completed with errors — see report.";
+		}
+		catch (Exception ex)
+		{
+			_status.Text = "Backup failed: " + ex.GetType().Name;
+			_statusReport.Text = ex.ToString();
+		}
+		finally
+		{
+			_backup.Enabled = true;
+		}
+	}
+
+	private async Task OnRestoreClickAsync()
+	{
+		_restore.Enabled = false;
+		_status.Text = "Preparing restore...";
+		try
+		{
+			OverviewSnapshot snapshot = await Task.Run(() => _probe.Capture()).ConfigureAwait(true);
+			BackupRunner runner = new(snapshot.Layout);
+			IReadOnlyList<string> available = await Task.Run(runner.ListSnapshots).ConfigureAwait(true);
+			if (available.Count == 0)
+			{
+				MessageBox.Show(
+					"No backup snapshots are available yet. Use the Backup Settings button to capture one first.",
+					"RdpAudit Restore",
+					MessageBoxButtons.OK,
+					MessageBoxIcon.Information);
+				_status.Text = "Restore cancelled — no snapshots available.";
+				return;
+			}
+
+			string selected = available[0];
+			string confirm = string.Format(CultureInfo.InvariantCulture,
+				"Restore registry/SACL and audit policy settings from snapshot {0}?\r\n\r\n"
+				+ "A pre-restore safety snapshot will be captured automatically. The audit "
+				+ "event database is NOT modified. Continue?",
+				selected);
+			DialogResult choice = MessageBox.Show(
+				confirm,
+				"RdpAudit Restore",
+				MessageBoxButtons.YesNo,
+				MessageBoxIcon.Warning);
+			if (choice != DialogResult.Yes)
+			{
+				_status.Text = "Restore cancelled by user.";
+				return;
+			}
+
+			RestoreRunner restoreRunner = new(snapshot.Layout, runner);
+			RestoreOutcome outcome = await restoreRunner.RunAsync(selected, RestoreScope.PoliciesAndRegistry).ConfigureAwait(true);
+
+			StringBuilder sb = new();
+			sb.AppendLine("=== Restore ===");
+			sb.AppendLine("Source snapshot: " + selected);
+			sb.AppendLine("Safety snapshot: " + outcome.SafetySnapshot.SnapshotDirectory);
+			sb.AppendLine();
+			foreach (RestoreStep step in outcome.Steps)
+			{
+				sb.Append(step.Ok ? "OK   " : "FAIL ");
+				sb.Append(step.Description);
+				if (!string.IsNullOrEmpty(step.Detail))
+				{
+					sb.Append(" — ").Append(step.Detail);
+				}
+
+				sb.AppendLine();
+			}
+
+			_statusReport.Text = sb.ToString();
+			_status.Text = outcome.Success
+				? "Restore completed."
+				: "Restore completed with errors — see report.";
+		}
+		catch (Exception ex)
+		{
+			_status.Text = "Restore failed: " + ex.GetType().Name;
+			_statusReport.Text = ex.ToString();
+		}
+		finally
+		{
+			_restore.Enabled = true;
 		}
 	}
 
