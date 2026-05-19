@@ -71,11 +71,16 @@ Stage 3 IPC semantics:
 * `ListActiveBlocks` returns `AddressListEntryDto` records whose `Source` field encodes `Provider:Status` (e.g. `Windows:Active`). `Note` carries the audit reason and any provider error.
 * All writes go through the service's `AuditDbContext` via EF Core parameterised APIs; the Configurator never opens the SQLite database for writes.
 
+Stage 6 implemented commands (Attack Statistics tab in the Configurator drives this):
+
+| Command | Ordinal | Direction | Payload | Returns |
+|---------|---------|-----------|---------|---------|
+| `GetAttackStats` | 18 | C→S | `AttackStatsRequest` (optional) | `AttackStatsDto` (includes `Entries`, `TotalMatching`, `AppliedLimit`; see `docs/46-attack-statistics.md`) |
+
 Reserved Stage 1 commands still pending later stages:
 
 | Command | Ordinal | Direction | Payload | Returns |
 |---------|---------|-----------|---------|---------|
-| `GetAttackStats` | 18 | C→S | – | `AttackStatsDto` |
 | `ListRdpSessions` | 19 | C→S | – | `RdpSessionDto[]` |
 | `DisconnectSession` | 20 | C→S | `SessionActionRequest` | `SessionActionResult` |
 | `LogoffSession` | 21 | C→S | `SessionActionRequest` | `SessionActionResult` |
@@ -112,3 +117,31 @@ All Stage 1 DTOs live under `RdpAudit.Core.Ipc.Contracts.*` with explicit `[Mess
 
 * Manual: restart service, point Configurator at it, walk every tab, confirm round-trip.
 * Automated: `IpcCommandStabilityTests` (Core.Tests) — fails if any ordinal is reused or renumbered. Add a fakes-based dispatcher test if you change `IpcDispatcher`.
+
+## Stage 6 — Attack Statistics (this branch)
+
+`GetAttackStats` (ordinal `18`) was a Stage 1 reservation and is implemented in Stage 6. The
+payload is optional `AttackStatsRequest` JSON:
+
+| Field | Type | Default | Meaning |
+|-------|------|---------|---------|
+| `IpQuery` | `string?` | `null` | Case-insensitive substring match against `AttackStat.Ip`. |
+| `MinThreatScore` | `double?` | `null` | Inclusive lower bound on `ThreatScore`. |
+| `OnlyBlocked` | `bool` | `false` | When `true`, only rows where `IsBlocked == true` are returned. |
+| `SinceUtc` / `UntilUtc` | `DateTime?` | last 7 days / now | Inclusive `LastSeenUtc` window. |
+| `Limit` | `int` | `500` | Clamped server-side to `[1..2000]`. Zero falls back to the default. |
+
+The response is the existing `AttackStatsDto` extended with append-only fields:
+
+| Key | Field | Stage |
+|-----|-------|-------|
+| 0..8 | `Status`, `WindowStartUtc`, `WindowEndUtc`, `FailedLogons`, `SuccessfulLogons`, `DistinctSourceIps`, `AlertsRaised`, `AddressesAutoBlocked`, `Message` | Stage 1 reservation. |
+| 9 | `Entries: List<AttackStatEntryDto>` | Stage 6. |
+| 10 | `TotalMatching: int` | Stage 6. Total rows matching the filter before the limit. |
+| 11 | `AppliedLimit: int` | Stage 6. The clamped limit the server actually used. |
+
+`AttackStatEntryDto` is a new contract under `RdpAudit.Core.Ipc.Contracts` with explicit
+`[MessagePackObject]` + integer `[Key]` indices (`0..12`).
+
+Rows are returned ordered by descending `LastSeenUtc`, descending `ThreatScore`, ascending `Ip`.
+Threat scoring / classification semantics are defined in `docs/46-attack-statistics.md`.

@@ -92,9 +92,11 @@ public sealed class IpcDispatcher
 				IpcCommand.ListActiveBlocksDetailed => await ListActiveBlocksDetailedAsync(ct).ConfigureAwait(false),
 				IpcCommand.UnblockActiveBlock => await UnblockActiveBlockAsync(request.Payload, ct).ConfigureAwait(false),
 
+				// --- Stage 6 handlers (Attack Statistics tab). ---
+				IpcCommand.GetAttackStats => await GetAttackStatsAsync(request.Payload, ct).ConfigureAwait(false),
+
 				// --- Reserved Stage 1 commands still awaiting later-stage implementations. ---
-				IpcCommand.GetAttackStats
-					or IpcCommand.ListRdpSessions
+				IpcCommand.ListRdpSessions
 					or IpcCommand.DisconnectSession
 					or IpcCommand.LogoffSession
 					or IpcCommand.ShadowSession
@@ -813,6 +815,153 @@ public sealed class IpcDispatcher
 		}
 		return parsed;
 	}
+
+	// ----------------------------------------------------------------------------------------------
+	// Stage 6 handlers
+	// ----------------------------------------------------------------------------------------------
+
+	/// <summary>Default cap on rows returned by <c>GetAttackStats</c> when no limit is supplied.</summary>
+	internal const int AttackStatsDefaultLimit = 500;
+
+	/// <summary>Upper bound on rows returned by <c>GetAttackStats</c> regardless of caller intent.</summary>
+	internal const int AttackStatsMaxLimit = 2000;
+
+	private async Task<object?> GetAttackStatsAsync(string? payload, CancellationToken ct)
+	{
+		AttackStatsRequest req = ParseAttackStatsRequest(payload);
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+
+		DateTime windowEnd = req.UntilUtc ?? DateTime.UtcNow;
+		DateTime windowStart = req.SinceUtc ?? (windowEnd - TimeSpan.FromDays(7));
+
+		IQueryable<AttackStat> q = db.AttackStats.AsNoTracking();
+
+		if (!string.IsNullOrWhiteSpace(req.IpQuery))
+		{
+			string needle = req.IpQuery.Trim();
+			q = q.Where(s => EF.Functions.Like(s.Ip, "%" + needle + "%"));
+		}
+
+		if (req.MinThreatScore.HasValue)
+		{
+			double min = req.MinThreatScore.Value;
+			q = q.Where(s => s.ThreatScore >= min);
+		}
+
+		if (req.OnlyBlocked)
+		{
+			q = q.Where(s => s.IsBlocked);
+		}
+
+		if (req.SinceUtc.HasValue)
+		{
+			DateTime since = req.SinceUtc.Value;
+			q = q.Where(s => s.LastSeenUtc >= since);
+		}
+
+		if (req.UntilUtc.HasValue)
+		{
+			DateTime until = req.UntilUtc.Value;
+			q = q.Where(s => s.LastSeenUtc <= until);
+		}
+
+		int totalMatching = await q.CountAsync(ct).ConfigureAwait(false);
+
+		int limit = req.Limit <= 0 ? AttackStatsDefaultLimit : req.Limit;
+		if (limit > AttackStatsMaxLimit)
+		{
+			limit = AttackStatsMaxLimit;
+		}
+
+		List<AttackStat> rows = await q
+			.OrderByDescending(s => s.LastSeenUtc)
+			.ThenByDescending(s => s.ThreatScore)
+			.ThenBy(s => s.Ip)
+			.Take(limit)
+			.ToListAsync(ct)
+			.ConfigureAwait(false);
+
+		// Window summary counters — computed against RawEvents in the requested window so they line
+		// up with what the per-IP rows describe.
+		long failed = await db.RawEvents.AsNoTracking()
+			.Where(e => e.TimeUtc >= windowStart && e.TimeUtc <= windowEnd && e.EventId == AttackStatsAggregator.EventIdLogonFailure)
+			.LongCountAsync(ct).ConfigureAwait(false);
+		long successful = await db.RawEvents.AsNoTracking()
+			.Where(e => e.TimeUtc >= windowStart && e.TimeUtc <= windowEnd && e.EventId == AttackStatsAggregator.EventIdLogonSuccess)
+			.LongCountAsync(ct).ConfigureAwait(false);
+		long distinctIps = await db.RawEvents.AsNoTracking()
+			.Where(e => e.TimeUtc >= windowStart && e.TimeUtc <= windowEnd && e.SourceIp != null && e.SourceIp != string.Empty)
+			.Select(e => e.SourceIp!)
+			.Distinct()
+			.LongCountAsync(ct).ConfigureAwait(false);
+		long alertsRaised = await db.Alerts.AsNoTracking()
+			.Where(a => a.TimeUtc >= windowStart && a.TimeUtc <= windowEnd)
+			.LongCountAsync(ct).ConfigureAwait(false);
+		long autoBlocked = await db.ActiveBlocks.AsNoTracking()
+			.Where(b => b.CreatedUtc >= windowStart && b.CreatedUtc <= windowEnd
+				&& (b.Status == ActiveBlockStatus.Active || b.Status == ActiveBlockStatus.Pending))
+			.LongCountAsync(ct).ConfigureAwait(false);
+
+		AttackStatsDto dto = new()
+		{
+			Status = IpcResultStatus.Success,
+			WindowStartUtc = windowStart,
+			WindowEndUtc = windowEnd,
+			FailedLogons = failed,
+			SuccessfulLogons = successful,
+			DistinctSourceIps = distinctIps,
+			AlertsRaised = alertsRaised,
+			AddressesAutoBlocked = autoBlocked,
+			Message = string.Format(CultureInfo.InvariantCulture,
+				"Stage 6 attack statistics snapshot. matching={0} returned={1}",
+				totalMatching, rows.Count),
+			TotalMatching = totalMatching,
+			AppliedLimit = limit,
+		};
+
+		foreach (AttackStat row in rows)
+		{
+			dto.Entries.Add(new AttackStatEntryDto
+			{
+				Ip = row.Ip,
+				TotalAttempts = row.TotalAttempts,
+				Successful = row.Successful,
+				Failed = row.Failed,
+				FirstSeenUtc = row.FirstSeenUtc,
+				LastSeenUtc = row.LastSeenUtc,
+				DurationSeconds = row.DurationSeconds,
+				Top10AttemptedLogins = row.Top10AttemptedLogins,
+				LastLoginType = row.LastLoginType,
+				ThreatScore = row.ThreatScore,
+				ThreatLevel = AttackThreatScoring.ClassifyScore(row.ThreatScore),
+				IsBlocked = row.IsBlocked,
+				LastUpdatedUtc = row.LastUpdatedUtc,
+			});
+		}
+
+		return dto;
+	}
+
+	private static AttackStatsRequest ParseAttackStatsRequest(string? payload)
+	{
+		if (string.IsNullOrWhiteSpace(payload))
+		{
+			return new AttackStatsRequest();
+		}
+
+		try
+		{
+			AttackStatsRequest? parsed = JsonSerializer.Deserialize<AttackStatsRequest>(payload, JsonOptions.Default);
+			return parsed ?? new AttackStatsRequest();
+		}
+		catch (JsonException ex)
+		{
+			throw new IpcException("GetAttackStats payload is not valid JSON: " + ex.Message);
+		}
+	}
+
+	// ----------------------------------------------------------------------------------------------
 
 	private static string NormalizeAndValidateLogin(string login)
 	{
