@@ -77,13 +77,20 @@ public static class AppSettingsTemplate
 		},
 		"AbuseIpDb": {
 			"Enabled": false,
+			"ReportAttacks": false,
 			"ApiKey": "",
 			"BaseUrl": "https://api.abuseipdb.com",
+			"EndpointUrl": "https://api.abuseipdb.com/api/v2/report",
 			"TimeoutSeconds": 15,
 			"MaxReportsPerMinute": 60,
+			"MaxReportsPerHour": 100,
+			"MaxReportsPerDay": 500,
+			"DeduplicationWindowMinutes": 15,
 			"CacheLookups": true,
 			"CacheTtlMinutes": 60,
 			"ReportThreshold": 80,
+			"MinThreatScore": 60.0,
+			"MinFailedAttempts": 10,
 			"ReportCategories": [18, 22]
 		},
 		"MikroTik": {

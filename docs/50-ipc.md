@@ -100,12 +100,23 @@ Stage 7 IPC semantics:
 * `BackupShadowPolicy` captures every tracked registry value into `%ProgramData%\RdpAudit\Backups\<yyyyMMdd-HHmmss>\shadow-policy.json`. The snapshot directory layout matches `BackupRunner` so the global backup workflow can include the shadow policy in the same folder hierarchy.
 * `RestoreShadowPolicy` accepts an optional snapshot id (or null = latest). Missing values in the snapshot are deleted from the registry on restore, exactly mirroring the captured pre-change state.
 
+Stage 8 implemented commands (AbuseIPDB integration — Configurator AbuseIPDB tab drives these):
+
+| Command | Ordinal | Direction | Payload | Returns |
+|---------|---------|-----------|---------|---------|
+| `GetAbuseIpDbStatus` | 27 | C→S | – | `AbuseIpDbStatusDto` |
+| `TestAbuseIpDbKey` | 28 | C→S | – | `AbuseIpDbTestResult` |
+
+Stage 8 IPC semantics:
+
+* `GetAbuseIpDbStatus` returns `AbuseIpDbStatusDto` carrying `CredentialPresent`, `ReportingEnabled`, `EndpointUrl`, total / hourly / daily report counters, the last response code / timestamp / IP / error, the `RateLimited` flag and the configured dedup window / hourly cap / daily cap. The API key is NEVER returned over IPC. `GetSettings` masks any non-empty secret envelope to the literal string `***configured***` so the encrypted payload also never leaves the service host.
+* `TestAbuseIpDbKey` performs a structural check (40..128 hex characters, canonical 80) against the unprotected key. On a passing format check the dispatcher issues a read-only `GET /api/v2/check?ipAddress=127.0.0.1` request to the configured BaseUrl; a 2xx response means AbuseIPDB accepted the credential, 401/403 means it was rejected, 429 means rate-limited. The handler NEVER submits an abuse report.
+* `SaveSettings` continues to handle AbuseIPDB persistence: a plaintext key supplied by the Configurator is wrapped by `ISecretProtector` (DPAPI on Windows, `InMemorySecretProtector` for non-Windows CI) before atomic-write replacement of `appsettings.json`. Already-protected envelopes are passed through unchanged.
+
 Reserved Stage 1 commands still pending later stages:
 
 | Command | Ordinal | Direction | Payload | Returns |
 |---------|---------|-----------|---------|---------|
-| `GetAbuseIpDbStatus` | 27 | C→S | – | `ProviderStatusDto` |
-| `TestAbuseIpDbKey` | 28 | C→S | – | `ProviderTestResult` |
 | `GetMikroTikStatus` | 29 | C→S | – | `ProviderStatusDto` |
 | `TestMikroTik` | 30 | C→S | – | `ProviderTestResult` |
 

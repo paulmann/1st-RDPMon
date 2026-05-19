@@ -536,21 +536,81 @@ Deferred to Stage 8+ (explicitly NOT in Stage 7):
 * MikroTik page and REST client.
 * Cross-tab filter linking between Attack Statistics / Remote RDP Clients and Live Events.
 
-### Stage 8 prerequisites
+### Stage 8 (delivered) — AbuseIPDB integration
 
-Before Stage 8 can start:
+Stage 8 delivers the optional AbuseIPDB reputation / reporting integration. MikroTik integration
+(ordinals 29 and 30) remains deferred to Stage 9 and is explicitly NOT touched by this stage.
 
-1. **Windows manual validation of Stage 7.** Sessions must enumerate within one 5-second refresh
-   cycle; disconnect / logoff / shadow flows must round-trip end-to-end against a live RDP
-   session. The shadow-policy backup file must appear in the timestamped snapshot directory
-   alongside the existing registry / audit-policy backups, and Restore must return the pre-Apply
-   state. See the validation checklist in `docs/47-remote-rdp-clients.md`.
-2. **Stage 8 IPC reservation.** Ordinals 27..30 remain reserved for AbuseIPDB / MikroTik
-   provider commands (`GetAbuseIpDbStatus`, `TestAbuseIpDbKey`, `GetMikroTikStatus`,
-   `TestMikroTik`). Ordinals 38+ remain free for future allocations.
-3. **Provider abstractions.** A reputation-provider abstraction (`IReputationProvider` or
-   similar) must live in `RdpAudit.Core/` before any HTTP client lands in `RdpAudit.Service/`.
-   The Stage 5 `IFirewallProvider` pattern is the reference template.
+* **Backend / IPC contracts.** Stage 1-reserved commands `GetAbuseIpDbStatus` (27) and
+  `TestAbuseIpDbKey` (28) are now implemented end-to-end. New MessagePack DTOs
+  (`AbuseIpDbStatusDto`, `AbuseIpDbTestResult`) use append-only integer keys.
+* **Service-side client.** `RdpAudit.Service.AbuseIpDb.AbuseIpDbClient` (registered behind the
+  Core abstraction `IAbuseIpDbClient`) uses `IHttpClientFactory` and posts form-urlencoded reports
+  to the configured endpoint. The API key is unwrapped from its DPAPI envelope only at the call
+  site, attached to the `Key:` request header and dropped immediately. Responses classify into
+  `Accepted` / `Rejected` / `RateLimited` (with `Retry-After`) / `ServerError` / `TransportError`
+  / `NotConfigured` / `Suppressed`.
+* **Reporting worker.** `RdpAudit.Service.Workers.AbuseIpDbReportWorker` is a `BackgroundService`
+  that periodically scans `AttackStats` for high-threat unreported IPs, applies the pure decision
+  helper `Core/AbuseIpDb/AbuseIpDbPolicy.Decide` (Enabled + ReportAttacks + ApiKey + public IP +
+  not whitelisted + threshold + dedup + hourly/daily caps), and submits qualifying reports. Every
+  attempt — success or failure — is persisted to the Stage 2 `AbuseReports` table for dedup,
+  audit and rate-limit accounting. Honours `CancellationToken`, guards against re-entry, and
+  pauses on 429 (`Retry-After`) and 5xx server errors.
+* **Comment builder.** `RdpAudit.Core.AbuseIpDb.AbuseIpDbCommentBuilder` constructs the
+  professional report comment from `AbuseIpDbEvidence` (IP, hostname, failed / successful counts,
+  first / last seen, attempted usernames, duration). The builder strips control characters and
+  delimiters, deduplicates and caps usernames to 5 × 32 chars, caps the comment to 1000 bytes,
+  and appends the public attribution footer `Reported via RDP Monitor
+  https://github.com/paulmann/1st-RDPMon`. Passwords, tokens, command-line content and internal
+  hostnames never appear.
+* **Settings persistence.** `RdpAudit.Service.Services.SettingsManager` now accepts an
+  `ISecretProtector` and DPAPI-wraps `AbuseIpDb.ApiKey` (and `MikroTik.Password`) before atomic-
+  write replacement of `appsettings.json`. Existing envelopes pass through unchanged. The Service
+  always registers DPAPI on Windows; the in-memory protector is used only for non-Windows CI and
+  is documented as non-confidential.
+* **IPC masking.** `GetSettings` now returns a masked copy of the options where every non-empty
+  secret envelope is replaced with the literal `***configured***`. The Configurator treats that
+  placeholder as a do-not-overwrite sentinel.
+* **Configurator UI.** `RdpAudit.Configurator/Forms/AbuseIpDbPage` adds a new tab after Remote
+  RDP Clients: a privacy / third-party-warning intro, a password-style API key input with a
+  `Show key` toggle, a `Report attacks to AbuseIPDB` checkbox enabled only after a key is
+  configured, and Save / Test key / Refresh status buttons. The status panel surfaces credential
+  state, endpoint URL, total / hour / day counters, last report result, and rate-limit state.
+* **Tests.** `AbuseIpDbCommentBuilderTests`, `AbuseIpDbPolicyTests`,
+  `AbuseIpDbApiKeyValidatorTests` (Core); `AbuseIpDbClientTests`, `AbuseIpDbReportWorkerTests`,
+  `IpcDispatcherStage8Tests`, `SettingsManagerSecretsTests` (Service). All existing tests still
+  pass — `Stage2EnumStability`, `IpcCommandStability` and the Stage 3 / 5 / 6 / 7 dispatcher
+  tests are unchanged.
+* **Docs.** `docs/30-configurator.md` AbuseIPDB tab row, `docs/40-options.md` AbuseIpDbOptions
+  fields, `docs/48-abuseipdb.md` (new surface map, privacy and troubleshooting), `docs/50-ipc.md`
+  Stage 8 semantics and DTO contracts, this roadmap entry.
+
+Configuration surface additions on `AbuseIpDbOptions`: `ReportAttacks` (bool), `EndpointUrl`,
+`MaxReportsPerHour`, `MaxReportsPerDay`, `DeduplicationWindowMinutes`, `MinThreatScore`,
+`MinFailedAttempts`. Defaults remain safe: integration is OFF (`Enabled = false`,
+`ReportAttacks = false`), thresholds are conservative (60 score, 10 failures), dedup is 15
+minutes minimum and the daily cap is 500.
+
+Deferred to Stage 9+ (explicitly NOT in Stage 8):
+
+* MikroTik page and REST client (ordinals 29 and 30 remain reserved).
+* AbuseReports retention pruning in `MaintenanceWorker`.
+* Reputation-lookup cache surface (Stage 8 implements reporting only).
+
+### Stage 9 prerequisites
+
+Before Stage 9 can start:
+
+1. **Windows manual validation of Stage 8.** Save / Test key / Report toggle round-trip must
+   work against a live AbuseIPDB key; a high-threat seed IP must produce exactly one
+   `AbuseReports` row per dedup window; rate-limit caps must clamp outbound reports as
+   configured; `GetSettings` must NEVER return the plaintext key.
+2. **Stage 9 IPC reservation.** Ordinals 29 (`GetMikroTikStatus`) and 30 (`TestMikroTik`) remain
+   reserved. Ordinals 38+ remain free for future allocations.
+3. **Provider abstractions.** Stage 5's `IFirewallProvider` is already implemented for
+   `MikroTikFirewallProvider`; Stage 9 wires the REST client and the Configurator MikroTik tab
+   without changing the Core abstraction.
 
 ## LLM-safe extension rules
 

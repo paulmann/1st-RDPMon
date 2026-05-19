@@ -40,6 +40,7 @@ public sealed class MainForm : Form
 		_tabs.TabPages.Add(new FirewallPage(_ipc) { Text = "Firewall" });
 		_tabs.TabPages.Add(new AttackStatisticsPage(_ipc) { Text = "Attack Statistics" });
 		_tabs.TabPages.Add(new RemoteRdpClientsPage(_ipc) { Text = "Remote RDP Clients" });
+		_tabs.TabPages.Add(new AbuseIpDbPage(_ipc) { Text = "AbuseIPDB" });
 
 		Controls.Add(_tabs);
 

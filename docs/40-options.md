@@ -42,14 +42,21 @@ The `ApiKey` field is stored as a protected envelope (see "Secret protection"). 
 | Field | Default | Meaning |
 |-------|---------|---------|
 | `Enabled` | `false` | Master switch for the integration. |
-| `ApiKey` | `""` | Protected envelope holding the AbuseIPDB API key. |
+| `ReportAttacks` | `false` | When true (and `Enabled` is true) the Stage 8 worker submits abuse reports. |
+| `ApiKey` | `""` | Protected envelope holding the AbuseIPDB API key. Plaintext keys are wrapped by `SettingsManager` before persistence. |
 | `BaseUrl` | `"https://api.abuseipdb.com"` | Override for on-premises proxies. |
+| `EndpointUrl` | `"https://api.abuseipdb.com/api/v2/report"` | Submission URL used by the Stage 8 report worker. |
 | `TimeoutSeconds` | `15` | HTTP timeout. |
-| `MaxReportsPerMinute` | `60` | Client-side rate limit. |
+| `MaxReportsPerMinute` | `60` | Client-side rate limit (informational). |
+| `MaxReportsPerHour` | `100` | Soft cap honoured by the Stage 8 worker. |
+| `MaxReportsPerDay` | `500` | Hard cap honoured by the Stage 8 worker. |
+| `DeduplicationWindowMinutes` | `15` | Minimum gap between successive reports of the same IP. Clamped to 15 minutes minimum. |
 | `CacheLookups` | `true` | Cache reputation lookups on disk. |
 | `CacheTtlMinutes` | `60` | Cache TTL. |
 | `ReportThreshold` | `80` | Abuse confidence (0..100) at which an IP is treated as hostile. |
-| `ReportCategories` | `[18, 22]` | Categories submitted with each report. |
+| `MinThreatScore` | `60.0` | Minimum `AttackStat.ThreatScore` required before an IP qualifies for reporting. |
+| `MinFailedAttempts` | `10` | Minimum failed logons required before an IP qualifies for reporting. |
+| `ReportCategories` | `[18, 22]` | Categories submitted with each report (SSH, Brute-Force). |
 
 ## MikroTikOptions
 
