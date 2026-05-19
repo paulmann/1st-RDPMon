@@ -13,6 +13,11 @@ Stage 3 of the RdpAudit roadmap brings the firewall pipeline online end-to-end:
 The Configurator UI for these surfaces is deferred to a later stage. Stage 3 ships the backend
 contract only.
 
+Stage 5 introduces the Firewall tab in the Configurator that exercises these same handlers; see
+`docs/30-configurator.md` (`Firewall` row) for the UI behaviour and `docs/50-ipc.md` for the
+Stage 5 IPC additions (`ListLoginRules`, `AddLoginRule`, `RemoveLoginRule`,
+`SetLoginRuleEnabled`, `ListActiveBlocksDetailed`, `UnblockActiveBlock`).
+
 ## Windows Firewall behaviour
 
 Rule name format: `RdpAudit-Block-{normalized-ip}` — for example `RdpAudit-Block-203.0.113.10`.

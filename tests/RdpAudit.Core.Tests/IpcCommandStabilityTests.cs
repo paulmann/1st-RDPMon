@@ -54,6 +54,12 @@ public class IpcCommandStabilityTests
 	[InlineData(IpcCommand.GetMikroTikStatus, 29)]
 	[InlineData(IpcCommand.TestMikroTik, 30)]
 	[InlineData(IpcCommand.ListActiveBlocks, 31)]
+	[InlineData(IpcCommand.ListLoginRules, 32)]
+	[InlineData(IpcCommand.AddLoginRule, 33)]
+	[InlineData(IpcCommand.RemoveLoginRule, 34)]
+	[InlineData(IpcCommand.SetLoginRuleEnabled, 35)]
+	[InlineData(IpcCommand.ListActiveBlocksDetailed, 36)]
+	[InlineData(IpcCommand.UnblockActiveBlock, 37)]
 	public void Ordinal_IsStable(IpcCommand command, int expected)
 	{
 		Assert.Equal(expected, (int)command);

@@ -50,4 +50,12 @@ public enum IpcCommand
 	GetMikroTikStatus = 29,
 	TestMikroTik = 30,
 	ListActiveBlocks = 31,
+
+	// --- Stage 5 additions (append-only). ---
+	ListLoginRules = 32,
+	AddLoginRule = 33,
+	RemoveLoginRule = 34,
+	SetLoginRuleEnabled = 35,
+	ListActiveBlocksDetailed = 36,
+	UnblockActiveBlock = 37,
 }
