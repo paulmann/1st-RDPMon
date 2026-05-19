@@ -19,4 +19,9 @@ public sealed class SessionActionRequest
 	/// <summary>Optional operator-provided reason text recorded in the audit log.</summary>
 	[Key(1)]
 	public string? Reason { get; set; }
+
+	/// <summary>Shadow mode requested for <c>ShadowSession</c>: 0 = ViewOnly, 1 = Control,
+	/// 2 = ControlNoConsent. Ignored for Disconnect / Logoff.</summary>
+	[Key(2)]
+	public int ShadowMode { get; set; }
 }

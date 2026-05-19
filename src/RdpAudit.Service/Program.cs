@@ -146,6 +146,11 @@ public static class Program
 		services.AddSingleton<MikroTikFirewallProvider>();
 		services.AddSingleton<IFirewallProvider>(sp => sp.GetRequiredService<WindowsFirewallProvider>());
 		services.AddSingleton<IFirewallProvider>(sp => sp.GetRequiredService<MikroTikFirewallProvider>());
+		if (OperatingSystem.IsWindows())
+		{
+			services.AddSingleton<RdpSessionManager>();
+			services.AddSingleton<ShadowPolicyManager>();
+		}
 		services.AddScoped<IpcDispatcher>();
 
 		AlertRuleRegistration.Register(services);
