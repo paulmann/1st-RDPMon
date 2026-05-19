@@ -21,13 +21,17 @@ namespace RdpAudit.Configurator.Forms;
 public sealed class OverviewPage : TabPage
 {
 	private const string ProjectUrl = "https://github.com/paulmann/1st-RDPMon";
+	private const string AuthorName = "Mikhail Deynekin";
 	private const string AuthorUrl = "https://Deynekin.com";
+	private const string AuthorEmail = "rdp@deynekin.com";
 
 	private readonly Label _title;
 	private readonly Label _purpose;
 	private readonly Label _versionLabel;
 	private readonly LinkLabel _projectLink;
+	private readonly Label _authorLabel;
 	private readonly LinkLabel _authorLink;
+	private readonly LinkLabel _emailLink;
 	private readonly TextBox _statusReport;
 	private readonly Button _install;
 	private readonly Button _refresh;
@@ -67,26 +71,44 @@ public sealed class OverviewPage : TabPage
 
 		_projectLink = new LinkLabel
 		{
-			Text = ProjectUrl,
+			Text = "Project: " + ProjectUrl,
 			AutoSize = true,
 			Location = new Point(12, 128),
 		};
+		_projectLink.LinkArea = new LinkArea("Project: ".Length, ProjectUrl.Length);
 		_projectLink.LinkClicked += (_, _) => OpenUrl(ProjectUrl);
 
-		_authorLink = new LinkLabel
+		_authorLabel = new Label
 		{
-			Text = AuthorUrl,
+			Text = "Author: " + AuthorName,
 			AutoSize = true,
 			Location = new Point(12, 152),
 		};
+
+		_authorLink = new LinkLabel
+		{
+			Text = "Website: " + AuthorUrl,
+			AutoSize = true,
+			Location = new Point(12, 176),
+		};
+		_authorLink.LinkArea = new LinkArea("Website: ".Length, AuthorUrl.Length);
 		_authorLink.LinkClicked += (_, _) => OpenUrl(AuthorUrl);
+
+		_emailLink = new LinkLabel
+		{
+			Text = "Email: " + AuthorEmail,
+			AutoSize = true,
+			Location = new Point(12, 200),
+		};
+		_emailLink.LinkArea = new LinkArea("Email: ".Length, AuthorEmail.Length);
+		_emailLink.LinkClicked += (_, _) => OpenUrl("mailto:" + AuthorEmail);
 
 		_install = new Button
 		{
 			Text = "Install / Repair",
 			Width = 180,
 			Height = 32,
-			Location = new Point(12, 188),
+			Location = new Point(12, 236),
 		};
 		_install.Click += async (_, _) => await OnInstallClickAsync().ConfigureAwait(true);
 
@@ -95,7 +117,7 @@ public sealed class OverviewPage : TabPage
 			Text = "Refresh status",
 			Width = 140,
 			Height = 32,
-			Location = new Point(200, 188),
+			Location = new Point(200, 236),
 		};
 		_refresh.Click += async (_, _) => await RefreshAsync().ConfigureAwait(true);
 
@@ -105,7 +127,7 @@ public sealed class OverviewPage : TabPage
 			AutoSize = false,
 			Width = 1100,
 			Height = 22,
-			Location = new Point(12, 228),
+			Location = new Point(12, 276),
 		};
 
 		_statusReport = new TextBox
@@ -116,15 +138,17 @@ public sealed class OverviewPage : TabPage
 			WordWrap = true,
 			Font = new Font(FontFamily.GenericMonospace, 9.5f),
 			Width = 1100,
-			Height = 460,
-			Location = new Point(12, 256),
+			Height = 432,
+			Location = new Point(12, 304),
 		};
 
 		Controls.Add(_title);
 		Controls.Add(_purpose);
 		Controls.Add(_versionLabel);
 		Controls.Add(_projectLink);
+		Controls.Add(_authorLabel);
 		Controls.Add(_authorLink);
+		Controls.Add(_emailLink);
 		Controls.Add(_install);
 		Controls.Add(_refresh);
 		Controls.Add(_status);

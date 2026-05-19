@@ -15,6 +15,7 @@ using System.Runtime.Versioning;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.ServiceProcess;
+using System.Text;
 using RdpAudit.Core.Util;
 
 namespace RdpAudit.Configurator.Services;
@@ -29,13 +30,35 @@ public sealed record InstallationOutcome(
 /// <summary>Single step result for first-run install logging.</summary>
 internal sealed record InstallStep(string Description, bool Ok, string? Detail = null);
 
+/// <summary>Result of one sc.exe invocation, with combined stdout/stderr for diagnostics.</summary>
+internal sealed record ScResult(int ExitCode, string StdOut, string StdErr)
+{
+	public string CombinedOutput
+	{
+		get
+		{
+			if (StdOut.Length == 0)
+			{
+				return StdErr;
+			}
+
+			if (StdErr.Length == 0)
+			{
+				return StdOut;
+			}
+
+			return StdOut + Environment.NewLine + StdErr;
+		}
+	}
+}
+
 /// <summary>Idempotent installer that prepares ProgramData, copies the published Service
 /// distribution into Program Files, and registers the Windows service.</summary>
 [SupportedOSPlatform("windows")]
 public sealed class InstallationService
 {
 	internal const string ServiceName = "RdpAuditService";
-	internal const string ServiceDisplayName = "RdpAudit Service";
+	internal const string ServiceDisplayName = "RDP Monitor";
 
 	private readonly ServiceLayoutInfo _layout;
 
@@ -142,40 +165,25 @@ public sealed class InstallationService
 			return new InstallStep("Register Windows service", false, $"Missing target {targetExe}");
 		}
 
-		bool exists;
-		try
-		{
-			using ServiceController existing = new(ServiceName);
-			_ = existing.Status;
-			exists = true;
-		}
-		catch (InvalidOperationException)
-		{
-			exists = false;
-		}
+		bool exists = ServiceExists(ServiceName);
 
-		string quoted = targetExe.Contains(' ', StringComparison.Ordinal) ? "\"" + targetExe + "\"" : targetExe;
+		IReadOnlyList<string> args = exists
+			? ScCommandBuilder.BuildConfig(ServiceName, targetExe)
+			: ScCommandBuilder.BuildCreate(ServiceName, targetExe, ServiceDisplayName);
 
-		string[] args = exists
-			? new[] { "config", ServiceName, "binPath= " + quoted, "start= auto" }
-			: new[] { "create", ServiceName, "binPath= " + quoted, "start= auto", "obj= LocalSystem", "DisplayName= " + ServiceDisplayName };
-
-		(int code, string? err) = await RunScAsync(args, ct).ConfigureAwait(false);
-		if (code != 0)
+		ScResult result = await RunScAsync(args, ct).ConfigureAwait(false);
+		if (result.ExitCode != 0)
 		{
-			return new InstallStep(exists ? "Update Windows service config" : "Register Windows service", false,
-				$"sc.exe exit {code}: {err}");
+			string verb = exists ? "Update Windows service config" : "Register Windows service";
+			return new InstallStep(verb, false, FormatScError(result, args));
 		}
 
-		(int failCode, string? failErr) = await RunScAsync(new[]
+		ScResult failure = await RunScAsync(
+			ScCommandBuilder.BuildFailure(ServiceName, 86400, "restart/60000/restart/60000/restart/60000"),
+			ct).ConfigureAwait(false);
+		if (failure.ExitCode != 0)
 		{
-			"failure", ServiceName,
-			"reset= 86400",
-			"actions= restart/60000/restart/60000/restart/60000",
-		}, ct).ConfigureAwait(false);
-		if (failCode != 0)
-		{
-			return new InstallStep("Configure restart policy", false, $"sc.exe failure exit {failCode}: {failErr}");
+			return new InstallStep("Configure restart policy", false, FormatScError(failure, args));
 		}
 
 		return new InstallStep(exists ? "Updated existing Windows service" : "Registered new Windows service", true);
@@ -234,7 +242,21 @@ public sealed class InstallationService
 		info.SetAccessControl(security);
 	}
 
-	private static async Task<(int Code, string? Error)> RunScAsync(IReadOnlyList<string> args, CancellationToken ct)
+	private static bool ServiceExists(string serviceName)
+	{
+		try
+		{
+			using ServiceController existing = new(serviceName);
+			_ = existing.Status;
+			return true;
+		}
+		catch (InvalidOperationException)
+		{
+			return false;
+		}
+	}
+
+	private static async Task<ScResult> RunScAsync(IReadOnlyList<string> args, CancellationToken ct)
 	{
 		ProcessStartInfo psi = new("sc.exe")
 		{
@@ -253,17 +275,54 @@ public sealed class InstallationService
 			using Process? p = Process.Start(psi);
 			if (p is null)
 			{
-				return (-1, "sc.exe failed to start");
+				return new ScResult(-1, string.Empty, "sc.exe failed to start");
 			}
 
-			string err = await p.StandardError.ReadToEndAsync(ct).ConfigureAwait(false);
+			Task<string> outTask = p.StandardOutput.ReadToEndAsync(ct);
+			Task<string> errTask = p.StandardError.ReadToEndAsync(ct);
+			await Task.WhenAll(outTask, errTask).ConfigureAwait(false);
 			await p.WaitForExitAsync(ct).ConfigureAwait(false);
-			return (p.ExitCode, p.ExitCode == 0 ? null : err);
+			return new ScResult(p.ExitCode, outTask.Result.Trim(), errTask.Result.Trim());
 		}
 		catch (Exception ex)
 		{
-			return (-1, ex.Message);
+			return new ScResult(-1, string.Empty, ex.Message);
 		}
+	}
+
+	private static string FormatScError(ScResult result, IReadOnlyList<string> args)
+	{
+		StringBuilder sb = new();
+		sb.Append("sc.exe exit ");
+		sb.Append(result.ExitCode.ToString(CultureInfo.InvariantCulture));
+		string combined = result.CombinedOutput;
+		if (combined.Length > 0)
+		{
+			sb.Append(": ");
+			sb.Append(combined);
+		}
+
+		sb.Append(" [args: sc ");
+		for (int i = 0; i < args.Count; i++)
+		{
+			if (i > 0)
+			{
+				sb.Append(' ');
+			}
+
+			string a = args[i];
+			if (a.Length == 0 || a.Contains(' ', StringComparison.Ordinal))
+			{
+				sb.Append('"').Append(a).Append('"');
+			}
+			else
+			{
+				sb.Append(a);
+			}
+		}
+
+		sb.Append(']');
+		return sb.ToString();
 	}
 
 	private static void Record(Func<InstallStep> action, List<string> steps, List<string> errors)
