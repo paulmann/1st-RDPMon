@@ -310,7 +310,9 @@ public sealed class InstallationService
 			Task<string> errTask = p.StandardError.ReadToEndAsync(ct);
 			await Task.WhenAll(outTask, errTask).ConfigureAwait(false);
 			await p.WaitForExitAsync(ct).ConfigureAwait(false);
-			return new ScResult(p.ExitCode, outTask.Result.Trim(), errTask.Result.Trim());
+			string outText = await outTask.ConfigureAwait(false);
+			string errText = await errTask.ConfigureAwait(false);
+			return new ScResult(p.ExitCode, outText.Trim(), errText.Trim());
 		}
 		catch (Exception ex)
 		{

@@ -284,34 +284,40 @@ public sealed class FirewallPage : TabPage
 
 			await Task.WhenAll(statusTask, blockTask, whiteTask, rulesTask, activeTask).ConfigureAwait(true);
 
-			_lastStatus = statusTask.Result;
+			FirewallStatusDto? statusDto = await statusTask.ConfigureAwait(true);
+			List<AddressListEntryDto>? blocklist = await blockTask.ConfigureAwait(true);
+			List<AddressListEntryDto>? whitelist = await whiteTask.ConfigureAwait(true);
+			List<LoginRuleDto>? loginRules = await rulesTask.ConfigureAwait(true);
+			List<ActiveBlockDto>? activeBlocks = await activeTask.ConfigureAwait(true);
+
+			_lastStatus = statusDto;
 			RenderProviderStatus(_lastStatus);
 
 			_blocklistAll.Clear();
-			if (blockTask.Result is not null)
+			if (blocklist is not null)
 			{
-				_blocklistAll.AddRange(blockTask.Result);
+				_blocklistAll.AddRange(blocklist);
 			}
 			ApplyBlocklistFilter();
 
 			_whitelistAll.Clear();
-			if (whiteTask.Result is not null)
+			if (whitelist is not null)
 			{
-				_whitelistAll.AddRange(whiteTask.Result);
+				_whitelistAll.AddRange(whitelist);
 			}
 			ApplyWhitelistFilter();
 
 			_loginRulesAll.Clear();
-			if (rulesTask.Result is not null)
+			if (loginRules is not null)
 			{
-				_loginRulesAll.AddRange(rulesTask.Result);
+				_loginRulesAll.AddRange(loginRules);
 			}
 			ApplyLoginRuleFilter();
 
 			_activeBlocksAll.Clear();
-			if (activeTask.Result is not null)
+			if (activeBlocks is not null)
 			{
-				_activeBlocksAll.AddRange(activeTask.Result);
+				_activeBlocksAll.AddRange(activeBlocks);
 			}
 			ApplyActiveBlockFilter();
 

@@ -699,6 +699,46 @@ Before Stage 10 can start:
 3. **Linux CI baseline.** `dotnet build` + `dotnet test` continue to pass on Linux CI hosts; the
    MikroTik REST client is exercised entirely via fake `HttpMessageHandler`s.
 
+### Stage 10 (delivered) — Final QA, retention pruning, release readiness
+
+Stage 10 is the release-readiness pass. It introduces no new product surface beyond retention
+pruning; the focus is correctness, reliability, UX consistency, documentation finalisation, and
+making every high-risk action auditable and reversible.
+
+Scope delivered:
+
+* **Retention pruning extended** across the maintenance worker. `RawEvents`, `Alerts`,
+  `AbuseReports`, inactive `ActiveBlocks` (rows whose `Status == Removed` or whose `ExpiresUtc`
+  passed the configured retention cutoff) and stale `AttackStats` are now pruned daily. Active /
+  Pending firewall blocks are never deleted by retention — only by the expiration worker. All
+  deletion is batched (`StorageOptions.MaintenanceBatchSize`, default 50000) so the SQLite writer
+  lock is short on huge databases, honours `CancellationToken`, and retries `SQLITE_BUSY` /
+  `SQLITE_LOCKED` with exponential backoff.
+* **New retention options** in `StorageOptions`: `AbuseReportRetentionDays` (default 365),
+  `ActiveBlockRetentionDays` (default 90), `AttackStatRetentionDays` (default 180),
+  `MaintenanceBatchSize` (default 50000). Floors are enforced at runtime (`>=7` /  `>=30` /
+  `>=14` days respectively) — operators may shorten retention but never to zero.
+* **UI safety polish.** Every destructive Restore confirmation now defaults to "No"
+  (`MessageBoxDefaultButton.Button2`) so an unattentive Enter press cannot trigger a registry /
+  audit-policy restore. Errors continue to elide secrets.
+* **QA fixes.** Removed `Task.Result` accesses after `Task.WhenAll` (replaced with explicit
+  `await` so the project rule "never call `.Result`/`.Wait()`" is satisfied without depending on
+  the post-`WhenAll` safety carve-out). Verified that no `[DllImport]` declaration exists; all
+  P/Invokes use `[LibraryImport]`.
+* **Backup / restore contract reaffirmed.** Restore never touches the audit event database. A
+  pre-restore safety snapshot is always captured first. Plaintext secrets never appear in
+  snapshot artefacts (the only secrets present are DPAPI-protected envelopes carried as-is in
+  `appsettings.json`).
+* **Documentation.** README updated to describe the .NET 8 RdpAudit suite; legacy v1 retained
+  below the fold. New Windows validation checklist (`docs/90-windows-validation.md`) and
+  troubleshooting guide (`docs/91-troubleshooting.md`) shipped with the stage.
+
+Out of scope (intentionally deferred beyond Stage 10):
+
+* Cross-tab filter linking and the optional `/ip/firewall/address-list` synchroniser remain
+  on the post-1.0 roadmap.
+* No release tag is cut from this stage — the repository owner decides when v2.0 ships.
+
 ## LLM-safe extension rules
 
 When implementing later stages:

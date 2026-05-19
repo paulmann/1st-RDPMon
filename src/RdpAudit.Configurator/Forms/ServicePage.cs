@@ -328,7 +328,8 @@ public sealed class ServicePage : TabPage
 				confirm,
 				"RdpAudit Restore",
 				MessageBoxButtons.YesNo,
-				MessageBoxIcon.Warning);
+				MessageBoxIcon.Warning,
+				MessageBoxDefaultButton.Button2);
 			if (choice != DialogResult.Yes)
 			{
 				return;
