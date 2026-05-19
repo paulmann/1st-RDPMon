@@ -21,6 +21,56 @@ Deferred to later stages (explicitly NOT in Stage 1):
 * Real REST client for MikroTik RouterOS.
 * Firewall stats tab.
 
+## Stage 2 — Data model and persistence (this branch)
+
+Stage 2 lays down the persistent schema the later worker and UI stages depend on. It deliberately
+ships **no UI**, **no AutoBlockWorker**, **no AbuseIPDB / MikroTik HTTP clients**, and **no
+session-control wiring**.
+
+Delivered:
+
+* **Entities (Core/Models)** — `BlocklistEntry`, `WhitelistEntry`, `LoginRule`, `ActiveBlock`,
+  `AbuseReport`, `AttackStat`.
+* **Enums (Core/Models)** — `BlocklistSource` (append-only, ordinals 0..6), `ActiveBlockStatus`
+  (append-only, ordinals 0..4). `ActiveBlock.Provider` reuses Stage 1's `FirewallProviderKind`.
+* **EF Core configurations** — one `IEntityTypeConfiguration<T>` per new entity under
+  `Core/Data/Configurations`. Max lengths, required flags, and indices documented in
+  `docs/41-data-model.md`. SQLite compatibility preserved.
+* **DbContext** — six new `DbSet<T>` properties on `AuditDbContext`.
+* **Migration** — `20260519152135_Stage2FirewallStats`. Up creates the six new tables and their
+  indices; Down drops them and leaves Stage 1 tables untouched.
+* **Projection helper** — `AttackStatProjection` centralises Top-10 login JSON
+  serialisation / deserialisation, deterministic top-N ordering (frequency desc, alpha asc), and
+  duration arithmetic.
+* **Tests** — Stage 2 enum ordinal stability, projection helper round-trip / capping / malformed
+  input, schema persistence and uniqueness constraints (`WhitelistEntries.Ip`,
+  `LoginRules.Login`, `ActiveBlocks(Provider, Ip)`, `AttackStats.Ip`), migration upgrade behaviour
+  (fresh DB, Stage 1 → Stage 2 upgrade preserving Stage 1 rows, Stage 2 → Stage 1 downgrade).
+* **Docs** — `docs/41-data-model.md`, this roadmap entry.
+
+Deferred to Stage 3 (explicitly NOT in Stage 2):
+
+* AutoBlockWorker that reconciles `BlocklistEntries` / `ActiveBlocks` against the live firewall
+  provider state.
+* Windows Firewall provider implementation behind `IFirewallProvider`.
+* MikroTik RouterOS REST client.
+* AbuseIPDB HTTP client.
+* RDP session-control wiring.
+* Configurator UI pages for blocklist / whitelist / login rules / active blocks / stats.
+* LiveEvents context menu entries that create rows in the Stage 2 tables.
+
+### Stage 3 prerequisites
+
+Before Stage 3 can start:
+
+1. **Windows-only validation.** Apply the Stage 2 migration on a Windows host with an existing
+   Stage 1 database and confirm row counts in the Stage 1 tables are unchanged. Linux CI cannot
+   exercise the Windows-only `DpapiSecretProtector` path that runs alongside DB startup.
+2. **AutoBlockWorker design note.** Define the worker's reconciliation cadence, the retry policy
+   for `ActiveBlockStatus.Failed`, and the unblock policy at `ExpiresUtc` before any code lands.
+3. **IPC ordinal allocation.** Reserve the next contiguous block of `IpcCommand` ordinals for the
+   blocklist / whitelist / login-rule / active-block CRUD surface.
+
 ## LLM-safe extension rules
 
 When implementing later stages:
