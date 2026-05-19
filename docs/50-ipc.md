@@ -42,6 +42,26 @@ Stage 3 implemented commands (backend-only — Configurator UI lands in a later 
 | `RemoveFromWhitelist` | 17 | C→S | `AddressListMutationRequest` | `{ status, address, removed }` |
 | `ListActiveBlocks` | 31 | C→S | – | `AddressListEntryDto[]` |
 
+Stage 5 implemented commands (Firewall tab in the Configurator drives these):
+
+| Command | Ordinal | Direction | Payload | Returns |
+|---------|---------|-----------|---------|---------|
+| `ListLoginRules` | 32 | C→S | – | `LoginRuleDto[]` |
+| `AddLoginRule` | 33 | C→S | `LoginRuleMutationRequest` | `{ status, login }` |
+| `RemoveLoginRule` | 34 | C→S | `LoginRuleMutationRequest` | `{ status, id, login }` |
+| `SetLoginRuleEnabled` | 35 | C→S | `LoginRuleMutationRequest` | `{ status, id, enabled }` |
+| `ListActiveBlocksDetailed` | 36 | C→S | – | `ActiveBlockDto[]` |
+| `UnblockActiveBlock` | 37 | C→S | `long` (ActiveBlock id) | `{ status, id, address, providerOk, providerError, blocklistDisabled }` |
+
+Stage 5 IPC semantics:
+
+* `AddLoginRule` normalises the supplied login (trim + lower-case invariant) and rejects empty / control-character input. Adding an already-present login re-enables it (`Enabled = true`) and updates the operator note when supplied; this keeps re-adds idempotent.
+* `RemoveLoginRule` prefers the supplied `Id` and falls back to a normalised `Login` lookup. Removing a missing rule returns a controlled `IpcException` ("Login rule not found.").
+* `SetLoginRuleEnabled` requires a positive `Id` and writes the `Enabled` flag verbatim; it never creates a row.
+* `ListActiveBlocksDetailed` returns the full `ActiveBlocks` row shape (`Id`, `Ip`, `Provider`, `RuleHandle`, `CreatedUtc`, `ExpiresUtc`, `Reason`, `Status`, `LastError`). Use this when the UI needs the structured fields; the legacy `ListActiveBlocks` keeps returning the flat `AddressListEntryDto[]` for backward compatibility.
+* `UnblockActiveBlock` accepts the `ActiveBlock.Id` as the payload, calls `FirewallManager.UnblockAsync` for Windows-provider rows on Windows hosts, soft-disables any matching `BlocklistEntries` rows, and flips the row to `Removed` (or `Failed` with `LastError` on provider error). Rows whose provider is `None` (audit-only) skip the provider call. The handler returns `IpcResultStatus.Unavailable` when the provider call failed but the bookkeeping is still recorded.
+* All Stage 5 writes flow through the service's `AuditDbContext` via EF Core; the Configurator never opens the SQLite database for writes.
+
 Stage 3 IPC semantics:
 
 * Every mutation handler validates the supplied address with `IPAddress.TryParse` and refuses non-IP input with a controlled `IpcException` message (no raw exceptions surface to the client).

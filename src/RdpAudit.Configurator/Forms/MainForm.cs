@@ -37,6 +37,7 @@ public sealed class MainForm : Form
 		_tabs.TabPages.Add(new ServicePage(_ipc) { Text = "Service" });
 		_tabs.TabPages.Add(new SettingsPage(_ipc) { Text = "Settings" });
 		_tabs.TabPages.Add(new LiveEventsPage(_ipc) { Text = "Live Events" });
+		_tabs.TabPages.Add(new FirewallPage(_ipc) { Text = "Firewall" });
 
 		Controls.Add(_tabs);
 

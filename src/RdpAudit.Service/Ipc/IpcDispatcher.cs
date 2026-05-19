@@ -84,6 +84,14 @@ public sealed class IpcDispatcher
 				IpcCommand.RemoveFromWhitelist => await RemoveFromWhitelistAsync(request.Payload, ct).ConfigureAwait(false),
 				IpcCommand.ListActiveBlocks => await ListActiveBlocksAsync(ct).ConfigureAwait(false),
 
+				// --- Stage 5 handlers (Firewall tab UI support). ---
+				IpcCommand.ListLoginRules => await ListLoginRulesAsync(ct).ConfigureAwait(false),
+				IpcCommand.AddLoginRule => await AddLoginRuleAsync(request.Payload, ct).ConfigureAwait(false),
+				IpcCommand.RemoveLoginRule => await RemoveLoginRuleAsync(request.Payload, ct).ConfigureAwait(false),
+				IpcCommand.SetLoginRuleEnabled => await SetLoginRuleEnabledAsync(request.Payload, ct).ConfigureAwait(false),
+				IpcCommand.ListActiveBlocksDetailed => await ListActiveBlocksDetailedAsync(ct).ConfigureAwait(false),
+				IpcCommand.UnblockActiveBlock => await UnblockActiveBlockAsync(request.Payload, ct).ConfigureAwait(false),
+
 				// --- Reserved Stage 1 commands still awaiting later-stage implementations. ---
 				IpcCommand.GetAttackStats
 					or IpcCommand.ListRdpSessions
@@ -577,5 +585,256 @@ public sealed class IpcDispatcher
 				"Address '{0}' is not a valid IPv4 / IPv6 address.", trimmed));
 		}
 		return parsed.ToString();
+	}
+
+	// ----------------------------------------------------------------------------------------------
+	// Stage 5 handlers
+	// ----------------------------------------------------------------------------------------------
+
+	private async Task<object?> ListLoginRulesAsync(CancellationToken ct)
+	{
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+		List<LoginRule> rows = await db.LoginRules.AsNoTracking()
+			.OrderByDescending(r => r.AddedUtc)
+			.Take(2000)
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		return rows.ConvertAll(r => new LoginRuleDto
+		{
+			Id = r.Id,
+			Login = r.Login,
+			Note = r.Note,
+			Enabled = r.Enabled,
+			AddedUtc = r.AddedUtc,
+		});
+	}
+
+	private async Task<object?> AddLoginRuleAsync(string? payload, CancellationToken ct)
+	{
+		LoginRuleMutationRequest req = DeserializeLoginRuleRequest(payload, "AddLoginRule");
+		string login = NormalizeAndValidateLogin(req.Login);
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+		LoginRule? existing = await db.LoginRules
+			.FirstOrDefaultAsync(r => r.Login == login, ct).ConfigureAwait(false);
+
+		if (existing is null)
+		{
+			db.LoginRules.Add(new LoginRule
+			{
+				Login = login,
+				Note = string.IsNullOrWhiteSpace(req.Note) ? "Configurator manual add" : req.Note,
+				Enabled = true,
+				AddedUtc = DateTime.UtcNow,
+			});
+		}
+		else
+		{
+			existing.Enabled = true;
+			if (!string.IsNullOrWhiteSpace(req.Note))
+			{
+				existing.Note = req.Note;
+			}
+		}
+
+		await db.SaveChangesAsync(ct).ConfigureAwait(false);
+		return new { status = IpcResultStatus.Success.ToString(), login };
+	}
+
+	private async Task<object?> RemoveLoginRuleAsync(string? payload, CancellationToken ct)
+	{
+		LoginRuleMutationRequest req = DeserializeLoginRuleRequest(payload, "RemoveLoginRule");
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+		LoginRule? target = null;
+		if (req.Id > 0)
+		{
+			target = await db.LoginRules.FirstOrDefaultAsync(r => r.Id == req.Id, ct).ConfigureAwait(false);
+		}
+
+		if (target is null && !string.IsNullOrWhiteSpace(req.Login))
+		{
+			string login = NormalizeAndValidateLogin(req.Login);
+			target = await db.LoginRules.FirstOrDefaultAsync(r => r.Login == login, ct).ConfigureAwait(false);
+		}
+
+		if (target is null)
+		{
+			throw new IpcException("Login rule not found.");
+		}
+
+		db.LoginRules.Remove(target);
+		await db.SaveChangesAsync(ct).ConfigureAwait(false);
+		return new { status = IpcResultStatus.Success.ToString(), id = target.Id, login = target.Login };
+	}
+
+	private async Task<object?> SetLoginRuleEnabledAsync(string? payload, CancellationToken ct)
+	{
+		LoginRuleMutationRequest req = DeserializeLoginRuleRequest(payload, "SetLoginRuleEnabled");
+		if (req.Id <= 0)
+		{
+			throw new IpcException("SetLoginRuleEnabled requires a positive Id.");
+		}
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+		LoginRule? target = await db.LoginRules.FirstOrDefaultAsync(r => r.Id == req.Id, ct).ConfigureAwait(false);
+		if (target is null)
+		{
+			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
+				"Login rule {0} not found.", req.Id));
+		}
+
+		target.Enabled = req.Enabled;
+		await db.SaveChangesAsync(ct).ConfigureAwait(false);
+		return new { status = IpcResultStatus.Success.ToString(), id = target.Id, enabled = target.Enabled };
+	}
+
+	private async Task<object?> ListActiveBlocksDetailedAsync(CancellationToken ct)
+	{
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+		List<ActiveBlock> rows = await db.ActiveBlocks.AsNoTracking()
+			.OrderByDescending(b => b.CreatedUtc)
+			.Take(2000)
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		return rows.ConvertAll(b => new ActiveBlockDto
+		{
+			Id = b.Id,
+			Ip = b.Ip,
+			Provider = b.Provider,
+			RuleHandle = b.RuleHandle,
+			CreatedUtc = b.CreatedUtc,
+			ExpiresUtc = b.ExpiresUtc,
+			Reason = b.Reason,
+			Status = b.Status,
+			LastError = b.LastError,
+		});
+	}
+
+	private async Task<object?> UnblockActiveBlockAsync(string? payload, CancellationToken ct)
+	{
+		if (string.IsNullOrWhiteSpace(payload))
+		{
+			throw new IpcException("UnblockActiveBlock requires a JSON payload with the row Id.");
+		}
+
+		long id;
+		try
+		{
+			id = JsonSerializer.Deserialize<long>(payload, JsonOptions.Default);
+		}
+		catch (JsonException ex)
+		{
+			throw new IpcException("UnblockActiveBlock payload is not a valid Id: " + ex.Message);
+		}
+
+		if (id <= 0)
+		{
+			throw new IpcException("UnblockActiveBlock requires a positive Id.");
+		}
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+		ActiveBlock? row = await db.ActiveBlocks.FirstOrDefaultAsync(b => b.Id == id, ct).ConfigureAwait(false);
+		if (row is null)
+		{
+			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
+				"ActiveBlock {0} not found.", id));
+		}
+
+		string ip = row.Ip;
+		bool providerOk = true;
+		string? providerError = null;
+
+		if (row.Provider == FirewallProviderKind.Windows && OperatingSystem.IsWindows())
+		{
+			try
+			{
+				FirewallOperationResult res = await _firewall.UnblockAsync(
+					_options.CurrentValue.Firewall.BlockRuleName, ip, ct).ConfigureAwait(false);
+				providerOk = res.Success || res.ExitCode == 1;
+				if (!providerOk)
+				{
+					providerError = "netsh exit " + res.ExitCode.ToString(CultureInfo.InvariantCulture);
+				}
+			}
+			catch (Exception ex)
+			{
+				providerOk = false;
+				providerError = ex.GetType().Name;
+				_logger.LogWarning(ex, "Provider unblock failed for {Ip}", ip);
+			}
+		}
+
+		row.Status = providerOk ? ActiveBlockStatus.Removed : ActiveBlockStatus.Failed;
+		row.LastError = providerError;
+
+		List<BlocklistEntry> related = await db.BlocklistEntries
+			.Where(b => b.Ip == ip && b.IsEnabled).ToListAsync(ct).ConfigureAwait(false);
+		foreach (BlocklistEntry entry in related)
+		{
+			entry.IsEnabled = false;
+		}
+
+		await db.SaveChangesAsync(ct).ConfigureAwait(false);
+		return new
+		{
+			status = (providerOk ? IpcResultStatus.Success : IpcResultStatus.Unavailable).ToString(),
+			id = row.Id,
+			address = ip,
+			providerOk,
+			providerError,
+			blocklistDisabled = related.Count,
+		};
+	}
+
+	private static LoginRuleMutationRequest DeserializeLoginRuleRequest(string? payload, string commandName)
+	{
+		if (string.IsNullOrWhiteSpace(payload))
+		{
+			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
+				"{0} requires a JSON payload.", commandName));
+		}
+
+		LoginRuleMutationRequest? parsed;
+		try
+		{
+			parsed = JsonSerializer.Deserialize<LoginRuleMutationRequest>(payload, JsonOptions.Default);
+		}
+		catch (JsonException ex)
+		{
+			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
+				"{0} payload is not valid JSON: {1}", commandName, ex.Message));
+		}
+
+		if (parsed is null)
+		{
+			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
+				"{0} payload could not be parsed.", commandName));
+		}
+		return parsed;
+	}
+
+	private static string NormalizeAndValidateLogin(string login)
+	{
+		if (string.IsNullOrWhiteSpace(login))
+		{
+			throw new IpcException("Login must not be empty.");
+		}
+
+		string trimmed = login.Trim();
+		if (trimmed.Length > 256)
+		{
+			throw new IpcException("Login is too long (max 256 characters).");
+		}
+
+		foreach (char c in trimmed)
+		{
+			if (char.IsControl(c))
+			{
+				throw new IpcException("Login contains control characters.");
+			}
+		}
+
+		return trimmed.ToLowerInvariant();
 	}
 }

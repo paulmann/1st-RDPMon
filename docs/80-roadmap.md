@@ -217,6 +217,107 @@ Before Stage 5 can start:
    dispatch from background callbacks, async event handlers only on `Click`, no direct SQLite
    writes.
 
+## Stage 5 — Firewall tab UI + settings / list management (this branch)
+
+Stage 5 introduces the Firewall tab in the Configurator. It deliberately ships **no Attack
+Statistics tab, no Remote RDP Clients tab, no AbuseIPDB page / client, and no MikroTik page /
+client**; those remain deferred to Stage 6+. The MikroTik and `Both` provider entries in the
+provider drop-down are surfaced but disabled so operators can see them coming.
+
+Delivered:
+
+* **Firewall tab (`Forms/FirewallPage.cs`)** — added to `MainForm` after Live Events. Three
+  sections: provider / status, auto-block policy, and an inner `TabControl` with Blocklist /
+  Whitelist / Login trip-wires / Active blocks grids. A 5-second timer refreshes every list and
+  the status panel together; the status strip records `[HH:mm:ss Z]` timestamps and per-step
+  OK / FAIL detail for every operator action.
+* **Provider / status panel** — `Enable Windows Firewall blocking` checkbox bound to the
+  effective `Firewall.Provider` value (`None` when off, the selected provider when on); active
+  provider drop-down with `None`, `Windows`, and disabled `MikroTik` / `Both` entries; refresh
+  button; live status labels that distinguish *enabled*, *disabled*, *unavailable*, and
+  *non-Windows host* states; counters strip showing `ActiveBlockCount` / `WhitelistCount` /
+  `BlacklistCount` returned by `GetFirewallStatus`.
+* **Auto-block policy panel** — `Auto-block if source is not whitelisted and failed attempts
+  exceed threshold` checkbox (bound to `FirewallOptions.AutoBlockBruteForce`), numeric threshold
+  bound to `AutoBlockThreshold` (1..100,000), days / hours / minutes numeric inputs that compose
+  `DefaultBlockDurationMinutes`, `Auto-block if attempted login is blacklisted` checkbox bound
+  to `BlockOnBlacklistedLogin`, and `Refuse private-address blocks` bound to
+  `RefusePrivateAddressBlock`. `Save policy` round-trips through `GetSettings` →
+  in-place mutation of the `Firewall` JSON sub-tree → `SaveSettings`; the existing service hot-
+  reload picks the change up via `IOptionsMonitor<RdpAuditOptions>`.
+* **Blocklist / Whitelist grids** — bound to `ListBlocklist` / `ListWhitelist`, filterable by
+  IP / source / note, with validated Add (client-side `IPAddress.TryParse` + server-side
+  re-validation) and confirmation-gated Remove. Whitelist add prompts a follow-up Yes/No that
+  invokes `UnblockAddress` so operators can clean an active rule in one step. Removing a
+  whitelist entry never installs a block.
+* **Login trip-wires grid** — bound to `ListLoginRules`, filterable by login / note / enabled
+  state, with Add / Remove / Toggle-enabled buttons. The page explicitly tells operators that
+  these rules cause source-IP blocks on attempted logons; they do **not** disable local Windows
+  accounts.
+* **Active blocks grid** — bound to `ListActiveBlocksDetailed`, filterable by IP / reason /
+  provider / status / rule-handle / error, with `Unblock selected` driving `UnblockActiveBlock`.
+  Provider, status, created / expires UTC, rule handle, and last error are all visible in the
+  grid.
+* **New IPC commands** — `ListLoginRules` (32), `AddLoginRule` (33), `RemoveLoginRule` (34),
+  `SetLoginRuleEnabled` (35), `ListActiveBlocksDetailed` (36), `UnblockActiveBlock` (37). All
+  append-only at the next free ordinals; ABI stability is locked by
+  `IpcCommandStabilityTests.Ordinal_IsStable`.
+* **New DTOs** — `LoginRuleDto`, `LoginRuleMutationRequest`, `ActiveBlockDto` under
+  `Core/Ipc/Contracts`, with explicit `[MessagePackObject]` + integer `[Key]` indices.
+* **Core helper** — `Core/Util/AddressListFilter.cs`: pure case-insensitive substring predicate
+  and IP / login normalisation helpers, lifted out of the UI so they can be unit tested.
+* **Tests** — `AddressListFilterTests` (empty query, whitespace, case-insensitive substring,
+  null-field tolerance, IPv4 / IPv6 acceptance and rejection, IPv6 canonicalisation,
+  login trim+lowercase, control-character rejection), `IpcDispatcherStage5Tests` (login rule
+  add normalisation, empty-login rejection, idempotent re-add, toggle, remove-by-login fallback,
+  `ListActiveBlocksDetailed` DTO shape, `UnblockActiveBlock` bookkeeping, missing-id error
+  path), and extended `IpcCommandStabilityTests` with the six new ordinals.
+* **Docs** — refreshed `docs/30-configurator.md` (Firewall row), `docs/45-firewall.md`
+  (cross-reference to Stage 5 UI + Stage 5 IPC), `docs/50-ipc.md` (Stage 5 command table +
+  semantics), this roadmap entry.
+
+Deferred to Stage 6+ (explicitly NOT in Stage 5):
+
+* Attack Statistics tab.
+* Remote RDP Clients tab + session control wiring (`DisconnectSession`, `LogoffSession`,
+  `ShadowSession`).
+* AbuseIPDB page and HTTP client.
+* MikroTik page and REST client (the provider drop-down entries already exist but are disabled).
+
+### Stage 6 prerequisites
+
+Before Stage 6 can start:
+
+1. **Windows manual validation of Stage 5.** On a Windows host with the service installed and
+   running:
+   * Open the Firewall tab. Confirm the provider drop-down shows `Windows Firewall` selected
+     and the status label reads *Enabled (Windows Firewall reachable)*.
+   * Toggle `Enable Windows Firewall blocking`, click `Save policy`, and confirm the status
+     strip logs `Save OK` and the `RdpAuditOptions.Firewall.Provider` value persists across a
+     service restart (`%ProgramData%\RdpAudit\appsettings.json`).
+   * Change `Threshold`, `Default block duration` (days/hours/minutes), and toggle
+     `Auto-block if attempted login is blacklisted` and `Refuse private-address blocks`. Save
+     and confirm the JSON sub-tree reflects the change.
+   * Add an IP to the Blocklist via the Add button; confirm `netsh advfirewall firewall show
+     rule name=RdpAudit-Block-{ip}` lists the rule once the auto-block worker reconciles, and
+     that the row appears in `BlocklistEntries`.
+   * Add the same IP to the Whitelist and accept the follow-up unblock prompt; confirm the
+     blocklist row is soft-disabled and the netsh rule no longer matches.
+   * Add a login trip-wire ("administrator"), toggle it off, and remove it; confirm the
+     `LoginRules` table reflects each step.
+   * Select an active block row, click `Unblock selected`, and confirm the row transitions to
+     `Removed` and any matching `BlocklistEntries` row is soft-disabled.
+   * Watch the status strip: every action must surface a `[HH:mm:ss Z]` line with OK / FAIL
+     detail.
+2. **Stage 6 IPC reservation.** Reserve the next contiguous block of `IpcCommand` ordinals for
+   the Remote RDP Clients tab (`ListRdpSessions`, `DisconnectSession`, `LogoffSession`,
+   `ShadowSession` are already reserved at 19..22), the AbuseIPDB client, and the MikroTik
+   client. Ordinals 38+ are free.
+3. **Provider abstraction discipline.** Re-enabling the MikroTik / Both entries in the Firewall
+   tab provider drop-down must follow the existing `IFirewallProvider` contract: the UI must
+   continue to drive *only* IPC, and the provider id must be resolved server-side from
+   `FirewallProviderKind` without UI knowledge of the underlying REST endpoint.
+
 ## LLM-safe extension rules
 
 When implementing later stages:
