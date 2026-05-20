@@ -103,6 +103,7 @@ public sealed class MaintenanceWorker : BackgroundService
 		DateTime activeBlockCutoff = utcNow.AddDays(-Math.Max(7, storage.ActiveBlockRetentionDays));
 		DateTime attackStatCutoff = utcNow.AddDays(-Math.Max(14, storage.AttackStatRetentionDays));
 		DateTime correlationCutoff = utcNow.AddDays(-Math.Max(7, storage.SessionIpCorrelationRetentionDays));
+		DateTime connectionFactCutoff = utcNow.AddDays(-Math.Max(30, storage.RdpConnectionFactRetentionDays));
 
 		int eventsDeleted = await PruneBatchedAsync(
 			db => db.RawEvents.Where(e => e.TimeUtc < eventCutoff),
@@ -140,6 +141,11 @@ public sealed class MaintenanceWorker : BackgroundService
 			batch,
 			ct).ConfigureAwait(false);
 
+		int connectionFactsDeleted = await PruneBatchedAsync(
+			db => db.RdpConnectionFacts.Where(f => f.LastSeenUtc < connectionFactCutoff),
+			batch,
+			ct).ConfigureAwait(false);
+
 		await using (AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false))
 		{
 			// Bounded incremental_vacuum: at most 5000 free pages per pass to avoid
@@ -158,13 +164,14 @@ public sealed class MaintenanceWorker : BackgroundService
 		}
 
 		_logger.LogInformation(
-			"Maintenance complete: events={Events} alerts={Alerts} abuseReports={Abuse} activeBlocks={Blocks} attackStats={Stats} correlations={Correlations}",
+			"Maintenance complete: events={Events} alerts={Alerts} abuseReports={Abuse} activeBlocks={Blocks} attackStats={Stats} correlations={Correlations} connectionFacts={ConnectionFacts}",
 			eventsDeleted,
 			alertsDeleted,
 			abuseReportsDeleted,
 			activeBlocksDeleted,
 			attackStatsDeleted,
-			correlationsDeleted);
+			correlationsDeleted,
+			connectionFactsDeleted);
 
 		// Stage A: capture a daily DB-size snapshot so the Overview tab can report growth windows
 		// without hot polling. Snapshots older than 45 days are pruned so the DbProps table never

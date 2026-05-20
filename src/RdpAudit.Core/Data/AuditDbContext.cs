@@ -43,6 +43,8 @@ public sealed class AuditDbContext : DbContext
 
 	public DbSet<SessionIpCorrelation> SessionIpCorrelations => Set<SessionIpCorrelation>();
 
+	public DbSet<RdpConnectionFact> RdpConnectionFacts => Set<RdpConnectionFact>();
+
 	protected override void OnModelCreating(ModelBuilder modelBuilder)
 	{
 		base.OnModelCreating(modelBuilder);

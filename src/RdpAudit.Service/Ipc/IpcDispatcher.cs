@@ -1093,6 +1093,94 @@ public sealed class IpcDispatcher
 				session.ClientAddress = ip;
 			}
 		}
+
+		// Stage IP-C: fallback historical enrichment from RdpConnectionFacts. Only fills in
+		// ClientAddress that remained empty after the active SessionIpCorrelations pass — the
+		// correlations table is still authoritative for live sessions, the connection facts only
+		// add the most recent historical observation when no live correlation exists.
+		await EnrichSessionsFromConnectionFactsAsync(db, sessions, ct).ConfigureAwait(false);
+	}
+
+	/// <summary>Stage IP-C helper: enriches sessions with the most recent <see cref="RdpConnectionFact"/>
+	/// IP for the same (WtsSessionId, UserName) or UserName. Only fills <c>ClientAddress</c> when it
+	/// is still empty — does not override values set by the live correlation lookup.</summary>
+	internal static async Task EnrichSessionsFromConnectionFactsAsync(
+		AuditDbContext db,
+		IList<RdpSessionDto> sessions,
+		CancellationToken ct)
+	{
+		List<RdpSessionDto> needIp = new(sessions.Count);
+		foreach (RdpSessionDto s in sessions)
+		{
+			if (string.IsNullOrEmpty(s.ClientAddress) && !string.IsNullOrEmpty(s.UserName))
+			{
+				needIp.Add(s);
+			}
+		}
+
+		if (needIp.Count == 0)
+		{
+			return;
+		}
+
+		HashSet<int> wtsIds = new();
+		HashSet<string> usernames = new(StringComparer.OrdinalIgnoreCase);
+		foreach (RdpSessionDto s in needIp)
+		{
+			wtsIds.Add(s.SessionId);
+			usernames.Add(s.UserName);
+		}
+
+		List<RdpConnectionFact> wtsMatches = await db.RdpConnectionFacts
+			.AsNoTracking()
+			.Where(r => r.WtsSessionId != null
+				&& wtsIds.Contains(r.WtsSessionId.Value)
+				&& r.UserName != null
+				&& usernames.Contains(r.UserName))
+			.OrderByDescending(r => r.LastSeenUtc)
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		Dictionary<(int Wts, string User), string> wtsUserToIp = new();
+		foreach (RdpConnectionFact row in wtsMatches)
+		{
+			if (row.WtsSessionId is int wts && row.UserName is string u)
+			{
+				(int, string) key = (wts, u.Trim());
+				if (!wtsUserToIp.ContainsKey(key))
+				{
+					wtsUserToIp[key] = row.Ip;
+				}
+			}
+		}
+
+		List<RdpConnectionFact> userMatches = await db.RdpConnectionFacts
+			.AsNoTracking()
+			.Where(r => r.UserName != null && usernames.Contains(r.UserName))
+			.OrderByDescending(r => r.LastSeenUtc)
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		Dictionary<string, string> userToIp = new(StringComparer.OrdinalIgnoreCase);
+		foreach (RdpConnectionFact row in userMatches)
+		{
+			if (row.UserName is string u && !userToIp.ContainsKey(u.Trim()))
+			{
+				userToIp[u.Trim()] = row.Ip;
+			}
+		}
+
+		foreach (RdpSessionDto session in needIp)
+		{
+			if (wtsUserToIp.TryGetValue((session.SessionId, session.UserName.Trim()), out string? ip))
+			{
+				session.ClientAddress = ip;
+				continue;
+			}
+
+			if (userToIp.TryGetValue(session.UserName.Trim(), out ip))
+			{
+				session.ClientAddress = ip;
+			}
+		}
 	}
 
 	private async Task<object?> DisconnectSessionAsync(string? payload, CancellationToken ct)

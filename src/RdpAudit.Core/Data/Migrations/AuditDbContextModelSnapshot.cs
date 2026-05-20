@@ -477,6 +477,91 @@ namespace RdpAudit.Core.Data.Migrations
 					b.ToTable("RawEvents", (string)null);
 				});
 
+			modelBuilder.Entity("RdpAudit.Core.Models.RdpConnectionFact", b =>
+				{
+					b.Property<long>("Id")
+						.ValueGeneratedOnAdd()
+						.HasColumnType("INTEGER");
+
+					b.Property<DateTime?>("AuthenticatedUtc")
+						.HasColumnType("TEXT");
+
+					b.Property<DateTime?>("ConnectedUtc")
+						.HasColumnType("TEXT");
+
+					b.Property<DateTime?>("DisconnectedUtc")
+						.HasColumnType("TEXT");
+
+					b.Property<string>("Domain")
+						.HasMaxLength(256)
+						.HasColumnType("TEXT");
+
+					b.Property<int>("FailedLogons")
+						.ValueGeneratedOnAdd()
+						.HasColumnType("INTEGER")
+						.HasDefaultValue(0);
+
+					b.Property<DateTime>("FirstSeenUtc")
+						.HasColumnType("TEXT");
+
+					b.Property<string>("Ip")
+						.IsRequired()
+						.HasMaxLength(45)
+						.HasColumnType("TEXT");
+
+					b.Property<bool>("IsActive")
+						.ValueGeneratedOnAdd()
+						.HasColumnType("INTEGER")
+						.HasDefaultValue(false);
+
+					b.Property<DateTime>("LastSeenUtc")
+						.HasColumnType("TEXT");
+
+					b.Property<DateTime?>("LoggedOffUtc")
+						.HasColumnType("TEXT");
+
+					b.Property<string>("LogonId")
+						.HasMaxLength(32)
+						.HasColumnType("TEXT");
+
+					b.Property<string>("ObservedEventIds")
+						.HasMaxLength(256)
+						.HasColumnType("TEXT");
+
+					b.Property<DateTime?>("ReconnectedUtc")
+						.HasColumnType("TEXT");
+
+					b.Property<int>("SuccessfulLogons")
+						.ValueGeneratedOnAdd()
+						.HasColumnType("INTEGER")
+						.HasDefaultValue(0);
+
+					b.Property<string>("UserName")
+						.HasMaxLength(256)
+						.HasColumnType("TEXT");
+
+					b.Property<string>("UserNamesAttempted")
+						.HasMaxLength(1024)
+						.HasColumnType("TEXT");
+
+					b.Property<int?>("WtsSessionId")
+						.HasColumnType("INTEGER");
+
+					b.HasKey("Id");
+
+					b.HasIndex("LastSeenUtc");
+
+					b.HasIndex("LogonId");
+
+					b.HasIndex("Ip", "LastSeenUtc");
+
+					b.HasIndex("UserName", "LastSeenUtc");
+
+					b.HasIndex("WtsSessionId", "UserName");
+
+					b.ToTable("RdpConnectionFacts", (string)null);
+				});
+
 			modelBuilder.Entity("RdpAudit.Core.Models.Session", b =>
 				{
 					b.Property<long>("Id")
