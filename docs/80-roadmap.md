@@ -833,3 +833,40 @@ Stage B prerequisites (Logs tab / action audit subsystem):
    pattern: IPC-only reads, no direct SQLite writes, `Invoke` dispatch from background callbacks,
    async event handlers only on `Click`. Action audit rows must be persisted by the service-side
    handlers — the Configurator must not write to the audit table directly.
+
+### Stage A — sub-stage A1 status
+
+A1 covers the Overview dashboard summary cards plus the service-side IPC `GetOverviewSummary`
+that backs them. The sub-stage is **done** as of this branch:
+
+* `IpcCommand.GetOverviewSummary` lives at append-only ordinal `38` (see `Core/Ipc/IpcCommand.cs`).
+* `Core/Ipc/Contracts/OverviewSummaryDto` ships with `[MessagePackObject]` + integer `[Key]`
+  indices for every field; the DTO is the only payload returned by the command.
+* `Service/Ipc/IpcDispatcher.GetOverviewSummaryAsync` computes Attacks today, Blocked IPs,
+  Active sessions, Failed logins (24 h), Service health, DB size and day / week / month growth
+  server-side using UTC day boundaries and gracefully returns `IpcResultStatus.Unavailable` when
+  the database lookup or session enumeration fails — it never throws to the IPC client.
+* `Service/Workers/MaintenanceWorker.CaptureDbSizeSnapshotAsync` writes the daily DB-size
+  snapshot to `DbProps` under `OverviewDbSize:<yyyymmdd>` and prunes anything older than
+  `DbSizeGrowthCalculator.MonthLookbackMaxDays`. No schema migration is required.
+* `Forms/OverviewPage` renders the six compact summary cards, refreshes via the existing
+  `Refresh status` button, and degrades to `—` + `service unreachable` when the IPC call fails.
+
+### A2 prerequisites
+
+Sub-stage A2 (or whichever next slice consumes the new dashboard surface) must satisfy:
+
+1. **Windows manual validation of A1.** Confirm the six summary cards populate within one IPC
+   round-trip on a Windows host with the service installed and running; toggle service stop /
+   start and confirm `Service health` flips between the IPC-reported value and `service
+   unreachable` without crashing the tab; let `MaintenanceWorker` run at least one daily pass and
+   confirm `DB size` shows `growth d:+x w:+y m:+z` rather than `snapshot pending (24h required)`.
+2. **Append-only IPC ordinals.** A2 must claim the next free ordinal (`40`+) — ordinals `38` and
+   `39` are immutable. Reserve all new ordinals at the end of `IpcCommand` and lock them with
+   `IpcCommandStabilityTests.Ordinal_IsStable`.
+3. **Layering discipline.** Continue the established pattern: Configurator pages call IPC and
+   marshal results onto the UI thread via `BeginInvoke`/`Invoke`; the service computes metrics
+   from EF Core inside the dispatcher and never serialises secrets into the response DTO.
+4. **Schema neutrality.** Prefer storing any new lightweight per-summary metadata in the
+   existing `DbProps` key-value table to avoid a migration, mirroring how A1 stores DB-size
+   snapshots. Reach for a schema change only when the data shape truly requires it.
