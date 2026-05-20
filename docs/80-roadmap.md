@@ -749,3 +749,87 @@ When implementing later stages:
 4. **Backward-compatible defaults.** Existing appsettings.json documents must continue to bind. New options default to safe / disabled values.
 5. **Cancellation.** All long-running paths take `CancellationToken`. Never call `.Result` / `.Wait()`.
 6. **Auditable & reversible.** Every block / report / shadow action records an audit entry. Shadow-policy mutations require a backup unless explicitly suppressed.
+
+## Stage A — Overview dashboard, Firewall layout, MikroTik instructions, Export All IP Events (this branch)
+
+Stage A is a UX-and-IPC iteration. Two new append-only IPC commands land at ordinals `38` and `39`;
+no migrations are required (DB size snapshots reuse the existing `DbProps` key-value store).
+Stage B (Logs tab + action audit subsystem) is explicitly deferred.
+
+Delivered:
+
+* **Overview dashboard cards** — `Forms/OverviewPage.cs` adds a row of six summary cards
+  (Attacks today, Blocked IPs, Active sessions, Failed logins (24h), Service health, DB size).
+  Cards refresh on page load and on every `Refresh status` / `Install` / `Backup Settings` action.
+  Service-unreachable refreshes flip every value to `—` with a `service unreachable` sub-title; the
+  existing detailed status report remains the source of truth for the install / backup workflow.
+* **DB size growth** — `Service/Workers/MaintenanceWorker.CaptureDbSizeSnapshotAsync` writes a
+  daily snapshot to `DbProps` under the key prefix `OverviewDbSize:`. `Core/Util/DbSizeGrowthCalculator`
+  picks the snapshot closest to each target lookback (1 / 7 / 30 days) within documented caps and
+  computes growth in bytes. Snapshots older than 45 days are pruned in the same pass so `DbProps`
+  stays bounded. No new schema or migration is required.
+* **Firewall layout fix** — `Forms/FirewallPage.cs` now uses a `TableLayoutPanel` root with
+  auto-sized provider / policy rows, a filling inner-tab row, and a docked status strip. The
+  `Default block duration` controls live in a single compact `FlowLayoutPanel` (`[d] [h] [m]`) so
+  days / hours / minutes never spread across half the tab. The Auto-block policy controls are no
+  longer overlapped by the Blocklist / Whitelist / Login trip-wires / Active blocks tabs at the
+  screenshot size or at high DPI.
+* **MikroTik instructions + Copy commands** — `Forms/MikroTikPage.cs` carries a read-only monospace
+  block with the full RouterOS v7 shell bundle (least-privilege group / user, REST endpoint enable,
+  allowed-address restriction, optional TLS notes, verification queries). A new `Copy commands`
+  button copies the bundle verbatim to the clipboard and reports the result in the status label.
+* **Export All IP Events** — Live Events and Attack Statistics context menus expose an
+  `Export All IP Events` submenu with `JSON`, `TXT`, `Markdown`, and `CSV` items. The flow runs
+  through `Configurator/Services/IpEventsExportRunner` which queries `GetEventsForIp` (ord 39),
+  formats the response via `Core/Events/IpEventsExportFormatter`, prompts the operator for a save
+  path via `SaveFileDialog`, and writes the file as UTF-8 (CSV with BOM for Excel auto-detection).
+  Non-CSV formats embed the summary header (IP, attack type, first / last UTC, failed / success
+  counts, attempted usernames, duration, threat level, block status); CSV stays a clean tabular
+  event stream so it loads directly into downstream tooling. The Configurator never writes to an
+  arbitrary path — writes only happen after the operator confirms a path in the dialog.
+* **New IPC commands** — `GetOverviewSummary` (38), `GetEventsForIp` (39). Both append-only at the
+  next free ordinals; ABI stability is locked by `IpcCommandStabilityTests.Ordinal_IsStable`.
+* **New DTOs** — `OverviewSummaryDto`, `EventsForIpRequest`, `EventsForIpDto`, `IpEventEntryDto`
+  under `Core/Ipc/Contracts`, all with explicit `[MessagePackObject]` + integer `[Key]` indices.
+* **New helpers** — `Core/Util/DbSizeGrowthCalculator` (pure, UI-agnostic) and
+  `Core/Events/IpEventsExportFormatter` (pure formatter for the four export formats).
+* **Tests** — `DbSizeGrowthCalculatorTests` (encode/decode round-trip + window selection +
+  edge cases), `IpEventsExportFormatterTests` (each format + summary header presence /
+  CSV-only tabular shape + tab / newline / quote neutralisation + default filename rules),
+  `IpcDispatcherStageATests` (`GetOverviewSummary` counter accuracy + `GetEventsForIp` bounded
+  query + limit clamping + invalid IP / empty payload rejection), and an extended
+  `IpcCommandStabilityTests` with the two new ordinals. All existing tests still pass.
+* **Docs** — refreshed `docs/30-configurator.md` (Stage A section), `docs/50-ipc.md` (Stage A
+  command table), this roadmap entry.
+
+Stage B prerequisites (Logs tab / action audit subsystem):
+
+1. **Windows manual validation of Stage A.** On a Windows host with the service installed and
+   running:
+   * Open the Overview tab. Confirm the six summary cards populate within one IPC round-trip and
+     that DB size renders `n.nn KB/MB/GB`. The growth sub-title reads
+     `snapshot pending (24h required)` until the first `MaintenanceWorker` pass writes a snapshot,
+     after which it reads `growth d:+x w:+y m:+z` (any subset can be present depending on age).
+   * Toggle service stop / start and confirm `Service health` flips between the IPC-reported value
+     and `service unreachable` without crashing the tab.
+   * Open the Firewall tab at the original screenshot size and at 150 % DPI. Confirm the Auto-block
+     policy controls (threshold, default block duration, both checkboxes, Save / Reload buttons) are
+     never overlapped by the inner tabs. Confirm the `Default block duration` row reads
+     `[N] d  [N] h  [N] m` in a single compact group.
+   * Open the MikroTik tab. Confirm the setup bundle is visible (monospace), click `Copy commands`,
+     and paste into Notepad — the entire block including the placeholder markers
+     (`<RDPAUDIT-HOST-IP>` / `<STRONG-PASSWORD>`) must appear verbatim. The status label must
+     report the copied length.
+   * In Live Events and Attack Statistics, right-click a row with a valid IP. Confirm
+     `Export All IP Events → JSON…` opens a `SaveFileDialog` with a default filename of
+     `rdpaudit-events-<ip>-<utc>.json`. Save and confirm the JSON contains the summary fields and
+     `Events` array. Repeat for `TXT`, `Markdown`, and `CSV`. Open the CSV in Excel to confirm UTF-8
+     BOM auto-detection picks the encoding correctly.
+   * Cancel the dialog and confirm the status strip reports `Export cancelled by user.` with no
+     file written.
+2. **Stage B IPC reservation.** Ordinals 38 and 39 are now allocated. Stage B should claim 40+ for
+   the Logs tab + action audit subsystem.
+3. **Layering discipline (Stage B).** The Logs tab must follow the established Configurator
+   pattern: IPC-only reads, no direct SQLite writes, `Invoke` dispatch from background callbacks,
+   async event handlers only on `Click`. Action audit rows must be persisted by the service-side
+   handlers — the Configurator must not write to the audit table directly.

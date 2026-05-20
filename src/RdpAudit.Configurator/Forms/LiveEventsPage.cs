@@ -17,6 +17,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using RdpAudit.Configurator.Ipc;
+using RdpAudit.Configurator.Services;
 using RdpAudit.Core.Events;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
@@ -70,6 +71,7 @@ public sealed class LiveEventsPage : TabPage
 	private readonly ToolStripMenuItem _menuBlockIp;
 	private readonly ToolStripMenuItem _menuWhitelistIp;
 	private readonly ToolStripMenuItem _menuBlockLogin;
+	private readonly ToolStripMenuItem _menuExportEvents;
 
 	private bool _paused;
 	private long _lastSeenId;
@@ -175,6 +177,7 @@ public sealed class LiveEventsPage : TabPage
 		_menuBlockIp = new ToolStripMenuItem("Block IP in Windows Firewall and Add to Blocklist", null, async (_, _) => await OnBlockIpAsync().ConfigureAwait(true));
 		_menuWhitelistIp = new ToolStripMenuItem("Add IP to Whitelist and Unblock", null, async (_, _) => await OnWhitelistAndUnblockAsync().ConfigureAwait(true));
 		_menuBlockLogin = new ToolStripMenuItem("Add Login to Blocklist and Block IP", null, async (_, _) => await OnBlockLoginAsync().ConfigureAwait(true));
+		_menuExportEvents = BuildExportSubmenu();
 		_menu.Items.Add(_menuCopyDetails);
 		_menu.Items.Add(_menuCopyCell);
 		_menu.Items.Add(_menuFilterBy);
@@ -182,6 +185,8 @@ public sealed class LiveEventsPage : TabPage
 		_menu.Items.Add(_menuBlockIp);
 		_menu.Items.Add(_menuWhitelistIp);
 		_menu.Items.Add(_menuBlockLogin);
+		_menu.Items.Add(new ToolStripSeparator());
+		_menu.Items.Add(_menuExportEvents);
 		_menu.Opening += OnMenuOpening;
 
 		// Layout order (last-added control is at the top when docked) ---------------------------
@@ -365,6 +370,7 @@ public sealed class LiveEventsPage : TabPage
 		_menuBlockIp.Enabled = hasIp;
 		_menuWhitelistIp.Enabled = hasIp;
 		_menuBlockLogin.Enabled = hasLogin;
+		_menuExportEvents.Enabled = hasIp;
 
 		if (!hasRow)
 		{
@@ -699,6 +705,32 @@ public sealed class LiveEventsPage : TabPage
 		};
 
 		return string.IsNullOrWhiteSpace(raw) ? null : raw;
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Export All IP Events (Stage A) — submenu wired into the live-events context menu.
+	// ---------------------------------------------------------------------------------------------
+
+	private ToolStripMenuItem BuildExportSubmenu()
+	{
+		ToolStripMenuItem root = new("Export All IP Events");
+		root.DropDownItems.Add(new ToolStripMenuItem("JSON…", null, async (_, _) => await OnExportEventsAsync(IpEventsExportFormat.Json).ConfigureAwait(true)));
+		root.DropDownItems.Add(new ToolStripMenuItem("TXT…", null, async (_, _) => await OnExportEventsAsync(IpEventsExportFormat.Txt).ConfigureAwait(true)));
+		root.DropDownItems.Add(new ToolStripMenuItem("Markdown…", null, async (_, _) => await OnExportEventsAsync(IpEventsExportFormat.Markdown).ConfigureAwait(true)));
+		root.DropDownItems.Add(new ToolStripMenuItem("CSV…", null, async (_, _) => await OnExportEventsAsync(IpEventsExportFormat.Csv).ConfigureAwait(true)));
+		return root;
+	}
+
+	private async Task OnExportEventsAsync(IpEventsExportFormat format)
+	{
+		if (_menuRow is null || !IsValidIp(_menuRow.SourceIp))
+		{
+			SetStatus("Export aborted: no valid IP in the selected row.");
+			return;
+		}
+
+		string ip = _menuRow.SourceIp!.Trim();
+		await IpEventsExportRunner.RunAsync(_ipc, ip, format, SetStatus).ConfigureAwait(true);
 	}
 
 	protected override void Dispose(bool disposing)

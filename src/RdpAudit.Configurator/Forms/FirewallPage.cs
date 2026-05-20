@@ -96,13 +96,23 @@ public sealed class FirewallPage : TabPage
 		_statusStrip.Items.Add(_statusLabel);
 
 		// --- Provider / status panel -----------------------------------------------------------
-		GroupBox providerBox = new() { Text = "Provider and status", Dock = DockStyle.Top, Height = 130 };
+		// AutoSize so the GroupBox always fits its rows and never overlaps the inner tabs below.
+		GroupBox providerBox = new()
+		{
+			Text = "Provider and status",
+			Dock = DockStyle.Fill,
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
+			MinimumSize = new Size(0, 130),
+		};
 		TableLayoutPanel providerLayout = new()
 		{
 			Dock = DockStyle.Fill,
 			ColumnCount = 4,
 			RowCount = 4,
 			Padding = new Padding(8),
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
 		};
 		providerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220));
 		providerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
@@ -148,18 +158,30 @@ public sealed class FirewallPage : TabPage
 		providerBox.Controls.Add(providerLayout);
 
 		// --- Auto-block policy panel -----------------------------------------------------------
-		GroupBox policyBox = new() { Text = "Auto-block policy", Dock = DockStyle.Top, Height = 170 };
+		// AutoSize so the GroupBox always fits its rows. The block-duration controls live in a
+		// single compact FlowLayoutPanel so days/hours/min stay grouped at a usable density even
+		// at the minimum screenshot size and high DPI.
+		GroupBox policyBox = new()
+		{
+			Text = "Auto-block policy",
+			Dock = DockStyle.Fill,
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
+			MinimumSize = new Size(0, 160),
+		};
 		TableLayoutPanel policyLayout = new()
 		{
 			Dock = DockStyle.Fill,
-			ColumnCount = 6,
+			ColumnCount = 4,
 			RowCount = 4,
 			Padding = new Padding(8),
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
 		};
-		for (int i = 0; i < 6; i++)
-		{
-			policyLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 6));
-		}
+		policyLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 230));
+		policyLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
+		policyLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 180));
+		policyLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
 		_autoBlockBruteForceCheck = new CheckBox
 		{
@@ -182,12 +204,31 @@ public sealed class FirewallPage : TabPage
 			Minimum = 1,
 			Maximum = 100_000,
 			Value = 50,
-			Dock = DockStyle.Fill,
+			Width = 90,
+			Anchor = AnchorStyles.Left,
 		};
 
-		_durationDays = MakeDurationInput(0, 365);
-		_durationHours = MakeDurationInput(0, 23);
-		_durationMinutes = MakeDurationInput(0, 59);
+		_durationDays = MakeCompactDurationInput(0, 365);
+		_durationHours = MakeCompactDurationInput(0, 23);
+		_durationMinutes = MakeCompactDurationInput(0, 59);
+
+		// Compact FlowLayoutPanel grouping days/hours/min side-by-side so the default-block-duration
+		// row fits within ~360 px regardless of the parent column count.
+		FlowLayoutPanel durationRow = new()
+		{
+			FlowDirection = FlowDirection.LeftToRight,
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
+			WrapContents = false,
+			Margin = new Padding(0),
+			Anchor = AnchorStyles.Left,
+		};
+		durationRow.Controls.Add(_durationDays);
+		durationRow.Controls.Add(MakeUnitLabel("d"));
+		durationRow.Controls.Add(_durationHours);
+		durationRow.Controls.Add(MakeUnitLabel("h"));
+		durationRow.Controls.Add(_durationMinutes);
+		durationRow.Controls.Add(MakeUnitLabel("m"));
 
 		_savePolicyButton = new Button { Text = "Save policy", AutoSize = true };
 		_savePolicyButton.Click += async (_, _) => await SavePolicyAsync().ConfigureAwait(true);
@@ -196,25 +237,23 @@ public sealed class FirewallPage : TabPage
 		_reloadPolicyButton.Click += async (_, _) => await ReloadPolicyAsync().ConfigureAwait(true);
 
 		policyLayout.Controls.Add(_autoBlockBruteForceCheck, 0, 0);
-		policyLayout.SetColumnSpan(_autoBlockBruteForceCheck, 6);
+		policyLayout.SetColumnSpan(_autoBlockBruteForceCheck, 4);
 
 		policyLayout.Controls.Add(new Label { Text = "Threshold (failed attempts):", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 1);
 		policyLayout.Controls.Add(_thresholdInput, 1, 1);
 		policyLayout.Controls.Add(new Label { Text = "Default block duration:", AutoSize = true, Anchor = AnchorStyles.Left }, 2, 1);
-		policyLayout.Controls.Add(LabeledNumeric("days", _durationDays), 3, 1);
-		policyLayout.Controls.Add(LabeledNumeric("hours", _durationHours), 4, 1);
-		policyLayout.Controls.Add(LabeledNumeric("min", _durationMinutes), 5, 1);
+		policyLayout.Controls.Add(durationRow, 3, 1);
 
 		policyLayout.Controls.Add(_blockOnBlacklistedLoginCheck, 0, 2);
-		policyLayout.SetColumnSpan(_blockOnBlacklistedLoginCheck, 3);
-		policyLayout.Controls.Add(_refusePrivateAddressCheck, 3, 2);
-		policyLayout.SetColumnSpan(_refusePrivateAddressCheck, 3);
+		policyLayout.SetColumnSpan(_blockOnBlacklistedLoginCheck, 2);
+		policyLayout.Controls.Add(_refusePrivateAddressCheck, 2, 2);
+		policyLayout.SetColumnSpan(_refusePrivateAddressCheck, 2);
 
 		FlowLayoutPanel policyButtons = new() { FlowDirection = FlowDirection.LeftToRight, AutoSize = true };
 		policyButtons.Controls.Add(_savePolicyButton);
 		policyButtons.Controls.Add(_reloadPolicyButton);
 		policyLayout.Controls.Add(policyButtons, 0, 3);
-		policyLayout.SetColumnSpan(policyButtons, 6);
+		policyLayout.SetColumnSpan(policyButtons, 4);
 
 		policyBox.Controls.Add(policyLayout);
 
@@ -252,11 +291,27 @@ public sealed class FirewallPage : TabPage
 		Button activeUnblock = MakeButton("Unblock selected", async (_, _) => await OnUnblockActiveAsync().ConfigureAwait(true));
 		_innerTabs.TabPages.Add(BuildGridTab("Active blocks", _activeBlocksGrid, _activeBlocksFilter, null, activeUnblock));
 
-		// Order matters: docked panels added later sit closer to the top edge.
-		Controls.Add(_innerTabs);
-		Controls.Add(_statusStrip);
-		Controls.Add(policyBox);
-		Controls.Add(providerBox);
+		// Root layout: TableLayoutPanel guarantees the auto-block policy controls are never
+		// overlapped by the inner tabs at small client sizes or high DPI. Provider and policy
+		// panels auto-size to their content; the inner tabs absorb remaining vertical space; the
+		// status strip docks at the bottom.
+		TableLayoutPanel root = new()
+		{
+			Dock = DockStyle.Fill,
+			ColumnCount = 1,
+			RowCount = 4,
+		};
+		root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+		root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+		root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+		root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+		root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+		root.Controls.Add(providerBox, 0, 0);
+		root.Controls.Add(policyBox, 0, 1);
+		root.Controls.Add(_innerTabs, 0, 2);
+		root.Controls.Add(_statusStrip, 0, 3);
+
+		Controls.Add(root);
 
 		_timer = new System.Windows.Forms.Timer { Interval = 5_000 };
 		_timer.Tick += async (_, _) => await RefreshAllAsync().ConfigureAwait(true);
@@ -876,33 +931,23 @@ public sealed class FirewallPage : TabPage
 	// UI helpers
 	// ---------------------------------------------------------------------------------------------
 
-	private static NumericUpDown MakeDurationInput(int min, int max) => new()
+	private static NumericUpDown MakeCompactDurationInput(int min, int max) => new()
 	{
 		Minimum = min,
 		Maximum = max,
 		Value = min,
-		Dock = DockStyle.Fill,
+		Width = 64,
+		Margin = new Padding(0, 0, 2, 0),
+		Anchor = AnchorStyles.Left,
 	};
 
-	private static TableLayoutPanel LabeledNumeric(string caption, NumericUpDown input)
+	private static Label MakeUnitLabel(string unit) => new()
 	{
-		TableLayoutPanel host = new()
-		{
-			Dock = DockStyle.Fill,
-			ColumnCount = 2,
-			RowCount = 1,
-		};
-		host.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 60));
-		host.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 40));
-		host.Controls.Add(input, 0, 0);
-		host.Controls.Add(new Label
-		{
-			Text = caption,
-			Dock = DockStyle.Fill,
-			TextAlign = ContentAlignment.MiddleLeft,
-		}, 1, 0);
-		return host;
-	}
+		Text = unit,
+		AutoSize = true,
+		Margin = new Padding(0, 5, 8, 0),
+		TextAlign = ContentAlignment.MiddleLeft,
+	};
 
 	private TextBox MakeFilterBox(string placeholder, Action onChanged)
 	{

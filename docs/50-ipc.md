@@ -180,3 +180,69 @@ Rows are returned ordered by descending `LastSeenUtc`, descending `ThreatScore`,
 Threat scoring / classification semantics are defined in `docs/46-attack-statistics.md`. Error
 paths (malformed JSON payload, internal exceptions) surface as a controlled `IpcResponse` with
 `Success = false` and a sanitised `Error` string — never a raw exception message or stack trace.
+
+## Stage A — Overview dashboard + IP events export (this branch)
+
+Two new IPC commands are introduced. Both land at the next free ordinals; ABI stability is locked
+by `IpcCommandStabilityTests.Ordinal_IsStable`.
+
+### `GetOverviewSummary` (ordinal `38`)
+
+No request payload. Returns `OverviewSummaryDto`:
+
+| Key | Field | Meaning |
+|-----|-------|---------|
+| 0 | `Status: IpcResultStatus` | Controlled status. `Unavailable` carries `Message` describing the failure. |
+| 1 | `AttacksToday: long` | `Alerts.Count where TimeUtc >= utc-day-start`. |
+| 2 | `BlockedIps: long` | Distinct IPs in `ActiveBlocks` with `Status in (Active, Pending)`. |
+| 3 | `ActiveSessions: long` | Sessions in `Active` state reported by the service-side `RdpSessionManager` (0 on non-Windows hosts). |
+| 4 | `FailedLogins24h: long` | `RawEvents.Count where EventId = 4625 and TimeUtc >= now - 24h`. |
+| 5 | `ServiceHealth: string` | Operator-facing health string (`"Running"` when the IPC handler responds). Never contains secrets. |
+| 6 | `DatabaseSizeBytes: long` | Current SQLite file length, or `-1` when unmeasurable. |
+| 7 | `DatabaseGrowthBytesDay: long?` | Growth vs the snapshot closest to `now - 1 day`; `null` until snapshots accrue. |
+| 8 | `DatabaseGrowthBytesWeek: long?` | Growth vs the snapshot closest to `now - 7 days`; `null` until snapshots accrue. |
+| 9 | `DatabaseGrowthBytesMonth: long?` | Growth vs the snapshot closest to `now - 30 days`; `null` until snapshots accrue. |
+| 10 | `Message: string?` | Operator-facing summary; never carries secrets. |
+| 11 | `QueriedUtc: DateTime` | UTC timestamp of the query. |
+
+Snapshots are written daily by `MaintenanceWorker.CaptureDbSizeSnapshotAsync` into the existing
+`DbProps` table under the key prefix `OverviewDbSize:`. No new schema or migration is required.
+Snapshots older than `DbSizeGrowthCalculator.MonthLookbackMaxDays` (45 days) are pruned in the same
+pass, so `DbProps` stays bounded.
+
+### `GetEventsForIp` (ordinal `39`)
+
+Request payload `EventsForIpRequest`:
+
+| Key | Field | Default | Meaning |
+|-----|-------|---------|---------|
+| 0 | `Ip: string` | (required) | Target IP literal; validated server-side via `IPAddress.TryParse`. |
+| 1 | `Limit: int` | `0 → 1000` (default) | Maximum RawEvents returned. Server clamps to `[1..5000]`. |
+
+Response `EventsForIpDto`:
+
+| Key | Field | Meaning |
+|-----|-------|---------|
+| 0 | `Status: IpcResultStatus` | Controlled status. |
+| 1 | `Ip: string` | Canonical IP literal echoed from the request. |
+| 2 | `FirstSeenUtc: DateTime?` | First RawEvent for this IP; `null` when no events exist. |
+| 3 | `LastSeenUtc: DateTime?` | Most recent RawEvent for this IP. |
+| 4 | `FailedCount: long` | RawEvents with `EventId = 4625` for this IP. |
+| 5 | `SuccessCount: long` | RawEvents with `EventId = 4624` for this IP. |
+| 6 | `TotalEvents: long` | All RawEvents for this IP. |
+| 7 | `DurationSeconds: long` | `LastSeenUtc − FirstSeenUtc` in whole seconds. |
+| 8 | `AttemptedUserNames: List<string>` | Up to 20 distinct user names, most-recent first. |
+| 9 | `AttackType: string` | Projected from `AttackStats` (`BruteForce` / `BruteForceWithSuccess` / `LogonActivity`); empty when not classified. |
+| 10 | `ThreatLevel: string` | Projected from `AttackStats` (`Green` / `Yellow` / `Red`); empty when not classified. |
+| 11 | `IsBlocked: bool` | True when at least one Active / Pending row in `ActiveBlocks` targets this IP. |
+| 12 | `Events: List<IpEventEntryDto>` | Bounded RawEvents window, newest first. |
+| 13 | `Message: string?` | Operator-facing summary; never carries secrets. |
+| 14 | `QueriedUtc: DateTime` | UTC timestamp of the query. |
+
+`IpEventEntryDto` (keys `0..9`) projects `RawEvent` fields used by the export formatter: `Id`,
+`TimeUtc`, `EventId`, `Channel`, `UserName`, `Domain`, `LogonType`, `AuthPackage`, `ProcessName`,
+`Status`. No raw exception detail, command-line content, or password material ever leaves the
+server through this command.
+
+Error paths (empty payload, malformed JSON, invalid IP) surface as a controlled `IpcResponse` with
+`Success = false` and a sanitised `Error` string.

@@ -16,6 +16,7 @@ using Microsoft.Extensions.Options;
 using RdpAudit.Core.Config;
 using RdpAudit.Core.Data;
 using RdpAudit.Core.Models;
+using RdpAudit.Core.Util;
 
 namespace RdpAudit.Service.Workers;
 
@@ -158,7 +159,71 @@ public sealed class MaintenanceWorker : BackgroundService
 			activeBlocksDeleted,
 			attackStatsDeleted);
 
+		// Stage A: capture a daily DB-size snapshot so the Overview tab can report growth windows
+		// without hot polling. Snapshots older than 45 days are pruned so the DbProps table never
+		// grows unbounded.
+		await CaptureDbSizeSnapshotAsync(storage, utcNow, ct).ConfigureAwait(false);
+
 		PruneLogFiles(storage);
+	}
+
+	/// <summary>Writes the day's DB-size snapshot to <c>DbProps</c> (idempotent per UTC day) and
+	/// prunes snapshots older than <see cref="DbSizeGrowthCalculator.MonthLookbackMaxDays"/>.</summary>
+	internal async Task CaptureDbSizeSnapshotAsync(StorageOptions storage, DateTime nowUtc, CancellationToken ct)
+	{
+		long sizeBytes;
+		try
+		{
+			FileInfo fi = new(storage.ResolveDatabasePath());
+			if (!fi.Exists)
+			{
+				return;
+			}
+
+			sizeBytes = fi.Length;
+		}
+		catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+		{
+			_logger.LogDebug(ex, "DB size snapshot skipped — file size lookup failed");
+			return;
+		}
+
+		try
+		{
+			await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+			string key = DbSizeGrowthCalculator.GetDbPropKey(nowUtc);
+			DbProp? existing = await db.DbProps.FirstOrDefaultAsync(p => p.Key == key, ct).ConfigureAwait(false);
+			string encoded = DbSizeGrowthCalculator.Encode(new DbSizeSnapshot(nowUtc, sizeBytes));
+			if (existing is null)
+			{
+				db.DbProps.Add(new DbProp { Key = key, Value = encoded, UpdatedUtc = nowUtc });
+			}
+			else
+			{
+				existing.Value = encoded;
+				existing.UpdatedUtc = nowUtc;
+			}
+
+			// Prune snapshots beyond the month window so DbProps stays bounded.
+			DateTime pruneCutoff = nowUtc.AddDays(-DbSizeGrowthCalculator.MonthLookbackMaxDays);
+			List<DbProp> stale = await db.DbProps
+				.Where(p => p.Key.StartsWith("OverviewDbSize:") && p.UpdatedUtc < pruneCutoff)
+				.ToListAsync(ct).ConfigureAwait(false);
+			if (stale.Count > 0)
+			{
+				db.DbProps.RemoveRange(stale);
+			}
+
+			await WithBusyRetryAsync(token => db.SaveChangesAsync(token), ct).ConfigureAwait(false);
+		}
+		catch (OperationCanceledException) when (ct.IsCancellationRequested)
+		{
+			throw;
+		}
+		catch (Exception ex)
+		{
+			_logger.LogWarning(ex, "DB size snapshot capture failed");
+		}
 	}
 
 	/// <summary>Deletes rows matching <paramref name="filter"/> in bounded batches so the SQLite
