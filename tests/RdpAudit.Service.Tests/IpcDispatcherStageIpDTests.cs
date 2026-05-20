@@ -1,0 +1,470 @@
+// File:    tests/RdpAudit.Service.Tests/IpcDispatcherStageIpDTests.cs
+// Module:  RdpAudit.Service.Tests
+// Purpose: End-to-end IPC dispatcher coverage for Stage IP-D: ListConnectionFacts (40),
+//          GetConnectionFactsForIp (41), Attack Statistics fact augmentation, and Remote RDP
+//          Clients historical-context enrichment. Seeds an in-memory SQLite database, drives the
+//          dispatcher directly, and asserts DTO shape, limit clamping, filter behaviour and
+//          aggregate counters.
+// Extends: System.Object
+// Author:  Mikhail Deynekin
+// Site:    https://Deynekin.com
+
+using System.Text.Json;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using RdpAudit.Core.Config;
+using RdpAudit.Core.Data;
+using RdpAudit.Core.Firewall;
+using RdpAudit.Core.Ipc;
+using RdpAudit.Core.Ipc.Contracts;
+using RdpAudit.Core.Models;
+using RdpAudit.Core.Util;
+using RdpAudit.Service.Ipc;
+using RdpAudit.Service.Services;
+using Xunit;
+
+namespace RdpAudit.Service.Tests;
+
+public class IpcDispatcherStageIpDTests
+{
+	private static readonly DateTime Now = new(2026, 5, 20, 12, 0, 0, DateTimeKind.Utc);
+
+	private sealed class TestDbContextFactory : IDbContextFactory<AuditDbContext>
+	{
+		private readonly DbContextOptions<AuditDbContext> _options;
+		public TestDbContextFactory(DbContextOptions<AuditDbContext> options) => _options = options;
+		public AuditDbContext CreateDbContext() => new(_options);
+	}
+
+	private sealed class StaticOptionsMonitorLocal<T> : IOptionsMonitor<T>
+	{
+		public StaticOptionsMonitorLocal(T value) => CurrentValue = value;
+		public T CurrentValue { get; }
+		public T Get(string? name) => CurrentValue;
+		public IDisposable? OnChange(Action<T, string?> listener) => null;
+	}
+
+	private static async Task<(IDbContextFactory<AuditDbContext>, SqliteConnection)> CreateDbAsync()
+	{
+		SqliteConnection conn = new("DataSource=:memory:");
+		await conn.OpenAsync();
+		DbContextOptions<AuditDbContext> options = new DbContextOptionsBuilder<AuditDbContext>()
+			.UseSqlite(conn)
+			.Options;
+
+		await using (AuditDbContext init = new(options))
+		{
+			await init.Database.EnsureCreatedAsync();
+		}
+
+		return (new TestDbContextFactory(options), conn);
+	}
+
+	private static IpcDispatcher CreateDispatcher(IDbContextFactory<AuditDbContext> factory)
+	{
+		ServiceMetrics metrics = new();
+		StaticOptionsMonitorLocal<RdpAuditOptions> mon = new(new RdpAuditOptions());
+		SettingsManager settings = new(NullLogger<SettingsManager>.Instance);
+		FirewallManager manager = new(NullLogger<FirewallManager>.Instance);
+		return new IpcDispatcher(factory, metrics, mon, settings, manager,
+			Array.Empty<IFirewallProvider>(), NullLogger<IpcDispatcher>.Instance);
+	}
+
+	private static async Task SeedConnectionFactsAsync(IDbContextFactory<AuditDbContext> factory)
+	{
+		await using AuditDbContext db = factory.CreateDbContext();
+
+		// Three facts for attacker IP, scattered timeline.
+		db.RdpConnectionFacts.Add(new RdpConnectionFact
+		{
+			Ip = "203.0.113.7",
+			UserName = "administrator",
+			Domain = "ACME",
+			LogonId = "0x1001",
+			FirstSeenUtc = Now.AddHours(-3),
+			LastSeenUtc = Now.AddHours(-2),
+			FailedLogons = 5,
+			SuccessfulLogons = 0,
+			ObservedEventIds = "4625",
+			UserNamesAttempted = "administrator",
+			IsActive = false,
+		});
+		db.RdpConnectionFacts.Add(new RdpConnectionFact
+		{
+			Ip = "203.0.113.7",
+			UserName = "root",
+			LogonId = "0x1002",
+			FirstSeenUtc = Now.AddHours(-1),
+			LastSeenUtc = Now,
+			FailedLogons = 7,
+			SuccessfulLogons = 0,
+			ObservedEventIds = "4625",
+			UserNamesAttempted = "root,administrator",
+			IsActive = true,
+		});
+
+		// One unrelated fact for a benign IP.
+		db.RdpConnectionFacts.Add(new RdpConnectionFact
+		{
+			Ip = "10.0.0.7",
+			UserName = "alice",
+			LogonId = "0x2001",
+			FirstSeenUtc = Now.AddHours(-6),
+			LastSeenUtc = Now.AddHours(-5),
+			SuccessfulLogons = 1,
+			ObservedEventIds = "4624",
+			UserNamesAttempted = "alice",
+			IsActive = true,
+		});
+
+		await db.SaveChangesAsync();
+	}
+
+	private static async Task<T> CallAsync<T>(IpcDispatcher dispatcher, IpcCommand command, object? payload = null)
+	{
+		IpcRequest req = new()
+		{
+			Command = command,
+			Payload = payload is null ? null : JsonSerializer.Serialize(payload, JsonOptions.Default),
+		};
+
+		IpcResponse response = await dispatcher.DispatchAsync(req, CancellationToken.None);
+		Assert.True(response.Success, response.Error);
+		Assert.NotNull(response.Payload);
+		T? dto = JsonSerializer.Deserialize<T>(response.Payload!, JsonOptions.Default);
+		Assert.NotNull(dto);
+		return dto!;
+	}
+
+	[Fact]
+	public async Task ListConnectionFacts_OrdersByLastSeenDesc_AndAppliesDefaultLimit()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			await SeedConnectionFactsAsync(factory);
+			IpcDispatcher dispatcher = CreateDispatcher(factory);
+
+			ConnectionFactsDto dto = await CallAsync<ConnectionFactsDto>(dispatcher,
+				IpcCommand.ListConnectionFacts, new ConnectionFactsRequest());
+
+			Assert.Equal(IpcResultStatus.Success, dto.Status);
+			Assert.Equal(3, dto.TotalMatching);
+			Assert.Equal(3, dto.Facts.Count);
+			Assert.True(dto.Facts[0].LastSeenUtc >= dto.Facts[^1].LastSeenUtc);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task ListConnectionFacts_FiltersByIpSubstring()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			await SeedConnectionFactsAsync(factory);
+			IpcDispatcher dispatcher = CreateDispatcher(factory);
+
+			ConnectionFactsDto dto = await CallAsync<ConnectionFactsDto>(dispatcher,
+				IpcCommand.ListConnectionFacts,
+				new ConnectionFactsRequest { IpQuery = "203.0.113" });
+
+			Assert.Equal(2, dto.TotalMatching);
+			Assert.All(dto.Facts, f => Assert.StartsWith("203.0.113", f.Ip));
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task ListConnectionFacts_FiltersByUserSubstring()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			await SeedConnectionFactsAsync(factory);
+			IpcDispatcher dispatcher = CreateDispatcher(factory);
+
+			ConnectionFactsDto dto = await CallAsync<ConnectionFactsDto>(dispatcher,
+				IpcCommand.ListConnectionFacts,
+				new ConnectionFactsRequest { UserQuery = "admin" });
+
+			Assert.Equal(1, dto.TotalMatching);
+			Assert.Equal("administrator", dto.Facts[0].UserName);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task ListConnectionFacts_ClampsRequestedLimitToMax()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			await SeedConnectionFactsAsync(factory);
+			IpcDispatcher dispatcher = CreateDispatcher(factory);
+
+			ConnectionFactsDto dto = await CallAsync<ConnectionFactsDto>(dispatcher,
+				IpcCommand.ListConnectionFacts,
+				new ConnectionFactsRequest { Limit = 100_000 });
+
+			// The server clamps to the hard upper bound (1000) — but with only 3 rows seeded the
+			// AppliedLimit should still report the clamped value and Facts.Count should match all rows.
+			Assert.Equal(1000, dto.AppliedLimit);
+			Assert.Equal(3, dto.Facts.Count);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task ListConnectionFacts_OnlyActive_RestrictsToActiveRows()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			await SeedConnectionFactsAsync(factory);
+			IpcDispatcher dispatcher = CreateDispatcher(factory);
+
+			ConnectionFactsDto dto = await CallAsync<ConnectionFactsDto>(dispatcher,
+				IpcCommand.ListConnectionFacts,
+				new ConnectionFactsRequest { OnlyActive = true });
+
+			Assert.Equal(2, dto.TotalMatching);
+			Assert.All(dto.Facts, f => Assert.True(f.IsActive));
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task GetConnectionFactsForIp_AggregatesCountersAndOrdersFacts()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			await SeedConnectionFactsAsync(factory);
+			IpcDispatcher dispatcher = CreateDispatcher(factory);
+
+			ConnectionFactsForIpDto dto = await CallAsync<ConnectionFactsForIpDto>(dispatcher,
+				IpcCommand.GetConnectionFactsForIp,
+				new ConnectionFactsForIpRequest { Ip = "203.0.113.7" });
+
+			Assert.Equal(IpcResultStatus.Success, dto.Status);
+			Assert.Equal("203.0.113.7", dto.Ip);
+			Assert.Equal(2, dto.TotalMatching);
+			Assert.Equal(2, dto.Facts.Count);
+			Assert.Equal(12, dto.FailedLogons);
+			Assert.Equal(0, dto.SuccessfulLogons);
+			Assert.True(dto.HasActiveFact);
+			Assert.Equal(Now.AddHours(-3), dto.FirstSeenUtc);
+			Assert.Equal(Now, dto.LastSeenUtc);
+			Assert.True(dto.Facts[0].LastSeenUtc >= dto.Facts[^1].LastSeenUtc);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task GetConnectionFactsForIp_ResponsesDoNotCarryRawXml()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			await SeedConnectionFactsAsync(factory);
+			IpcDispatcher dispatcher = CreateDispatcher(factory);
+
+			IpcRequest req = new()
+			{
+				Command = IpcCommand.GetConnectionFactsForIp,
+				Payload = JsonSerializer.Serialize(new ConnectionFactsForIpRequest { Ip = "203.0.113.7" }, JsonOptions.Default),
+			};
+			IpcResponse response = await dispatcher.DispatchAsync(req, CancellationToken.None);
+			Assert.True(response.Success);
+			Assert.NotNull(response.Payload);
+			// Sanity check: a fact response must never embed event XML markup. The DTO has no XML
+			// member, so the payload shouldn't contain "<Event" anywhere.
+			Assert.DoesNotContain("<Event", response.Payload!, StringComparison.Ordinal);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task GetConnectionFactsForIp_NoMatch_ReturnsEmptyButSuccess()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			IpcDispatcher dispatcher = CreateDispatcher(factory);
+
+			ConnectionFactsForIpDto dto = await CallAsync<ConnectionFactsForIpDto>(dispatcher,
+				IpcCommand.GetConnectionFactsForIp,
+				new ConnectionFactsForIpRequest { Ip = "203.0.113.99" });
+
+			Assert.Equal(IpcResultStatus.Success, dto.Status);
+			Assert.Equal(0, dto.TotalMatching);
+			Assert.Empty(dto.Facts);
+			Assert.Null(dto.FirstSeenUtc);
+			Assert.False(dto.HasActiveFact);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task GetConnectionFactsForIp_RejectsInvalidIp()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			IpcDispatcher dispatcher = CreateDispatcher(factory);
+
+			IpcRequest req = new()
+			{
+				Command = IpcCommand.GetConnectionFactsForIp,
+				Payload = JsonSerializer.Serialize(new ConnectionFactsForIpRequest { Ip = "garbage" }, JsonOptions.Default),
+			};
+			IpcResponse response = await dispatcher.DispatchAsync(req, CancellationToken.None);
+			Assert.False(response.Success);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task GetAttackStats_AugmentsRowsWithFactAggregates()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			await SeedConnectionFactsAsync(factory);
+			await using (AuditDbContext db = factory.CreateDbContext())
+			{
+				db.AttackStats.Add(new AttackStat
+				{
+					Ip = "203.0.113.7",
+					TotalAttempts = 12,
+					Failed = 12,
+					Successful = 0,
+					FirstSeenUtc = Now.AddHours(-3),
+					LastSeenUtc = Now,
+					DurationSeconds = 3 * 3600,
+					ThreatScore = 80,
+					IsBlocked = false,
+					LastUpdatedUtc = Now,
+				});
+				await db.SaveChangesAsync();
+			}
+
+			IpcDispatcher dispatcher = CreateDispatcher(factory);
+
+			AttackStatsDto dto = await CallAsync<AttackStatsDto>(dispatcher,
+				IpcCommand.GetAttackStats, new AttackStatsRequest());
+
+			Assert.Equal(IpcResultStatus.Success, dto.Status);
+			AttackStatEntryDto entry = Assert.Single(dto.Entries);
+
+			// AttackStat data preserved verbatim.
+			Assert.Equal(12, entry.Failed);
+			Assert.Equal(12, entry.TotalAttempts);
+
+			// Fact-derived augmentation populated.
+			Assert.True(entry.HasActiveConnectionFact);
+			Assert.Equal(12, entry.FactFailedLogons);
+			Assert.Equal(0, entry.FactSuccessfulLogons);
+			Assert.NotNull(entry.FactFirstSeenUtc);
+			Assert.NotNull(entry.FactLastSeenUtc);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task EnrichSessionsHistoricalContext_FillsCountersAndAttemptedNames()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			await SeedConnectionFactsAsync(factory);
+
+			List<RdpSessionDto> sessions = new()
+			{
+				new RdpSessionDto
+				{
+					SessionId = 3,
+					UserName = "root",
+					ClientAddress = "198.51.100.42",  // live IP must not be overwritten
+				},
+			};
+
+			await using AuditDbContext db = factory.CreateDbContext();
+			await IpcDispatcher.EnrichSessionsHistoricalContextAsync(db, sessions, CancellationToken.None);
+
+			Assert.Equal("198.51.100.42", sessions[0].ClientAddress);
+			Assert.Equal(Now.AddHours(-1), sessions[0].HistoricalFirstSeenUtc);
+			Assert.Equal(Now, sessions[0].HistoricalLastSeenUtc);
+			Assert.Equal(7, sessions[0].HistoricalFailedLogons);
+			Assert.Equal(0, sessions[0].HistoricalSuccessfulLogons);
+			Assert.False(string.IsNullOrEmpty(sessions[0].HistoricalUserNamesAttempted));
+			Assert.Contains("root", sessions[0].HistoricalUserNamesAttempted);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task EnrichSessionsHistoricalContext_NoFacts_LeavesSessionUntouched()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			List<RdpSessionDto> sessions = new()
+			{
+				new RdpSessionDto
+				{
+					SessionId = 1,
+					UserName = "nobody",
+					ClientAddress = "198.51.100.7",
+				},
+			};
+
+			await using AuditDbContext db = factory.CreateDbContext();
+			await IpcDispatcher.EnrichSessionsHistoricalContextAsync(db, sessions, CancellationToken.None);
+
+			Assert.Equal("198.51.100.7", sessions[0].ClientAddress);
+			Assert.Null(sessions[0].HistoricalFirstSeenUtc);
+			Assert.Equal(0, sessions[0].HistoricalFailedLogons);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+}

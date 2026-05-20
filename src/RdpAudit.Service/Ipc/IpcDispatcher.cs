@@ -134,6 +134,10 @@ public sealed class IpcDispatcher
 				// --- Stage A handlers (Overview dashboard + IP events export). ---
 				IpcCommand.GetOverviewSummary => await GetOverviewSummaryAsync(ct).ConfigureAwait(false),
 				IpcCommand.GetEventsForIp => await GetEventsForIpAsync(request.Payload, ct).ConfigureAwait(false),
+
+				// --- Stage IP-D handlers (RdpConnectionFacts read paths). ---
+				IpcCommand.ListConnectionFacts => await ListConnectionFactsAsync(request.Payload, ct).ConfigureAwait(false),
+				IpcCommand.GetConnectionFactsForIp => await GetConnectionFactsForIpAsync(request.Payload, ct).ConfigureAwait(false),
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
 
@@ -941,9 +945,14 @@ public sealed class IpcDispatcher
 			AppliedLimit = limit,
 		};
 
+		// Stage IP-D: augment with RdpConnectionFacts aggregates for the IPs in this page. We never
+		// overwrite the AttackStat columns — the augmentation lives on dedicated fact-* fields so the
+		// existing UI keeps rendering AttackStat as today, and forward-looking pages can opt in.
+		Dictionary<string, FactAggregate> factAggregates = await LoadFactAggregatesAsync(db, rows.Select(r => r.Ip), ct).ConfigureAwait(false);
+
 		foreach (AttackStat row in rows)
 		{
-			dto.Entries.Add(new AttackStatEntryDto
+			AttackStatEntryDto entry = new()
 			{
 				Ip = row.Ip,
 				TotalAttempts = row.TotalAttempts,
@@ -958,10 +967,77 @@ public sealed class IpcDispatcher
 				ThreatLevel = AttackThreatScoring.ClassifyScore(row.ThreatScore),
 				IsBlocked = row.IsBlocked,
 				LastUpdatedUtc = row.LastUpdatedUtc,
-			});
+			};
+
+			if (factAggregates.TryGetValue(row.Ip, out FactAggregate agg))
+			{
+				entry.HasActiveConnectionFact = agg.AnyActive;
+				entry.FactFailedLogons = agg.Failed;
+				entry.FactSuccessfulLogons = agg.Successful;
+				entry.FactFirstSeenUtc = agg.FirstSeen;
+				entry.FactLastSeenUtc = agg.LastSeen;
+			}
+
+			dto.Entries.Add(entry);
 		}
 
 		return dto;
+	}
+
+	internal readonly struct FactAggregate
+	{
+		public FactAggregate(DateTime firstSeen, DateTime lastSeen, long failed, long successful, bool anyActive)
+		{
+			FirstSeen = firstSeen;
+			LastSeen = lastSeen;
+			Failed = failed;
+			Successful = successful;
+			AnyActive = anyActive;
+		}
+
+		public DateTime FirstSeen { get; }
+
+		public DateTime LastSeen { get; }
+
+		public long Failed { get; }
+
+		public long Successful { get; }
+
+		public bool AnyActive { get; }
+	}
+
+	internal static async Task<Dictionary<string, FactAggregate>> LoadFactAggregatesAsync(
+		AuditDbContext db,
+		IEnumerable<string> ips,
+		CancellationToken ct)
+	{
+		HashSet<string> set = new(ips, StringComparer.Ordinal);
+		if (set.Count == 0)
+		{
+			return new Dictionary<string, FactAggregate>(StringComparer.Ordinal);
+		}
+
+		var grouped = await db.RdpConnectionFacts.AsNoTracking()
+			.Where(r => set.Contains(r.Ip))
+			.GroupBy(r => r.Ip)
+			.Select(g => new
+			{
+				Ip = g.Key,
+				FirstSeen = g.Min(r => r.FirstSeenUtc),
+				LastSeen = g.Max(r => r.LastSeenUtc),
+				Failed = g.Sum(r => (long)r.FailedLogons),
+				Successful = g.Sum(r => (long)r.SuccessfulLogons),
+				AnyActive = g.Any(r => r.IsActive),
+			})
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		Dictionary<string, FactAggregate> result = new(StringComparer.Ordinal);
+		foreach (var g in grouped)
+		{
+			result[g.Ip] = new FactAggregate(g.FirstSeen, g.LastSeen, g.Failed, g.Successful, g.AnyActive);
+		}
+
+		return result;
 	}
 
 	private static AttackStatsRequest ParseAttackStatsRequest(string? payload)
@@ -1179,6 +1255,109 @@ public sealed class IpcDispatcher
 			if (userToIp.TryGetValue(session.UserName.Trim(), out ip))
 			{
 				session.ClientAddress = ip;
+			}
+		}
+
+		// Stage IP-D: fill historical context (first/last seen, counters, attempted usernames)
+		// for every session that has a UserName, even those whose ClientAddress was already known
+		// from the live correlation lookup. We never overwrite ClientAddress here — that path is
+		// authoritative for the live row — but the historical context is purely additive.
+		await EnrichSessionsHistoricalContextAsync(db, sessions, ct).ConfigureAwait(false);
+	}
+
+	/// <summary>Stage IP-D helper: fills historical-only fields on each session from RdpConnectionFacts.
+	/// Never overwrites live <c>ClientAddress</c>; only sets the dedicated Historical* columns and
+	/// only when the live row has none. Exposed internally so unit tests can validate without a
+	/// Windows session manager.</summary>
+	internal static async Task EnrichSessionsHistoricalContextAsync(
+		AuditDbContext db,
+		IList<RdpSessionDto> sessions,
+		CancellationToken ct)
+	{
+		if (sessions.Count == 0)
+		{
+			return;
+		}
+
+		HashSet<string> usernames = new(StringComparer.OrdinalIgnoreCase);
+		foreach (RdpSessionDto s in sessions)
+		{
+			if (!string.IsNullOrEmpty(s.UserName))
+			{
+				usernames.Add(s.UserName.Trim());
+			}
+		}
+
+		if (usernames.Count == 0)
+		{
+			return;
+		}
+
+		var grouped = await db.RdpConnectionFacts.AsNoTracking()
+			.Where(r => r.UserName != null && usernames.Contains(r.UserName))
+			.GroupBy(r => r.UserName!)
+			.Select(g => new
+			{
+				UserName = g.Key,
+				FirstSeen = g.Min(r => r.FirstSeenUtc),
+				LastSeen = g.Max(r => r.LastSeenUtc),
+				Failed = g.Sum(r => (long)r.FailedLogons),
+				Successful = g.Sum(r => (long)r.SuccessfulLogons),
+			})
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		Dictionary<string, (DateTime First, DateTime Last, long Failed, long Successful)> byUser =
+			new(StringComparer.OrdinalIgnoreCase);
+		foreach (var g in grouped)
+		{
+			byUser[g.UserName.Trim()] = (g.FirstSeen, g.LastSeen, g.Failed, g.Successful);
+		}
+
+		// Pull attempted-username summaries by joining each session's user back to facts.
+		List<RdpConnectionFact> usernameFacts = await db.RdpConnectionFacts.AsNoTracking()
+			.Where(r => r.UserName != null && usernames.Contains(r.UserName))
+			.OrderByDescending(r => r.LastSeenUtc)
+			.Select(r => new RdpConnectionFact
+			{
+				UserName = r.UserName,
+				UserNamesAttempted = r.UserNamesAttempted,
+			})
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		Dictionary<string, string?> attemptedByUser = new(StringComparer.OrdinalIgnoreCase);
+		foreach (RdpConnectionFact r in usernameFacts)
+		{
+			if (r.UserName is null)
+			{
+				continue;
+			}
+
+			string key = r.UserName.Trim();
+			if (!attemptedByUser.ContainsKey(key))
+			{
+				attemptedByUser[key] = r.UserNamesAttempted;
+			}
+		}
+
+		foreach (RdpSessionDto session in sessions)
+		{
+			if (string.IsNullOrEmpty(session.UserName))
+			{
+				continue;
+			}
+
+			string key = session.UserName.Trim();
+			if (byUser.TryGetValue(key, out var agg))
+			{
+				session.HistoricalFirstSeenUtc = agg.First;
+				session.HistoricalLastSeenUtc = agg.Last;
+				session.HistoricalFailedLogons = agg.Failed;
+				session.HistoricalSuccessfulLogons = agg.Successful;
+			}
+
+			if (attemptedByUser.TryGetValue(key, out string? attempted) && !string.IsNullOrEmpty(attempted))
+			{
+				session.HistoricalUserNamesAttempted = attempted;
 			}
 		}
 	}
@@ -2056,6 +2235,227 @@ public sealed class IpcDispatcher
 		if (parsed is null || string.IsNullOrWhiteSpace(parsed.Ip))
 		{
 			throw new IpcException("GetEventsForIp requires an Ip field.");
+		}
+
+		return parsed;
+	}
+
+	// ----------------------------------------------------------------------------------------------
+	// Stage IP-D handlers — RdpConnectionFacts read paths.
+	// ----------------------------------------------------------------------------------------------
+
+	/// <summary>Default cap on rows returned by <c>ListConnectionFacts</c> when no limit is supplied.</summary>
+	internal const int ConnectionFactsDefaultLimit = 200;
+
+	/// <summary>Upper bound on rows returned by <c>ListConnectionFacts</c> / <c>GetConnectionFactsForIp</c>.</summary>
+	internal const int ConnectionFactsMaxLimit = 1000;
+
+	private async Task<object?> ListConnectionFactsAsync(string? payload, CancellationToken ct)
+	{
+		ConnectionFactsRequest req = ParseConnectionFactsRequest(payload);
+
+		int limit = req.Limit <= 0 ? ConnectionFactsDefaultLimit : req.Limit;
+		if (limit > ConnectionFactsMaxLimit)
+		{
+			limit = ConnectionFactsMaxLimit;
+		}
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+
+		IQueryable<RdpConnectionFact> q = db.RdpConnectionFacts.AsNoTracking();
+
+		if (!string.IsNullOrWhiteSpace(req.IpQuery))
+		{
+			string needle = req.IpQuery.Trim();
+			q = q.Where(r => EF.Functions.Like(r.Ip, "%" + needle + "%"));
+		}
+
+		if (!string.IsNullOrWhiteSpace(req.UserQuery))
+		{
+			string needleU = req.UserQuery.Trim();
+			q = q.Where(r => r.UserName != null && EF.Functions.Like(r.UserName, "%" + needleU + "%"));
+		}
+
+		if (req.SinceUtc.HasValue)
+		{
+			DateTime since = req.SinceUtc.Value;
+			q = q.Where(r => r.LastSeenUtc >= since);
+		}
+
+		if (req.UntilUtc.HasValue)
+		{
+			DateTime until = req.UntilUtc.Value;
+			q = q.Where(r => r.LastSeenUtc <= until);
+		}
+
+		if (req.OnlyActive)
+		{
+			q = q.Where(r => r.IsActive);
+		}
+
+		int totalMatching = await q.CountAsync(ct).ConfigureAwait(false);
+
+		List<RdpConnectionFact> rows = await q
+			.OrderByDescending(r => r.LastSeenUtc)
+			.ThenByDescending(r => r.Id)
+			.Take(limit)
+			.ToListAsync(ct)
+			.ConfigureAwait(false);
+
+		ConnectionFactsDto dto = new()
+		{
+			Status = IpcResultStatus.Success,
+			QueriedUtc = DateTime.UtcNow,
+			TotalMatching = totalMatching,
+			AppliedLimit = limit,
+			Message = string.Format(CultureInfo.InvariantCulture,
+				"connection facts: matching={0} returned={1}",
+				totalMatching, rows.Count),
+		};
+
+		foreach (RdpConnectionFact row in rows)
+		{
+			dto.Facts.Add(ProjectFact(row));
+		}
+
+		return dto;
+	}
+
+	private async Task<object?> GetConnectionFactsForIpAsync(string? payload, CancellationToken ct)
+	{
+		ConnectionFactsForIpRequest req = ParseConnectionFactsForIpRequest(payload);
+		string ip = NormalizeAndValidateAddress(req.Ip);
+
+		int limit = req.Limit <= 0 ? ConnectionFactsDefaultLimit : req.Limit;
+		if (limit > ConnectionFactsMaxLimit)
+		{
+			limit = ConnectionFactsMaxLimit;
+		}
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+
+		IQueryable<RdpConnectionFact> q = db.RdpConnectionFacts.AsNoTracking()
+			.Where(r => r.Ip == ip);
+
+		int totalMatching = await q.CountAsync(ct).ConfigureAwait(false);
+
+		ConnectionFactsForIpDto dto = new()
+		{
+			Status = IpcResultStatus.Success,
+			Ip = ip,
+			QueriedUtc = DateTime.UtcNow,
+			TotalMatching = totalMatching,
+			AppliedLimit = limit,
+		};
+
+		if (totalMatching == 0)
+		{
+			dto.Message = string.Format(CultureInfo.InvariantCulture,
+				"no connection facts recorded for {0}", ip);
+			return dto;
+		}
+
+		List<RdpConnectionFact> rows = await q
+			.OrderByDescending(r => r.LastSeenUtc)
+			.ThenByDescending(r => r.Id)
+			.Take(limit)
+			.ToListAsync(ct)
+			.ConfigureAwait(false);
+
+		// Aggregate counters span the entire IP, not just the bounded page — operators want totals.
+		var aggregate = await db.RdpConnectionFacts.AsNoTracking()
+			.Where(r => r.Ip == ip)
+			.GroupBy(r => r.Ip)
+			.Select(g => new
+			{
+				FirstSeen = g.Min(r => r.FirstSeenUtc),
+				LastSeen = g.Max(r => r.LastSeenUtc),
+				Failed = g.Sum(r => (long)r.FailedLogons),
+				Successful = g.Sum(r => (long)r.SuccessfulLogons),
+				AnyActive = g.Any(r => r.IsActive),
+			})
+			.FirstOrDefaultAsync(ct).ConfigureAwait(false);
+
+		if (aggregate is not null)
+		{
+			dto.FirstSeenUtc = aggregate.FirstSeen;
+			dto.LastSeenUtc = aggregate.LastSeen;
+			dto.FailedLogons = aggregate.Failed;
+			dto.SuccessfulLogons = aggregate.Successful;
+			dto.HasActiveFact = aggregate.AnyActive;
+		}
+
+		foreach (RdpConnectionFact row in rows)
+		{
+			dto.Facts.Add(ProjectFact(row));
+		}
+
+		dto.Message = string.Format(CultureInfo.InvariantCulture,
+			"connection facts for {0}: matching={1} returned={2}",
+			ip, totalMatching, rows.Count);
+		return dto;
+	}
+
+	private static ConnectionFactDto ProjectFact(RdpConnectionFact row) => new()
+	{
+		Id = row.Id,
+		Ip = row.Ip,
+		UserName = row.UserName,
+		Domain = row.Domain,
+		WtsSessionId = row.WtsSessionId,
+		LogonId = row.LogonId,
+		FirstSeenUtc = row.FirstSeenUtc,
+		LastSeenUtc = row.LastSeenUtc,
+		ConnectedUtc = row.ConnectedUtc,
+		AuthenticatedUtc = row.AuthenticatedUtc,
+		DisconnectedUtc = row.DisconnectedUtc,
+		ReconnectedUtc = row.ReconnectedUtc,
+		LoggedOffUtc = row.LoggedOffUtc,
+		FailedLogons = row.FailedLogons,
+		SuccessfulLogons = row.SuccessfulLogons,
+		ObservedEventIds = row.ObservedEventIds,
+		UserNamesAttempted = row.UserNamesAttempted,
+		IsActive = row.IsActive,
+	};
+
+	private static ConnectionFactsRequest ParseConnectionFactsRequest(string? payload)
+	{
+		if (string.IsNullOrWhiteSpace(payload))
+		{
+			return new ConnectionFactsRequest();
+		}
+
+		try
+		{
+			ConnectionFactsRequest? parsed = JsonSerializer.Deserialize<ConnectionFactsRequest>(payload, JsonOptions.Default);
+			return parsed ?? new ConnectionFactsRequest();
+		}
+		catch (JsonException ex)
+		{
+			throw new IpcException("ListConnectionFacts payload is not valid JSON: " + ex.Message);
+		}
+	}
+
+	private static ConnectionFactsForIpRequest ParseConnectionFactsForIpRequest(string? payload)
+	{
+		if (string.IsNullOrWhiteSpace(payload))
+		{
+			throw new IpcException("GetConnectionFactsForIp requires a JSON payload with an Ip field.");
+		}
+
+		ConnectionFactsForIpRequest? parsed;
+		try
+		{
+			parsed = JsonSerializer.Deserialize<ConnectionFactsForIpRequest>(payload, JsonOptions.Default);
+		}
+		catch (JsonException ex)
+		{
+			throw new IpcException("GetConnectionFactsForIp payload is not valid JSON: " + ex.Message);
+		}
+
+		if (parsed is null || string.IsNullOrWhiteSpace(parsed.Ip))
+		{
+			throw new IpcException("GetConnectionFactsForIp requires an Ip field.");
 		}
 
 		return parsed;

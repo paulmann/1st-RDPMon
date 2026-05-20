@@ -53,4 +53,29 @@ public sealed class AttackStatEntryDto
 
 	[Key(12)]
 	public DateTime LastUpdatedUtc { get; set; }
+
+	// --- Stage IP-D fact augmentation (append-only keys). All fields are optional / nullable so a
+	// row produced without matching RdpConnectionFacts data still serialises cleanly. Configurator
+	// renderers should prefer the AttackStat columns where present and only fall back to the
+	// fact-derived fields when AttackStat is silent.
+
+	/// <summary>True when at least one matching <c>RdpConnectionFact</c> currently represents an active session.</summary>
+	[Key(13)]
+	public bool HasActiveConnectionFact { get; set; }
+
+	/// <summary>Sum of failed logons across all <c>RdpConnectionFacts</c> for this IP, when available.</summary>
+	[Key(14)]
+	public long FactFailedLogons { get; set; }
+
+	/// <summary>Sum of successful logons across all <c>RdpConnectionFacts</c> for this IP, when available.</summary>
+	[Key(15)]
+	public long FactSuccessfulLogons { get; set; }
+
+	/// <summary>Most recent <c>LastSeenUtc</c> across all <c>RdpConnectionFacts</c> for this IP; null when none exist.</summary>
+	[Key(16)]
+	public DateTime? FactLastSeenUtc { get; set; }
+
+	/// <summary>Earliest <c>FirstSeenUtc</c> across all <c>RdpConnectionFacts</c> for this IP; null when none exist.</summary>
+	[Key(17)]
+	public DateTime? FactFirstSeenUtc { get; set; }
 }
