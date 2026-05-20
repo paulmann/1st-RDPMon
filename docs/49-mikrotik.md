@@ -57,22 +57,58 @@ service falls back to one hour to avoid permanent rules in the typical case.
 
 ## RouterOS v7 setup
 
-1. Enable the REST service. For production prefer HTTPS:
-   ```
-   /ip/service set www-ssl disabled=no
-   /ip/service set www-ssl address=<your-rdpaudit-host>/32
-   ```
-   For lab use only:
-   ```
-   /ip/service set www disabled=no
-   ```
-2. Install or generate a TLS certificate for `www-ssl`.
-3. Create a dedicated least-privilege group and user:
-   ```
-   /user/group add name=rdpaudit policy=read,write,api,rest-api,!ssh,!ftp,!telnet,!winbox,!web,!policy
-   /user add group=rdpaudit name=rdpaudit password=<...>
-   ```
-4. (Optional) restrict the user's allowed-address to the RdpAudit host's IP.
+The full copy-paste bundle is rendered on the MikroTik Configurator tab and produced by
+`Core/MikroTik/MikroTikSetupCommands.BuildAll()`. The Configurator `Copy commands` button copies
+the bundle verbatim; the bundle is also locked by `MikroTikSetupCommandsTests` so the placeholder
+tokens never drift and no plaintext credential can be embedded.
+
+Replace `<RDPAUDIT-HOST-IP>` with the IP of the RdpAudit host and `<STRONG-PASSWORD>` with a long
+random password (≥ 24 chars) before pasting into the RouterOS terminal:
+
+```
+# 1. Create a least-privilege group: REST + firewall write access only,
+#    nothing else (no ssh, ftp, winbox, web, policy, password, sniff, sensitive, romon).
+/user/group/add name=rdpaudit \
+    policy=read,write,api,rest-api,!ssh,!ftp,!telnet,!winbox,!web,!policy,!password,!sniff,!sensitive,!romon
+
+# 2. Create the dedicated service user. Substitute <STRONG-PASSWORD>.
+/user/add group=rdpaudit name=rdpaudit \
+    password="<STRONG-PASSWORD>" \
+    comment="RdpAudit service account"
+
+# 3. Enable the REST endpoint. Prefer www-ssl in production; www is acceptable for lab only.
+/ip/service/set www-ssl disabled=no
+# Lab fallback (HTTP — no TLS, do NOT use over untrusted networks):
+# /ip/service/set www disabled=no
+
+# 4. Restrict allowed-address on the REST service so only the RdpAudit host
+#    can authenticate. Replace <RDPAUDIT-HOST-IP>.
+/ip/service/set www-ssl address=<RDPAUDIT-HOST-IP>/32
+
+# 5. Production HTTPS certificate. Import a certificate first (/certificate/import),
+#    then bind it to the REST service and pin the minimum TLS version.
+# /ip/service/set www-ssl certificate=<rdpaudit-cert> tls-version=only-1.2
+
+# 6. Verification — REST endpoint reachable, user provisioned, RdpAudit-owned
+#    firewall filter rules visible (none yet on a fresh install).
+/ip/service/print where name~"www"
+/user/print where name=rdpaudit
+/ip/firewall/filter/print where comment~"^RdpAudit"
+```
+
+Security notes:
+
+* The least-privilege policy bundle (`!ssh,!ftp,!telnet,!winbox,!web,!policy,!password,!sniff,!sensitive,!romon`)
+  explicitly **denies** every shell-equivalent and credential-extraction capability — the
+  `rdpaudit` user can only drive the REST endpoint and write firewall filter rules.
+* `allowed-address` pins the REST service to the RdpAudit host's IP literal so a leaked
+  credential cannot be replayed from any other origin.
+* For production, bind a real certificate to `www-ssl` and pin `tls-version=only-1.2` (or
+  `only-1.3` if the RouterOS build supports it). Leaving the Configurator's
+  `Validate TLS certificate` toggle ticked enforces that the cert chain is honoured on
+  every probe and block round-trip.
+* The bundle never contains a real password — only the `<STRONG-PASSWORD>` placeholder. The
+  `MikroTikSetupCommandsTests` suite asserts this explicitly.
 
 ## TTL cleanup
 

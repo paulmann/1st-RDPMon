@@ -20,6 +20,7 @@ using System.Text.Json.Nodes;
 using RdpAudit.Configurator.Ipc;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
+using RdpAudit.Core.MikroTik;
 using RdpAudit.Core.Util;
 
 namespace RdpAudit.Configurator.Forms;
@@ -41,32 +42,10 @@ public sealed class MikroTikPage : TabPage
 		+ "  • TLS certificate validation is on by default — disable only for lab use.";
 
 	/// <summary>Copy-paste-ready RouterOS v7 shell command bundle used by the Stage A
-	/// <c>Copy commands</c> button. Operators substitute the placeholders before pasting.</summary>
-	internal const string RouterOsSetupCommands =
-		"# RdpAudit — RouterOS v7 setup\r\n"
-		+ "# Replace <RDPAUDIT-HOST-IP> with the IP of the RdpAudit host, and <STRONG-PASSWORD> with a new password.\r\n"
-		+ "\r\n"
-		+ "# 1. Create a least-privilege group with REST + firewall write access only.\r\n"
-		+ "/user/group/add name=rdpaudit policy=read,write,api,rest-api,!ssh,!ftp,!telnet,!winbox,!web,!policy,!password,!sniff,!sensitive,!romon\r\n"
-		+ "\r\n"
-		+ "# 2. Create the dedicated service user. Use a long random password (>= 24 chars).\r\n"
-		+ "/user/add group=rdpaudit name=rdpaudit password=\"<STRONG-PASSWORD>\" comment=\"RdpAudit service account\"\r\n"
-		+ "\r\n"
-		+ "# 3. Enable the REST endpoint. Prefer www-ssl in production; www is acceptable in lab only.\r\n"
-		+ "/ip/service/set www-ssl disabled=no\r\n"
-		+ "# Lab fallback (HTTP):\r\n"
-		+ "# /ip/service/set www disabled=no\r\n"
-		+ "\r\n"
-		+ "# 4. Restrict allowed-address on the REST service to the RdpAudit host so no other client can authenticate.\r\n"
-		+ "/ip/service/set www-ssl address=<RDPAUDIT-HOST-IP>/32\r\n"
-		+ "\r\n"
-		+ "# 5. Production HTTPS certificate (skip in lab). Replace 'rdpaudit-cert' with the imported certificate name.\r\n"
-		+ "# /ip/service/set www-ssl certificate=rdpaudit-cert tls-version=only-1.2\r\n"
-		+ "\r\n"
-		+ "# 6. Verification commands.\r\n"
-		+ "/ip/service/print where name~\"www\"\r\n"
-		+ "/user/print where name=rdpaudit\r\n"
-		+ "/ip/firewall/filter/print where comment~\"^RdpAudit\"\r\n";
+	/// <c>Copy commands</c> button. Sourced from <see cref="MikroTikSetupCommands"/> so the bundle
+	/// is unit-tested in <c>RdpAudit.Core.Tests</c> for placeholder presence and absence of any
+	/// embedded secret values.</summary>
+	internal static readonly string RouterOsSetupCommands = MikroTikSetupCommands.BuildAll();
 
 	private readonly IpcClient _ipc;
 
