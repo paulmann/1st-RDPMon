@@ -219,14 +219,29 @@ each target lookback (1 / 7 / 30 days) within documented caps (2 / 10 / 45 days)
 accrue, growth lines render `snapshot pending (24h required)` — the current size is still shown so
 operators can sanity-check the file at any time.
 
-### Firewall layout (Stage A fix)
+### Firewall layout (Stage A2 fix)
 
-The Firewall tab now uses a `TableLayoutPanel` root with auto-sized provider / policy rows and a
-filling inner-tab row. This guarantees the auto-block policy controls are never overlapped by the
-Blocklist / Whitelist / Login trip-wires / Active blocks tabs at the screenshot size and at high
-DPI. The `Default block duration` controls live in a single compact `FlowLayoutPanel` so the
-days / hours / minutes numeric inputs stay grouped at a usable density (`[d] [h] [m]`) regardless
-of the parent column width.
+The Firewall tab uses a `TableLayoutPanel` root with two auto-sized rows (Provider / Status,
+Auto-block policy), a fill row for the inner tabs (Blocklist / Whitelist / Login trip-wires /
+Active blocks), and an auto-sized status-strip row. `AutoScroll` on the root grid is a safety net
+for pathologically small host windows.
+
+Within the Auto-block policy group, the layout was rebuilt as a **2-column** `TableLayoutPanel`
+(`AutoSize` label column, percent-100 value column) with `AutoSize` rows:
+
+* Row 0 — full-width brute-force trigger checkbox.
+* Row 1 — `Threshold (failed attempts):` label + compact `NumericUpDown` (90 px).
+* Row 2 — `Default block duration:` label + a compact `FlowLayoutPanel` carrying the three
+  numeric inputs and their unit labels: `[N] days [N] hours [N] min`. The flow panel auto-sizes
+  to ~260 px so the group stays visually compact regardless of how wide the parent column gets.
+* Row 3 — full-width blacklisted-login trigger checkbox.
+* Row 4 — full-width refuse-private-address checkbox.
+* Row 5 — Save / Reload button row.
+
+The inner `TabControl` carries a `MinimumSize` of `(0, 220)` so the grids remain usable when the
+host shrinks, while the policy row's `AutoSize` height still takes precedence over the fill row.
+The combination guarantees that the Auto-block policy controls are never overlapped by the inner
+tabs at the original screenshot size (793 × 570) and at 150 % DPI.
 
 ### MikroTik tab — Copy commands
 
@@ -238,6 +253,14 @@ to the RdpAudit host, optional TLS certificate notes, and verification queries
 verbatim to the clipboard and reports the result in the status label (`Copied RouterOS setup
 commands to clipboard (N chars).`). Operators substitute `<RDPAUDIT-HOST-IP>` and
 `<STRONG-PASSWORD>` before pasting into the RouterOS console.
+
+The command string is produced by `Core/MikroTik/MikroTikSetupCommands.BuildAll()` and locked by
+`Core.Tests/MikroTikSetupCommandsTests` — every required section header is present, every
+placeholder token (`HostPlaceholder`, `PasswordPlaceholder`, `CertificatePlaceholder`) appears
+verbatim, no plaintext credential or common weak default is embedded anywhere in the bundle, and
+every uncommented `password=` assignment must resolve to the placeholder token. The Configurator
+itself only references `MikroTikSetupCommands.BuildAll()`, so the bundle cannot drift between the
+UI and the tests.
 
 ### Export All IP Events
 

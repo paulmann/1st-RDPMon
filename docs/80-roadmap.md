@@ -852,21 +852,64 @@ that backs them. The sub-stage is **done** as of this branch:
 * `Forms/OverviewPage` renders the six compact summary cards, refreshes via the existing
   `Refresh status` button, and degrades to `—` + `service unreachable` when the IPC call fails.
 
-### A2 prerequisites
+### Stage A — sub-stage A2 status
 
-Sub-stage A2 (or whichever next slice consumes the new dashboard surface) must satisfy:
+A2 covers the Firewall tab layout fix and the MikroTik tab RouterOS v7 shell command
+instructions. The sub-stage is **done** as of this branch:
 
-1. **Windows manual validation of A1.** Confirm the six summary cards populate within one IPC
-   round-trip on a Windows host with the service installed and running; toggle service stop /
+* `Forms/FirewallPage` Auto-block policy group rebuilt as a 2-column `TableLayoutPanel`
+  (AutoSize label column, percent-100 value column, AutoSize rows). The `Default block duration`
+  controls live in a single compact `FlowLayoutPanel` reading `[N] days [N] hours [N] min` — the
+  whole group auto-sizes to ~260 px so it stays visually compact at the 793 × 570 screenshot
+  size and at 150 % DPI.
+* `Forms/FirewallPage` inner `TabControl` now carries `MinimumSize = (0, 220)` and the root
+  `TableLayoutPanel` carries `AutoScroll = true`, guaranteeing the policy controls are never
+  overlapped by the Blocklist / Whitelist / Login trip-wires / Active blocks tabs even on small
+  hosts. Provider / policy rows are `RowStyle.AutoSize`; the inner tabs claim the remaining fill
+  row only after the policy has been laid out.
+* `Core/MikroTik/MikroTikSetupCommands` is a new pure helper that emits the RouterOS v7 setup
+  bundle (`BuildAll()` + `EnumerateLines()`) with three public placeholder tokens
+  (`HostPlaceholder`, `PasswordPlaceholder`, `CertificatePlaceholder`). The bundle covers:
+  least-privilege group + user (`!ssh, !ftp, !telnet, !winbox, !web, !policy, !password, !sniff,
+  !sensitive, !romon`), REST endpoint enable (`www-ssl` / `www` fallback), `allowed-address`
+  restriction to the RdpAudit host, optional TLS certificate binding with `tls-version=only-1.2`,
+  and verification queries.
+* `Forms/MikroTikPage.RouterOsSetupCommands` is now sourced from `MikroTikSetupCommands.BuildAll()`
+  so the UI string and the unit-tested string can never drift apart.
+* `Core.Tests/MikroTikSetupCommandsTests` (11 tests, all passing) lock the bundle: section
+  anchors present and in order, every placeholder present, every uncommented `password=` resolves
+  to the placeholder, no embedded secret marker (`hunter2`, `qwerty`, `password=admin`, etc.),
+  `EnumerateLines()` matches `BuildAll()`.
+* Docs refreshed: `docs/30-configurator.md` (Firewall layout section, MikroTik Copy commands
+  section), `docs/49-mikrotik.md` (full setup bundle now mirrored from the Core helper).
+
+A2 explicitly **does not** add new IPC commands or DB writes. No new ordinals were claimed —
+the next free ordinal is still `40`.
+
+### A3 prerequisites
+
+Sub-stage A3 (or whichever next slice consumes the dashboard surface) must satisfy:
+
+1. **Windows manual validation of A1 + A2.** Confirm the six summary cards populate within one
+   IPC round-trip on a Windows host with the service installed and running; toggle service stop /
    start and confirm `Service health` flips between the IPC-reported value and `service
    unreachable` without crashing the tab; let `MaintenanceWorker` run at least one daily pass and
    confirm `DB size` shows `growth d:+x w:+y m:+z` rather than `snapshot pending (24h required)`.
-2. **Append-only IPC ordinals.** A2 must claim the next free ordinal (`40`+) — ordinals `38` and
+   Open the Firewall tab at the original screenshot size (793 × 570) and at 150 % DPI; confirm
+   the Auto-block policy controls (threshold, default block duration as `[N] days [N] hours
+   [N] min`, both follow-up checkboxes, Save / Reload buttons) are never overlapped by the inner
+   tabs. Open the MikroTik tab; confirm the setup bundle is visible (monospace), click `Copy
+   commands`, paste into Notepad and confirm the entire block including
+   `<RDPAUDIT-HOST-IP>` / `<STRONG-PASSWORD>` / `<rdpaudit-cert>` placeholders appears verbatim
+   and the status label reports the copied length.
+2. **Append-only IPC ordinals.** A3 must claim the next free ordinal (`40`+) — ordinals `38` and
    `39` are immutable. Reserve all new ordinals at the end of `IpcCommand` and lock them with
    `IpcCommandStabilityTests.Ordinal_IsStable`.
 3. **Layering discipline.** Continue the established pattern: Configurator pages call IPC and
    marshal results onto the UI thread via `BeginInvoke`/`Invoke`; the service computes metrics
-   from EF Core inside the dispatcher and never serialises secrets into the response DTO.
+   from EF Core inside the dispatcher and never serialises secrets into the response DTO. A3
+   must reuse the Stage A2 pattern of extracting copy-paste text into a Core helper so it can be
+   unit-tested away from WinForms.
 4. **Schema neutrality.** Prefer storing any new lightweight per-summary metadata in the
    existing `DbProps` key-value table to avoid a migration, mirroring how A1 stores DB-size
    snapshots. Reach for a schema change only when the data shape truly requires it.
