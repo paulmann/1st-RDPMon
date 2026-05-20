@@ -23,6 +23,12 @@ public sealed class RawEvent
 
 	public string? SourceIp { get; set; }
 
+	/// <summary>
+	/// True when <see cref="SourceIp"/> was attached by in-memory session correlation rather than
+	/// being read directly from the event payload. Direct-extraction events leave this false.
+	/// </summary>
+	public bool SourceIpDerived { get; set; }
+
 	public string? UserName { get; set; }
 
 	public string? Domain { get; set; }

@@ -148,7 +148,13 @@ public sealed class LiveEventRowView
 
 	public string? SourceIp { get; init; }
 
+	/// <summary>True when <see cref="SourceIp"/> was attached via session correlation.</summary>
+	public bool SourceIpDerived { get; init; }
+
 	public string? UserName { get; init; }
+
+	/// <summary>Windows LogonId hex string (e.g. "0x42"). May be null.</summary>
+	public string? LogonId { get; init; }
 
 	public string? Domain { get; init; }
 

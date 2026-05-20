@@ -139,6 +139,7 @@ public static class Program
 		services.AddSingleton<BookmarkStore>();
 		services.AddSingleton<EventChannel>();
 		services.AddSingleton<ServiceMetrics>();
+		services.AddSingleton<SessionCorrelationCache>();
 		services.AddSingleton<EventNormalizer>();
 		services.AddSingleton<DbAlertContext>();
 		services.AddSingleton<IAlertContext>(sp => sp.GetRequiredService<DbAlertContext>());

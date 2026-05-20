@@ -24,15 +24,17 @@ public sealed class EventNormalizer
 {
 	internal const int MaxDetails = 65_536;
 
-	private static readonly string[] AddressFieldNames =
+	private readonly SessionCorrelationCache _correlation;
+
+	public EventNormalizer(SessionCorrelationCache correlation)
 	{
-		"IpAddress", "ClientAddress", "ClientName", "SourceNetworkAddress", "Workstation",
-	};
+		_correlation = correlation;
+	}
 
 	public RawEvent Normalize(RawEventDto dto)
 	{
 		XmlDocument? doc = EventXmlParser.ParseSafe(dto.XmlPayload);
-		string? sourceIp = ResolveIp(doc);
+		string? directIp = PerEventIpResolver.Resolve(doc, dto.Channel, dto.EventId);
 		string? userName = EventXmlParser.GetData(doc, "TargetUserName")
 			?? EventXmlParser.GetData(doc, "SubjectUserName")
 			?? EventXmlParser.GetData(doc, "User")
@@ -42,23 +44,43 @@ public sealed class EventNormalizer
 			?? EventXmlParser.GetData(doc, "SubjectDomainName")
 			?? EventXmlParser.GetData(doc, "Domain");
 
+		string? logonId = EventXmlParser.GetData(doc, "TargetLogonId") ?? EventXmlParser.GetData(doc, "SubjectLogonId");
+		int? sessionId = EventXmlParser.GetInt(doc, "SessionID") ?? EventXmlParser.GetInt(doc, "SessionId");
+
 		Dictionary<string, string?> extraDetails = ExtractAllEventData(doc);
 		string detailsJson = SerializeAndCap(extraDetails);
+
+		string? resolvedIp = directIp;
+		bool derived = false;
+		if (resolvedIp is not null)
+		{
+			_correlation.Seed(logonId, sessionId, userName, resolvedIp, dto.TimeUtc);
+		}
+		else
+		{
+			string? cached = _correlation.Lookup(logonId, sessionId, userName);
+			if (cached is not null)
+			{
+				resolvedIp = cached;
+				derived = true;
+			}
+		}
 
 		RawEvent entity = new()
 		{
 			EventId = dto.EventId,
 			Channel = dto.Channel,
 			TimeUtc = dto.TimeUtc,
-			SourceIp = NormalizeIp(sourceIp),
+			SourceIp = resolvedIp,
+			SourceIpDerived = derived && resolvedIp is not null,
 			UserName = userName,
 			Domain = domain,
-			LogonId = EventXmlParser.GetData(doc, "TargetLogonId") ?? EventXmlParser.GetData(doc, "SubjectLogonId"),
+			LogonId = logonId,
 			LogonType = EventXmlParser.GetInt(doc, "LogonType"),
 			AuthPackage = EventXmlParser.GetData(doc, "AuthenticationPackageName")
 				?? EventXmlParser.GetData(doc, "Package")
 				?? EventXmlParser.GetData(doc, "PackageName"),
-			SessionId = EventXmlParser.GetInt(doc, "SessionID") ?? EventXmlParser.GetInt(doc, "SessionId"),
+			SessionId = sessionId,
 			Status = EventXmlParser.GetData(doc, "Status") ?? EventXmlParser.GetData(doc, "FailureReason"),
 			ProcessName = EventXmlParser.GetData(doc, "NewProcessName") ?? EventXmlParser.GetData(doc, "ProcessName"),
 			CommandLine = EventXmlParser.GetData(doc, "CommandLine"),
@@ -132,30 +154,6 @@ public sealed class EventNormalizer
 		return sentinelJson.Length <= MaxDetails
 			? sentinelJson
 			: string.Format(CultureInfo.InvariantCulture, "{{\"truncated\":true,\"originalLength\":{0}}}", raw.Length);
-	}
-
-	private static string? ResolveIp(XmlDocument? doc)
-	{
-		foreach (string name in AddressFieldNames)
-		{
-			string? value = EventXmlParser.GetData(doc, name);
-			if (!string.IsNullOrWhiteSpace(value))
-			{
-				return value;
-			}
-		}
-
-		return null;
-	}
-
-	private static string? NormalizeIp(string? ip)
-	{
-		if (string.IsNullOrWhiteSpace(ip) || IpClassifier.IsLocalSentinel(ip))
-		{
-			return null;
-		}
-
-		return ip;
 	}
 
 	private static Dictionary<string, string?> ExtractAllEventData(XmlDocument? doc)

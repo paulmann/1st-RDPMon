@@ -103,6 +103,7 @@ public sealed class LiveEventsPage : TabPage
 		_grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "ProcessName", HeaderText = "Process", DataPropertyName = nameof(LiveEventRow.ProcessName), AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
 		_grid.DataSource = _binding;
 		_grid.CellMouseDown += OnCellMouseDown;
+		_grid.CellFormatting += OnCellFormatting;
 
 		_info = new Label { Dock = DockStyle.Top, Height = 22, Text = "Waiting for first event…" };
 
@@ -339,6 +340,29 @@ public sealed class LiveEventsPage : TabPage
 	// ---------------------------------------------------------------------------------------------
 	// Context menu
 	// ---------------------------------------------------------------------------------------------
+
+	private void OnCellFormatting(object? sender, DataGridViewCellFormattingEventArgs e)
+	{
+		if (e.RowIndex < 0 || e.RowIndex >= _binding.Count)
+		{
+			return;
+		}
+
+		DataGridViewColumn col = _grid.Columns[e.ColumnIndex];
+		if (!string.Equals(col.Name, "SourceIp", StringComparison.Ordinal))
+		{
+			return;
+		}
+
+		LiveEventRow row = _binding[e.RowIndex];
+		if (row.SourceIpDerived && !string.IsNullOrWhiteSpace(row.SourceIp))
+		{
+			e.Value = "• " + row.SourceIp;
+			e.FormattingApplied = true;
+			DataGridViewCell cell = _grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
+			cell.ToolTipText = "Derived from session correlation";
+		}
+	}
 
 	private void OnCellMouseDown(object? sender, DataGridViewCellMouseEventArgs e)
 	{
@@ -753,8 +777,10 @@ public sealed class LiveEventsPage : TabPage
 		[JsonPropertyName("channel")] public string? Channel { get; set; }
 		[JsonPropertyName("timeUtc")] public DateTime TimeUtc { get; set; }
 		[JsonPropertyName("sourceIp")] public string? SourceIp { get; set; }
+		[JsonPropertyName("sourceIpDerived")] public bool SourceIpDerived { get; set; }
 		[JsonPropertyName("userName")] public string? UserName { get; set; }
 		[JsonPropertyName("domain")] public string? Domain { get; set; }
+		[JsonPropertyName("logonId")] public string? LogonId { get; set; }
 		[JsonPropertyName("logonType")] public int? LogonType { get; set; }
 		[JsonPropertyName("authPackage")] public string? AuthPackage { get; set; }
 		[JsonPropertyName("processName")] public string? ProcessName { get; set; }
@@ -767,8 +793,10 @@ public sealed class LiveEventsPage : TabPage
 			Channel = Channel,
 			TimeUtc = TimeUtc,
 			SourceIp = SourceIp,
+			SourceIpDerived = SourceIpDerived,
 			UserName = UserName,
 			Domain = Domain,
+			LogonId = LogonId,
 			LogonType = LogonType,
 			AuthPackage = AuthPackage,
 			ProcessName = ProcessName,

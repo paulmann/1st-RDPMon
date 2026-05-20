@@ -440,6 +440,11 @@ namespace RdpAudit.Core.Data.Migrations
 						.HasMaxLength(45)
 						.HasColumnType("TEXT");
 
+					b.Property<bool>("SourceIpDerived")
+						.ValueGeneratedOnAdd()
+						.HasColumnType("INTEGER")
+						.HasDefaultValue(false);
+
 					b.Property<string>("Status")
 						.HasMaxLength(64)
 						.HasColumnType("TEXT");

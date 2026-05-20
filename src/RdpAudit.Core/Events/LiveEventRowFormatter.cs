@@ -46,7 +46,12 @@ public static class LiveEventRowFormatter
 		AppendLine(sb, "Channel", row.Channel);
 		AppendLine(sb, "User", row.UserName);
 		AppendLine(sb, "Domain", row.Domain);
-		AppendLine(sb, "SourceIp", row.SourceIp);
+		string? renderedIp = row.SourceIp;
+		if (!string.IsNullOrWhiteSpace(renderedIp) && row.SourceIpDerived)
+		{
+			renderedIp = renderedIp + " (derived)";
+		}
+		AppendLine(sb, "SourceIp", renderedIp);
 		AppendLine(sb, "LogonType", row.LogonType?.ToString(CultureInfo.InvariantCulture));
 		AppendLine(sb, "AuthPackage", row.AuthPackage);
 		AppendLine(sb, "Process", row.ProcessName);
