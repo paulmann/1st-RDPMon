@@ -39,6 +39,7 @@ public sealed class EventProcessorWorker : BackgroundService
 	private readonly IDbContextFactory<AuditDbContext> _factory;
 	private readonly EventNormalizer _normalizer;
 	private readonly SessionIpCorrelationUpserter _correlationUpserter;
+	private readonly RdpConnectionFactUpserter _connectionFactUpserter;
 	private readonly ILogger<EventProcessorWorker> _logger;
 	private readonly IOptionsMonitor<RdpAuditOptions> _options;
 	private int _consecutiveFailures;
@@ -48,6 +49,7 @@ public sealed class EventProcessorWorker : BackgroundService
 		IDbContextFactory<AuditDbContext> factory,
 		EventNormalizer normalizer,
 		SessionIpCorrelationUpserter correlationUpserter,
+		RdpConnectionFactUpserter connectionFactUpserter,
 		ILogger<EventProcessorWorker> logger,
 		IOptionsMonitor<RdpAuditOptions> options)
 	{
@@ -55,6 +57,7 @@ public sealed class EventProcessorWorker : BackgroundService
 		_factory = factory;
 		_normalizer = normalizer;
 		_correlationUpserter = correlationUpserter;
+		_connectionFactUpserter = connectionFactUpserter;
 		_logger = logger;
 		_options = options;
 	}
@@ -245,6 +248,7 @@ public sealed class EventProcessorWorker : BackgroundService
 			}
 
 			await _correlationUpserter.ApplyAsync(db, candidates, ct).ConfigureAwait(false);
+			await _connectionFactUpserter.ApplyAsync(db, entities, ct).ConfigureAwait(false);
 
 			await db.SaveChangesAsync(ct).ConfigureAwait(false);
 			await tx.CommitAsync(ct).ConfigureAwait(false);

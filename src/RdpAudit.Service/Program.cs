@@ -141,6 +141,7 @@ public static class Program
 		services.AddSingleton<ServiceMetrics>();
 		services.AddSingleton<SessionCorrelationCache>();
 		services.AddSingleton<SessionIpCorrelationUpserter>();
+		services.AddSingleton<RdpConnectionFactUpserter>();
 		services.AddSingleton<EventNormalizer>();
 		services.AddSingleton<DbAlertContext>();
 		services.AddSingleton<IAlertContext>(sp => sp.GetRequiredService<DbAlertContext>());

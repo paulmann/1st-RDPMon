@@ -40,6 +40,11 @@ public sealed class StorageOptions
 	/// Minimum effective value enforced by the maintenance worker is 7.</summary>
 	public int SessionIpCorrelationRetentionDays { get; set; } = 30;
 
+	/// <summary>Retention window for <c>RdpConnectionFacts</c>. Rows whose <c>LastSeenUtc</c> has
+	/// not been refreshed within this window are eligible for pruning. Defaults to 90 days.
+	/// Minimum effective value enforced by the maintenance worker is 30.</summary>
+	public int RdpConnectionFactRetentionDays { get; set; } = 90;
+
 	/// <summary>Maximum number of rows deleted from a single retention pass per table.
 	/// Keeps the writer lock short on very large databases. Defaults to 50000.</summary>
 	public int MaintenanceBatchSize { get; set; } = 50000;
