@@ -15,8 +15,10 @@ using System.Globalization;
 using System.Runtime.Versioning;
 using RdpAudit.Configurator.Ipc;
 using RdpAudit.Configurator.Services;
+using RdpAudit.Core.Events;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
+using RdpAudit.Core.Models;
 using RdpAudit.Core.Util;
 
 namespace RdpAudit.Configurator.Forms;
@@ -57,6 +59,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 	private readonly ToolStripMenuItem _menuShadowView;
 	private readonly ToolStripMenuItem _menuShadowControl;
 	private readonly ToolStripMenuItem _menuShadowControlNoConsent;
+	private readonly ToolStripMenuItem _menuExportFacts;
 
 	// Shadow policy panel controls.
 	private readonly Label _shadowSummaryLabel;
@@ -148,6 +151,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 		_menuShadowView = new ToolStripMenuItem("Shadow — view only…", null, async (_, _) => await OnShadowAsync(SessionCommandBuilder.ShadowMode.ViewOnly).ConfigureAwait(true));
 		_menuShadowControl = new ToolStripMenuItem("Shadow — view + control…", null, async (_, _) => await OnShadowAsync(SessionCommandBuilder.ShadowMode.Control).ConfigureAwait(true));
 		_menuShadowControlNoConsent = new ToolStripMenuItem("Shadow — view + control (NO CONSENT)…", null, async (_, _) => await OnShadowAsync(SessionCommandBuilder.ShadowMode.ControlNoConsent).ConfigureAwait(true));
+		_menuExportFacts = BuildExportFactsSubmenu();
 		_menu = new ContextMenuStrip();
 		_menu.Items.Add(_menuDisconnect);
 		_menu.Items.Add(_menuLogoff);
@@ -155,6 +159,8 @@ public sealed class RemoteRdpClientsPage : TabPage
 		_menu.Items.Add(_menuShadowView);
 		_menu.Items.Add(_menuShadowControl);
 		_menu.Items.Add(_menuShadowControlNoConsent);
+		_menu.Items.Add(new ToolStripSeparator());
+		_menu.Items.Add(_menuExportFacts);
 		_menu.Opening += OnMenuOpening;
 		_grid.ContextMenuStrip = _menu;
 
@@ -361,6 +367,44 @@ public sealed class RemoteRdpClientsPage : TabPage
 			HeaderText = "Current?",
 			DataPropertyName = nameof(SessionRow.CurrentText),
 			Width = 70,
+		});
+
+		// --- Stage IP-E historical-context columns (additive). Never overrides ClientAddress (live).
+		// Populated only when matching RdpConnectionFacts exist for the session's source IP.
+		grid.Columns.Add(new DataGridViewTextBoxColumn
+		{
+			HeaderText = "Hist First Seen (UTC)",
+			DataPropertyName = nameof(SessionRow.HistoricalFirstSeenUtcText),
+			Width = 160,
+			ToolTipText = "Earliest FirstSeenUtc across matching RdpConnectionFacts for this session's source IP.",
+		});
+		grid.Columns.Add(new DataGridViewTextBoxColumn
+		{
+			HeaderText = "Hist Last Seen (UTC)",
+			DataPropertyName = nameof(SessionRow.HistoricalLastSeenUtcText),
+			Width = 160,
+			ToolTipText = "Latest LastSeenUtc across matching RdpConnectionFacts for this session's source IP.",
+		});
+		grid.Columns.Add(new DataGridViewTextBoxColumn
+		{
+			HeaderText = "Hist Failed",
+			DataPropertyName = nameof(SessionRow.HistoricalFailedLogons),
+			Width = 90,
+			ToolTipText = "Sum of failed logons across matching RdpConnectionFacts for this source IP.",
+		});
+		grid.Columns.Add(new DataGridViewTextBoxColumn
+		{
+			HeaderText = "Hist Success",
+			DataPropertyName = nameof(SessionRow.HistoricalSuccessfulLogons),
+			Width = 90,
+			ToolTipText = "Sum of successful logons across matching RdpConnectionFacts for this source IP.",
+		});
+		grid.Columns.Add(new DataGridViewTextBoxColumn
+		{
+			HeaderText = "Hist Users Attempted",
+			DataPropertyName = nameof(SessionRow.HistoricalUserNamesAttemptedText),
+			Width = 200,
+			ToolTipText = "Comma-separated, deduplicated usernames attempted from this IP across matching facts.",
 		});
 	}
 
@@ -596,11 +640,13 @@ public sealed class RemoteRdpClientsPage : TabPage
 	private void OnMenuOpening(object? sender, CancelEventArgs e)
 	{
 		bool hasRow = _menuRow is not null;
+		bool hasValidIp = hasRow && !string.IsNullOrWhiteSpace(_menuRow!.ClientAddress) && AddressListFilter.IsValidIp(_menuRow.ClientAddress);
 		_menuDisconnect.Enabled = hasRow;
 		_menuLogoff.Enabled = hasRow;
 		_menuShadowView.Enabled = hasRow;
 		_menuShadowControl.Enabled = hasRow;
 		_menuShadowControlNoConsent.Enabled = hasRow;
+		_menuExportFacts.Enabled = hasValidIp;
 	}
 
 	private async Task OnDisconnectAsync()
@@ -781,6 +827,33 @@ public sealed class RemoteRdpClientsPage : TabPage
 		}
 	}
 
+	// ---------------------------------------------------------------------------------------------
+	// Export Connection Facts (Stage IP-E) — submenu wired into the sessions context menu.
+	// ---------------------------------------------------------------------------------------------
+
+	private ToolStripMenuItem BuildExportFactsSubmenu()
+	{
+		ToolStripMenuItem root = new("Export Connection Facts");
+		root.DropDownItems.Add(new ToolStripMenuItem("JSON…", null, async (_, _) => await OnExportFactsAsync(ConnectionFactsExportFormat.Json).ConfigureAwait(true)));
+		root.DropDownItems.Add(new ToolStripMenuItem("TXT…", null, async (_, _) => await OnExportFactsAsync(ConnectionFactsExportFormat.Txt).ConfigureAwait(true)));
+		root.DropDownItems.Add(new ToolStripMenuItem("Markdown…", null, async (_, _) => await OnExportFactsAsync(ConnectionFactsExportFormat.Markdown).ConfigureAwait(true)));
+		root.DropDownItems.Add(new ToolStripMenuItem("CSV…", null, async (_, _) => await OnExportFactsAsync(ConnectionFactsExportFormat.Csv).ConfigureAwait(true)));
+		return root;
+	}
+
+	private async Task OnExportFactsAsync(ConnectionFactsExportFormat format)
+	{
+		if (_menuRow is null
+			|| string.IsNullOrWhiteSpace(_menuRow.ClientAddress)
+			|| !AddressListFilter.IsValidIp(_menuRow.ClientAddress))
+		{
+			SetStatus("Export Connection Facts aborted: no valid IP on the selected session row.");
+			return;
+		}
+
+		await ConnectionFactsExportRunner.RunAsync(_ipc, _menuRow.ClientAddress, format, SetStatus).ConfigureAwait(true);
+	}
+
 	private async Task SendSessionActionAsync(IpcCommand command, SessionActionRequest request, string label)
 	{
 		try
@@ -874,9 +947,27 @@ public sealed class RemoteRdpClientsPage : TabPage
 
 		public string CurrentText => IsCurrent ? "yes" : string.Empty;
 
+		// --- Stage IP-E historical-context fields (additive). Never overrides live ClientAddress.
+
+		/// <summary>Earliest <c>FirstSeenUtc</c> across matching connection facts; empty when none exist.</summary>
+		public string HistoricalFirstSeenUtcText { get; init; } = string.Empty;
+
+		/// <summary>Latest <c>LastSeenUtc</c> across matching connection facts; empty when none exist.</summary>
+		public string HistoricalLastSeenUtcText { get; init; } = string.Empty;
+
+		/// <summary>Sum of failed logons across matching connection facts; zero when no facts exist.</summary>
+		public long HistoricalFailedLogons { get; init; }
+
+		/// <summary>Sum of successful logons across matching connection facts; zero when no facts exist.</summary>
+		public long HistoricalSuccessfulLogons { get; init; }
+
+		/// <summary>Comma-separated deduplicated usernames attempted from this IP across matching facts.</summary>
+		public string HistoricalUserNamesAttemptedText { get; init; } = string.Empty;
+
 		public static SessionRow From(RdpSessionDto dto)
 		{
 			ArgumentNullException.ThrowIfNull(dto);
+			RdpSessionHistoricalDisplay hist = ConnectionFactRowProjection.FromRdpSession(dto);
 			return new SessionRow
 			{
 				SessionId = dto.SessionId,
@@ -888,6 +979,11 @@ public sealed class RemoteRdpClientsPage : TabPage
 				IsActive = dto.IsActive,
 				IsDisconnected = dto.IsDisconnected,
 				IsCurrent = dto.IsCurrent,
+				HistoricalFirstSeenUtcText = hist.HistoricalFirstSeenUtcText,
+				HistoricalLastSeenUtcText = hist.HistoricalLastSeenUtcText,
+				HistoricalFailedLogons = hist.HistoricalFailedLogons,
+				HistoricalSuccessfulLogons = hist.HistoricalSuccessfulLogons,
+				HistoricalUserNamesAttemptedText = hist.HistoricalUserNamesAttemptedText,
 			};
 		}
 	}

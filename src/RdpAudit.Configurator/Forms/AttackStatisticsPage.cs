@@ -78,6 +78,7 @@ public sealed class AttackStatisticsPage : TabPage
 	private readonly ToolStripMenuItem _menuBlockIp;
 	private readonly ToolStripMenuItem _menuWhitelistIp;
 	private readonly ToolStripMenuItem _menuExportEvents;
+	private readonly ToolStripMenuItem _menuExportFacts;
 
 	private AttackStatRow? _menuRow;
 
@@ -196,6 +197,7 @@ public sealed class AttackStatisticsPage : TabPage
 		_menuBlockIp = new ToolStripMenuItem("Block IP…", null, async (_, _) => await OnBlockIpAsync().ConfigureAwait(true));
 		_menuWhitelistIp = new ToolStripMenuItem("Whitelist IP…", null, async (_, _) => await OnWhitelistIpAsync().ConfigureAwait(true));
 		_menuExportEvents = BuildExportSubmenu();
+		_menuExportFacts = BuildExportFactsSubmenu();
 		_menu = new ContextMenuStrip();
 		_menu.Items.Add(_menuCopyDetails);
 		_menu.Items.Add(_menuCopyIp);
@@ -204,6 +206,7 @@ public sealed class AttackStatisticsPage : TabPage
 		_menu.Items.Add(_menuWhitelistIp);
 		_menu.Items.Add(new ToolStripSeparator());
 		_menu.Items.Add(_menuExportEvents);
+		_menu.Items.Add(_menuExportFacts);
 		_menu.Opening += OnMenuOpening;
 		_grid.ContextMenuStrip = _menu;
 
@@ -353,6 +356,44 @@ public sealed class AttackStatisticsPage : TabPage
 			HeaderText = "Blocked",
 			DataPropertyName = nameof(AttackStatRow.IsBlockedText),
 			Width = 80,
+		});
+
+		// --- Stage IP-E: fact-derived augmentation columns. Append-only, additive to the existing
+		// authoritative AttackStat columns above. Operators can sort/filter these like any other column.
+		grid.Columns.Add(new DataGridViewTextBoxColumn
+		{
+			HeaderText = "Active Fact",
+			DataPropertyName = nameof(AttackStatRow.HasActiveConnectionFactText),
+			Width = 90,
+			ToolTipText = "True when at least one matching RdpConnectionFact currently represents an active session.",
+		});
+		grid.Columns.Add(new DataGridViewTextBoxColumn
+		{
+			HeaderText = "Fact Failed",
+			DataPropertyName = nameof(AttackStatRow.FactFailedLogons),
+			Width = 90,
+			ToolTipText = "Sum of failed logons across all RdpConnectionFacts for this IP.",
+		});
+		grid.Columns.Add(new DataGridViewTextBoxColumn
+		{
+			HeaderText = "Fact Success",
+			DataPropertyName = nameof(AttackStatRow.FactSuccessfulLogons),
+			Width = 90,
+			ToolTipText = "Sum of successful logons across all RdpConnectionFacts for this IP.",
+		});
+		grid.Columns.Add(new DataGridViewTextBoxColumn
+		{
+			HeaderText = "Fact First Seen (UTC)",
+			DataPropertyName = nameof(AttackStatRow.FactFirstSeenUtcText),
+			Width = 160,
+			ToolTipText = "Earliest FirstSeenUtc across all RdpConnectionFacts for this IP.",
+		});
+		grid.Columns.Add(new DataGridViewTextBoxColumn
+		{
+			HeaderText = "Fact Last Seen (UTC)",
+			DataPropertyName = nameof(AttackStatRow.FactLastSeenUtcText),
+			Width = 160,
+			ToolTipText = "Most recent LastSeenUtc across all RdpConnectionFacts for this IP.",
 		});
 	}
 
@@ -538,6 +579,7 @@ public sealed class AttackStatisticsPage : TabPage
 		_menuBlockIp.Enabled = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip) && !_menuRow.IsBlocked;
 		_menuWhitelistIp.Enabled = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip);
 		_menuExportEvents.Enabled = hasValidIp;
+		_menuExportFacts.Enabled = hasValidIp;
 	}
 
 	private void OnCopyDetails()
@@ -676,6 +718,31 @@ public sealed class AttackStatisticsPage : TabPage
 		await IpEventsExportRunner.RunAsync(_ipc, _menuRow.Ip, format, SetStatus).ConfigureAwait(true);
 	}
 
+	// ---------------------------------------------------------------------------------------------
+	// Export Connection Facts (Stage IP-E) — submenu wired into the attack stats context menu.
+	// ---------------------------------------------------------------------------------------------
+
+	private ToolStripMenuItem BuildExportFactsSubmenu()
+	{
+		ToolStripMenuItem root = new("Export Connection Facts");
+		root.DropDownItems.Add(new ToolStripMenuItem("JSON…", null, async (_, _) => await OnExportFactsAsync(ConnectionFactsExportFormat.Json).ConfigureAwait(true)));
+		root.DropDownItems.Add(new ToolStripMenuItem("TXT…", null, async (_, _) => await OnExportFactsAsync(ConnectionFactsExportFormat.Txt).ConfigureAwait(true)));
+		root.DropDownItems.Add(new ToolStripMenuItem("Markdown…", null, async (_, _) => await OnExportFactsAsync(ConnectionFactsExportFormat.Markdown).ConfigureAwait(true)));
+		root.DropDownItems.Add(new ToolStripMenuItem("CSV…", null, async (_, _) => await OnExportFactsAsync(ConnectionFactsExportFormat.Csv).ConfigureAwait(true)));
+		return root;
+	}
+
+	private async Task OnExportFactsAsync(ConnectionFactsExportFormat format)
+	{
+		if (_menuRow is null || string.IsNullOrEmpty(_menuRow.Ip) || !AddressListFilter.IsValidIp(_menuRow.Ip))
+		{
+			SetStatus("Export Connection Facts aborted: no valid IP in the selected row.");
+			return;
+		}
+
+		await ConnectionFactsExportRunner.RunAsync(_ipc, _menuRow.Ip, format, SetStatus).ConfigureAwait(true);
+	}
+
 	private async Task<bool> SendMutationAsync(IpcCommand command, object payload)
 	{
 		try
@@ -789,6 +856,26 @@ public sealed class AttackStatisticsPage : TabPage
 
 		public string IsBlockedText => IsBlocked ? "yes" : "no";
 
+		// --- Stage IP-E fact-derived columns (additive, never overrides AttackStat columns above). ---
+
+		/// <summary>True when at least one matching <c>RdpConnectionFact</c> currently represents an active session.</summary>
+		public bool HasActiveConnectionFact { get; init; }
+
+		/// <summary>Display text for <see cref="HasActiveConnectionFact"/>.</summary>
+		public string HasActiveConnectionFactText => HasActiveConnectionFact ? "yes" : "no";
+
+		/// <summary>Sum of failed logons across all <c>RdpConnectionFacts</c> for this IP.</summary>
+		public long FactFailedLogons { get; init; }
+
+		/// <summary>Sum of successful logons across all <c>RdpConnectionFacts</c> for this IP.</summary>
+		public long FactSuccessfulLogons { get; init; }
+
+		/// <summary>Display text for the earliest fact <c>FirstSeenUtc</c>; empty when no facts exist.</summary>
+		public string FactFirstSeenUtcText { get; init; } = string.Empty;
+
+		/// <summary>Display text for the latest fact <c>LastSeenUtc</c>; empty when no facts exist.</summary>
+		public string FactLastSeenUtcText { get; init; } = string.Empty;
+
 		/// <summary>Reference to the original DTO; used by the clipboard formatter so format drift cannot occur.</summary>
 		[Browsable(false)]
 		public AttackStatEntryDto Source { get; init; } = new();
@@ -796,6 +883,7 @@ public sealed class AttackStatisticsPage : TabPage
 		public static AttackStatRow From(AttackStatEntryDto dto)
 		{
 			ArgumentNullException.ThrowIfNull(dto);
+			AttackStatFactDisplay facts = ConnectionFactRowProjection.FromAttackStat(dto);
 			return new AttackStatRow
 			{
 				Ip = dto.Ip,
@@ -815,6 +903,11 @@ public sealed class AttackStatisticsPage : TabPage
 				TopLoginsText = AttackStatRowFormatter.FormatTopLogins(dto.Top10AttemptedLogins),
 				LastLoginTypeText = dto.LastLoginType?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
 				IsBlocked = dto.IsBlocked,
+				HasActiveConnectionFact = facts.HasActiveConnectionFact,
+				FactFailedLogons = facts.FactFailedLogons,
+				FactSuccessfulLogons = facts.FactSuccessfulLogons,
+				FactFirstSeenUtcText = facts.FactFirstSeenUtcText,
+				FactLastSeenUtcText = facts.FactLastSeenUtcText,
 				Source = dto,
 			};
 		}
