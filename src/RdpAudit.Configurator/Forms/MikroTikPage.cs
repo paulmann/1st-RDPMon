@@ -34,23 +34,45 @@ public sealed class MikroTikPage : TabPage
 		"MikroTik RouterOS v7 REST API integration. When enabled, the RdpAudit service inserts and "
 		+ "removes firewall filter rules on the router for attacker IPs, with a comment that starts "
 		+ "with the configured CommentPrefix so removal is restricted to RdpAudit-owned rules.\r\n\r\n"
-		+ "RouterOS setup checklist:\r\n"
-		+ "  1. Enable the REST service: '/ip/service set www-ssl disabled=no' (or 'www' for HTTP).\r\n"
-		+ "  2. Restrict allowed-address to the RdpAudit host: '/ip/service set www-ssl address=<your-rdpaudit-host>/32'.\r\n"
-		+ "  3. Install a TLS certificate for production HTTPS; HTTP is acceptable in lab only.\r\n"
-		+ "  4. Create a least-privilege group with read/write on /ip/firewall/filter and read on /system: "
-		+ "'/user/group add name=rdpaudit policy=read,write,api,rest-api,!ssh,!ftp,!telnet,!winbox,!web,!policy'.\r\n"
-		+ "  5. Create the dedicated user: '/user add group=rdpaudit name=rdpaudit password=<...>'.\r\n"
-		+ "  6. Paste the host/credentials below, click Save, then Test connection.\r\n\r\n"
 		+ "Security:\r\n"
 		+ "  • The password is encrypted at rest via Windows DPAPI before persistence.\r\n"
 		+ "  • Only firewall rules whose comment starts with the configured CommentPrefix are ever deleted.\r\n"
 		+ "  • Existing matching rules are reused (idempotent), never duplicated.\r\n"
 		+ "  • TLS certificate validation is on by default — disable only for lab use.";
 
+	/// <summary>Copy-paste-ready RouterOS v7 shell command bundle used by the Stage A
+	/// <c>Copy commands</c> button. Operators substitute the placeholders before pasting.</summary>
+	internal const string RouterOsSetupCommands =
+		"# RdpAudit — RouterOS v7 setup\r\n"
+		+ "# Replace <RDPAUDIT-HOST-IP> with the IP of the RdpAudit host, and <STRONG-PASSWORD> with a new password.\r\n"
+		+ "\r\n"
+		+ "# 1. Create a least-privilege group with REST + firewall write access only.\r\n"
+		+ "/user/group/add name=rdpaudit policy=read,write,api,rest-api,!ssh,!ftp,!telnet,!winbox,!web,!policy,!password,!sniff,!sensitive,!romon\r\n"
+		+ "\r\n"
+		+ "# 2. Create the dedicated service user. Use a long random password (>= 24 chars).\r\n"
+		+ "/user/add group=rdpaudit name=rdpaudit password=\"<STRONG-PASSWORD>\" comment=\"RdpAudit service account\"\r\n"
+		+ "\r\n"
+		+ "# 3. Enable the REST endpoint. Prefer www-ssl in production; www is acceptable in lab only.\r\n"
+		+ "/ip/service/set www-ssl disabled=no\r\n"
+		+ "# Lab fallback (HTTP):\r\n"
+		+ "# /ip/service/set www disabled=no\r\n"
+		+ "\r\n"
+		+ "# 4. Restrict allowed-address on the REST service to the RdpAudit host so no other client can authenticate.\r\n"
+		+ "/ip/service/set www-ssl address=<RDPAUDIT-HOST-IP>/32\r\n"
+		+ "\r\n"
+		+ "# 5. Production HTTPS certificate (skip in lab). Replace 'rdpaudit-cert' with the imported certificate name.\r\n"
+		+ "# /ip/service/set www-ssl certificate=rdpaudit-cert tls-version=only-1.2\r\n"
+		+ "\r\n"
+		+ "# 6. Verification commands.\r\n"
+		+ "/ip/service/print where name~\"www\"\r\n"
+		+ "/user/print where name=rdpaudit\r\n"
+		+ "/ip/firewall/filter/print where comment~\"^RdpAudit\"\r\n";
+
 	private readonly IpcClient _ipc;
 
 	private readonly TextBox _intro;
+	private readonly TextBox _setupCommands;
+	private readonly Button _copyCommandsButton;
 	private readonly TextBox _hostInput;
 	private readonly NumericUpDown _portInput;
 	private readonly CheckBox _useHttpsInput;
@@ -91,11 +113,32 @@ public sealed class MikroTikPage : TabPage
 			ReadOnly = true,
 			ScrollBars = ScrollBars.Vertical,
 			Dock = DockStyle.Top,
-			Height = 230,
+			Height = 120,
 			Text = IntroText,
 			WordWrap = true,
 			BackColor = SystemColors.Info,
 		};
+
+		_setupCommands = new TextBox
+		{
+			Multiline = true,
+			ReadOnly = true,
+			ScrollBars = ScrollBars.Both,
+			Dock = DockStyle.Top,
+			Height = 220,
+			Text = RouterOsSetupCommands,
+			WordWrap = false,
+			Font = new Font(FontFamily.GenericMonospace, 9.5f),
+			BackColor = SystemColors.Window,
+		};
+
+		_copyCommandsButton = new Button
+		{
+			Text = "Copy commands",
+			Dock = DockStyle.Top,
+			Height = 30,
+		};
+		_copyCommandsButton.Click += (_, _) => OnCopyCommands();
 
 		_hostInput = new TextBox { Dock = DockStyle.Fill, PlaceholderText = "router host name or IP literal" };
 		_portInput = new NumericUpDown { Dock = DockStyle.Fill, Minimum = 0, Maximum = 65535, Value = 0 };
@@ -143,11 +186,29 @@ public sealed class MikroTikPage : TabPage
 		Panel statusPanel = BuildStatusPanel();
 		Panel formPanel = BuildFormPanel();
 
+		// Docked panels: last-added control sits closest to the top edge.
 		Controls.Add(formPanel);
 		Controls.Add(statusPanel);
+		Controls.Add(_copyCommandsButton);
+		Controls.Add(_setupCommands);
 		Controls.Add(_intro);
 
 		HandleCreated += async (_, _) => await RefreshAsync().ConfigureAwait(true);
+	}
+
+	private void OnCopyCommands()
+	{
+		try
+		{
+			Clipboard.SetText(RouterOsSetupCommands);
+			_statusLabel.Text = string.Format(CultureInfo.InvariantCulture,
+				"[{0:HH:mm:ss}Z] Copied RouterOS setup commands to clipboard ({1} chars).",
+				DateTime.UtcNow, RouterOsSetupCommands.Length);
+		}
+		catch (Exception ex)
+		{
+			_statusLabel.Text = "Copy commands FAILED: " + ex.GetType().Name + " — " + ex.Message;
+		}
 	}
 
 	private Panel BuildFormPanel()

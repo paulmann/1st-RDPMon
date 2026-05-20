@@ -12,8 +12,11 @@ using System.Globalization;
 using System.Reflection;
 using System.Runtime.Versioning;
 using System.Text;
+using RdpAudit.Configurator.Ipc;
 using RdpAudit.Configurator.Services;
 using RdpAudit.Core.Backup;
+using RdpAudit.Core.Ipc;
+using RdpAudit.Core.Ipc.Contracts;
 
 namespace RdpAudit.Configurator.Forms;
 
@@ -26,6 +29,7 @@ public sealed class OverviewPage : TabPage
 	private const string AuthorUrl = "https://Deynekin.com";
 	private const string AuthorEmail = "rdp@deynekin.com";
 
+	private readonly IpcClient? _ipc;
 	private readonly Label _title;
 	private readonly Label _purpose;
 	private readonly Label _versionLabel;
@@ -40,11 +44,23 @@ public sealed class OverviewPage : TabPage
 	private readonly Button _restore;
 	private readonly Label _status;
 	private readonly OverviewProbe _probe = new();
+	private readonly SummaryCard _cardAttacksToday;
+	private readonly SummaryCard _cardBlockedIps;
+	private readonly SummaryCard _cardActiveSessions;
+	private readonly SummaryCard _cardFailedLogins;
+	private readonly SummaryCard _cardServiceHealth;
+	private readonly SummaryCard _cardDbSize;
 
-	public OverviewPage()
+	public OverviewPage() : this(null)
 	{
+	}
+
+	public OverviewPage(IpcClient? ipc)
+	{
+		_ipc = ipc;
 		Text = "Overview";
 		Padding = new Padding(12);
+		AutoScroll = true;
 
 		_title = new Label
 		{
@@ -142,13 +158,43 @@ public sealed class OverviewPage : TabPage
 		};
 		_restore.Click += async (_, _) => await OnRestoreClickAsync().ConfigureAwait(true);
 
+		_cardAttacksToday = new SummaryCard("Attacks today", "—");
+		_cardBlockedIps = new SummaryCard("Blocked IPs", "—");
+		_cardActiveSessions = new SummaryCard("Active sessions", "—");
+		_cardFailedLogins = new SummaryCard("Failed logins (24h)", "—");
+		_cardServiceHealth = new SummaryCard("Service health", "—");
+		_cardDbSize = new SummaryCard("DB size", "—");
+
+		// Summary cards row: 6 equal-width cards spanning the same width as the existing status area.
+		TableLayoutPanel cardsRow = new()
+		{
+			ColumnCount = 6,
+			RowCount = 1,
+			Width = 1100,
+			Height = 96,
+			Location = new Point(12, 278),
+			Padding = new Padding(0),
+			Margin = new Padding(0),
+		};
+		for (int i = 0; i < 6; i++)
+		{
+			cardsRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 6));
+		}
+		cardsRow.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+		cardsRow.Controls.Add(_cardAttacksToday, 0, 0);
+		cardsRow.Controls.Add(_cardBlockedIps, 1, 0);
+		cardsRow.Controls.Add(_cardActiveSessions, 2, 0);
+		cardsRow.Controls.Add(_cardFailedLogins, 3, 0);
+		cardsRow.Controls.Add(_cardServiceHealth, 4, 0);
+		cardsRow.Controls.Add(_cardDbSize, 5, 0);
+
 		_status = new Label
 		{
 			Text = "Ready",
 			AutoSize = false,
 			Width = 1100,
 			Height = 22,
-			Location = new Point(12, 276),
+			Location = new Point(12, 384),
 		};
 
 		_statusReport = new TextBox
@@ -159,8 +205,8 @@ public sealed class OverviewPage : TabPage
 			WordWrap = true,
 			Font = new Font(FontFamily.GenericMonospace, 9.5f),
 			Width = 1100,
-			Height = 432,
-			Location = new Point(12, 304),
+			Height = 332,
+			Location = new Point(12, 412),
 		};
 
 		Controls.Add(_title);
@@ -174,6 +220,7 @@ public sealed class OverviewPage : TabPage
 		Controls.Add(_refresh);
 		Controls.Add(_backup);
 		Controls.Add(_restore);
+		Controls.Add(cardsRow);
 		Controls.Add(_status);
 		Controls.Add(_statusReport);
 
@@ -219,6 +266,8 @@ public sealed class OverviewPage : TabPage
 				: snapshot.Errors.Count > 0
 					? "Issues detected — review the report below."
 					: "RdpAudit looks healthy.";
+
+			await RefreshSummaryCardsAsync(snapshot).ConfigureAwait(true);
 		}
 		catch (Exception ex)
 		{
@@ -229,6 +278,88 @@ public sealed class OverviewPage : TabPage
 		{
 			_refresh.Enabled = true;
 		}
+	}
+
+	private async Task RefreshSummaryCardsAsync(OverviewSnapshot snapshot)
+	{
+		OverviewSummaryDto? summary = null;
+		if (_ipc is not null)
+		{
+			try
+			{
+				summary = await _ipc.SendAsync<OverviewSummaryDto>(IpcCommand.GetOverviewSummary).ConfigureAwait(true);
+			}
+			catch (Exception ex)
+			{
+				_status.Text = "Overview summary unavailable: " + ex.GetType().Name;
+			}
+		}
+
+		if (summary is null)
+		{
+			_cardAttacksToday.SetValue("—", "service unreachable");
+			_cardBlockedIps.SetValue("—", "service unreachable");
+			_cardActiveSessions.SetValue("—", "service unreachable");
+			_cardFailedLogins.SetValue("—", "service unreachable");
+			_cardServiceHealth.SetValue(snapshot.ServiceStatus, snapshot.ServiceInstalled ? "installed" : "not installed");
+			_cardDbSize.SetValue(snapshot.DatabaseExists ? "see below" : "n/a", snapshot.DatabaseExists ? "snapshot pending" : "missing");
+			return;
+		}
+
+		_cardAttacksToday.SetValue(
+			summary.AttacksToday.ToString("N0", CultureInfo.InvariantCulture),
+			"alerts since 00:00 UTC");
+		_cardBlockedIps.SetValue(
+			summary.BlockedIps.ToString("N0", CultureInfo.InvariantCulture),
+			"active firewall blocks");
+		_cardActiveSessions.SetValue(
+			summary.ActiveSessions.ToString("N0", CultureInfo.InvariantCulture),
+			"RDP sessions in Active state");
+		_cardFailedLogins.SetValue(
+			summary.FailedLogins24h.ToString("N0", CultureInfo.InvariantCulture),
+			"event id 4625, last 24 hours");
+		_cardServiceHealth.SetValue(
+			string.IsNullOrEmpty(summary.ServiceHealth) ? snapshot.ServiceStatus : summary.ServiceHealth,
+			summary.Status == IpcResultStatus.Success ? "service IPC OK" : "see status report");
+		_cardDbSize.SetValue(
+			FormatBytes(summary.DatabaseSizeBytes),
+			FormatGrowth(summary));
+	}
+
+	private static string FormatBytes(long bytes)
+	{
+		if (bytes < 0)
+		{
+			return "n/a";
+		}
+		double value = bytes;
+		string[] units = { "B", "KB", "MB", "GB", "TB" };
+		int unit = 0;
+		while (value >= 1024.0 && unit < units.Length - 1)
+		{
+			value /= 1024.0;
+			unit++;
+		}
+		return string.Format(CultureInfo.InvariantCulture, "{0:0.##} {1}", value, units[unit]);
+	}
+
+	private static string FormatGrowth(OverviewSummaryDto s)
+	{
+		StringBuilder sb = new();
+		AppendGrowth(sb, "d", s.DatabaseGrowthBytesDay);
+		AppendGrowth(sb, "w", s.DatabaseGrowthBytesWeek);
+		AppendGrowth(sb, "m", s.DatabaseGrowthBytesMonth);
+		return sb.Length == 0 ? "snapshot pending (24h required)" : "growth " + sb.ToString().TrimEnd();
+	}
+
+	private static void AppendGrowth(StringBuilder sb, string label, long? bytes)
+	{
+		if (!bytes.HasValue)
+		{
+			return;
+		}
+		string sign = bytes.Value >= 0 ? "+" : "-";
+		sb.Append(label).Append(':').Append(sign).Append(FormatBytes(Math.Abs(bytes.Value))).Append(' ');
 	}
 
 	private async Task OnInstallClickAsync()
@@ -398,6 +529,67 @@ public sealed class OverviewPage : TabPage
 		finally
 		{
 			_restore.Enabled = true;
+		}
+	}
+
+	/// <summary>Compact, DPI-friendly KPI card used on the Overview tab.</summary>
+	private sealed class SummaryCard : Panel
+	{
+		private readonly Label _caption;
+		private readonly Label _value;
+		private readonly Label _subtitle;
+
+		public SummaryCard(string caption, string initialValue)
+		{
+			Dock = DockStyle.Fill;
+			Margin = new Padding(4);
+			Padding = new Padding(8);
+			BorderStyle = BorderStyle.FixedSingle;
+			BackColor = SystemColors.Window;
+
+			_caption = new Label
+			{
+				Text = caption,
+				Dock = DockStyle.Top,
+				Height = 18,
+				ForeColor = SystemColors.GrayText,
+				Font = new Font(SystemFonts.MessageBoxFont!, FontStyle.Regular),
+			};
+			_subtitle = new Label
+			{
+				Text = string.Empty,
+				Dock = DockStyle.Bottom,
+				Height = 16,
+				ForeColor = SystemColors.GrayText,
+				Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 8f, FontStyle.Regular),
+			};
+			_value = new Label
+			{
+				Text = initialValue,
+				Dock = DockStyle.Fill,
+				TextAlign = ContentAlignment.MiddleLeft,
+				Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 14f, FontStyle.Bold),
+			};
+
+			Controls.Add(_value);
+			Controls.Add(_subtitle);
+			Controls.Add(_caption);
+		}
+
+		public void SetValue(string value, string subtitle)
+		{
+			if (InvokeRequired)
+			{
+				BeginInvoke(new Action(() =>
+				{
+					_value.Text = value;
+					_subtitle.Text = subtitle;
+				}));
+				return;
+			}
+
+			_value.Text = value;
+			_subtitle.Text = subtitle;
 		}
 	}
 

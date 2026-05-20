@@ -58,4 +58,11 @@ public enum IpcCommand
 	SetLoginRuleEnabled = 35,
 	ListActiveBlocksDetailed = 36,
 	UnblockActiveBlock = 37,
+
+	// --- Stage A additions (append-only). ---
+	/// <summary>Returns the operator-facing dashboard summary (attacks today, blocked IPs, sessions, failed logins, service health, DB size and growth).</summary>
+	GetOverviewSummary = 38,
+
+	/// <summary>Returns bounded recent / full-for-IP RawEvents plus summary metadata for one IP (export-all-IP-events context action).</summary>
+	GetEventsForIp = 39,
 }

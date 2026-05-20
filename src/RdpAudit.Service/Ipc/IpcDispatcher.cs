@@ -130,6 +130,10 @@ public sealed class IpcDispatcher
 				// --- Stage 9 handlers (MikroTik integration). ---
 				IpcCommand.GetMikroTikStatus => await GetMikroTikStatusAsync(ct).ConfigureAwait(false),
 				IpcCommand.TestMikroTik => await TestMikroTikAsync(ct).ConfigureAwait(false),
+
+				// --- Stage A handlers (Overview dashboard + IP events export). ---
+				IpcCommand.GetOverviewSummary => await GetOverviewSummaryAsync(ct).ConfigureAwait(false),
+				IpcCommand.GetEventsForIp => await GetEventsForIpAsync(request.Payload, ct).ConfigureAwait(false),
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
 
@@ -1669,6 +1673,242 @@ public sealed class IpcDispatcher
 				break;
 		}
 		return result;
+	}
+
+	// ----------------------------------------------------------------------------------------------
+	// Stage A handlers — Overview dashboard summary + IP events export.
+	// ----------------------------------------------------------------------------------------------
+
+	/// <summary>Default cap on RawEvents returned by <c>GetEventsForIp</c> when no limit is supplied.</summary>
+	internal const int EventsForIpDefaultLimit = 1000;
+
+	/// <summary>Upper bound on RawEvents returned by <c>GetEventsForIp</c> regardless of caller intent.</summary>
+	internal const int EventsForIpMaxLimit = 5000;
+
+	private async Task<object?> GetOverviewSummaryAsync(CancellationToken ct)
+	{
+		DateTime nowUtc = DateTime.UtcNow;
+		DateTime dayStart = nowUtc.Date;
+		DateTime cutoff24h = nowUtc - TimeSpan.FromDays(1);
+
+		OverviewSummaryDto dto = new()
+		{
+			Status = IpcResultStatus.Success,
+			QueriedUtc = nowUtc,
+			DatabaseSizeBytes = -1,
+		};
+
+		try
+		{
+			await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+
+			dto.AttacksToday = await db.Alerts.AsNoTracking()
+				.LongCountAsync(a => a.TimeUtc >= dayStart, ct).ConfigureAwait(false);
+
+			dto.BlockedIps = await db.ActiveBlocks.AsNoTracking()
+				.Where(b => b.Status == ActiveBlockStatus.Active || b.Status == ActiveBlockStatus.Pending)
+				.Select(b => b.Ip)
+				.Distinct()
+				.LongCountAsync(ct).ConfigureAwait(false);
+
+			dto.FailedLogins24h = await db.RawEvents.AsNoTracking()
+				.LongCountAsync(
+					e => e.TimeUtc >= cutoff24h && e.EventId == AttackStatsAggregator.EventIdLogonFailure,
+					ct).ConfigureAwait(false);
+
+			List<DbProp> snapshots = await db.DbProps.AsNoTracking()
+				.Where(p => p.Key.StartsWith("OverviewDbSize:"))
+				.ToListAsync(ct).ConfigureAwait(false);
+
+			string dbPath = _options.CurrentValue.Storage.ResolveDatabasePath();
+			try
+			{
+				FileInfo fi = new(dbPath);
+				dto.DatabaseSizeBytes = fi.Exists ? fi.Length : -1;
+			}
+			catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+			{
+				_logger.LogDebug(ex, "Database file size lookup failed");
+				dto.DatabaseSizeBytes = -1;
+			}
+
+			if (dto.DatabaseSizeBytes >= 0)
+			{
+				List<DbSizeSnapshot> parsed = new();
+				foreach (DbProp prop in snapshots)
+				{
+					if (DbSizeGrowthCalculator.TryDecode(prop.Value, out DbSizeSnapshot s))
+					{
+						parsed.Add(s);
+					}
+				}
+
+				DbSizeGrowth growth = DbSizeGrowthCalculator.Compute(parsed, dto.DatabaseSizeBytes, nowUtc);
+				dto.DatabaseGrowthBytesDay = growth.GrowthBytesDay;
+				dto.DatabaseGrowthBytesWeek = growth.GrowthBytesWeek;
+				dto.DatabaseGrowthBytesMonth = growth.GrowthBytesMonth;
+			}
+
+			RdpSessionListDto? sessions = null;
+			if (OperatingSystem.IsWindows() && _sessions is not null)
+			{
+				try
+				{
+					sessions = await _sessions.ListAsync(ct).ConfigureAwait(false);
+				}
+				catch (Exception ex)
+				{
+					_logger.LogWarning(ex, "GetOverviewSummary session enumeration failed");
+				}
+			}
+			dto.ActiveSessions = sessions is null
+				? 0
+				: sessions.Sessions.Count(s => string.Equals(s.State, "Active", StringComparison.OrdinalIgnoreCase));
+
+			dto.ServiceHealth = "Running";
+			dto.Message = string.Format(CultureInfo.InvariantCulture,
+				"attacksToday={0} blockedIps={1} activeSessions={2} failed24h={3} dbBytes={4}",
+				dto.AttacksToday, dto.BlockedIps, dto.ActiveSessions, dto.FailedLogins24h, dto.DatabaseSizeBytes);
+		}
+		catch (OperationCanceledException) when (ct.IsCancellationRequested)
+		{
+			throw;
+		}
+		catch (Exception ex)
+		{
+			_logger.LogWarning(ex, "GetOverviewSummary lookup failed");
+			dto.Status = IpcResultStatus.Unavailable;
+			dto.Message = "Overview summary lookup failed — see service log.";
+		}
+
+		return dto;
+	}
+
+	private async Task<object?> GetEventsForIpAsync(string? payload, CancellationToken ct)
+	{
+		EventsForIpRequest req = ParseEventsForIpRequest(payload);
+		string ip = NormalizeAndValidateAddress(req.Ip);
+
+		int limit = req.Limit <= 0 ? EventsForIpDefaultLimit : req.Limit;
+		if (limit > EventsForIpMaxLimit)
+		{
+			limit = EventsForIpMaxLimit;
+		}
+
+		DateTime nowUtc = DateTime.UtcNow;
+		EventsForIpDto dto = new()
+		{
+			Status = IpcResultStatus.Success,
+			Ip = ip,
+			QueriedUtc = nowUtc,
+		};
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+
+		List<RawEvent> recent = await db.RawEvents.AsNoTracking()
+			.Where(e => e.SourceIp == ip)
+			.OrderByDescending(e => e.TimeUtc)
+			.Take(limit)
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		dto.TotalEvents = await db.RawEvents.AsNoTracking()
+			.LongCountAsync(e => e.SourceIp == ip, ct).ConfigureAwait(false);
+
+		if (dto.TotalEvents > 0)
+		{
+			dto.FirstSeenUtc = await db.RawEvents.AsNoTracking()
+				.Where(e => e.SourceIp == ip)
+				.MinAsync(e => (DateTime?)e.TimeUtc, ct).ConfigureAwait(false);
+			dto.LastSeenUtc = await db.RawEvents.AsNoTracking()
+				.Where(e => e.SourceIp == ip)
+				.MaxAsync(e => (DateTime?)e.TimeUtc, ct).ConfigureAwait(false);
+			dto.FailedCount = await db.RawEvents.AsNoTracking()
+				.LongCountAsync(e => e.SourceIp == ip && e.EventId == AttackStatsAggregator.EventIdLogonFailure, ct)
+				.ConfigureAwait(false);
+			dto.SuccessCount = await db.RawEvents.AsNoTracking()
+				.LongCountAsync(e => e.SourceIp == ip && e.EventId == AttackStatsAggregator.EventIdLogonSuccess, ct)
+				.ConfigureAwait(false);
+
+			if (dto.FirstSeenUtc.HasValue && dto.LastSeenUtc.HasValue)
+			{
+				dto.DurationSeconds = Math.Max(0, (long)(dto.LastSeenUtc.Value - dto.FirstSeenUtc.Value).TotalSeconds);
+			}
+		}
+
+		dto.AttemptedUserNames = await db.RawEvents.AsNoTracking()
+			.Where(e => e.SourceIp == ip && e.UserName != null && e.UserName != string.Empty)
+			.OrderByDescending(e => e.TimeUtc)
+			.Select(e => e.UserName!)
+			.Distinct()
+			.Take(20)
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		AttackStat? stat = await db.AttackStats.AsNoTracking()
+			.FirstOrDefaultAsync(s => s.Ip == ip, ct).ConfigureAwait(false);
+		if (stat is not null)
+		{
+			dto.ThreatLevel = AttackThreatScoring.ClassifyScore(stat.ThreatScore).ToString();
+			dto.IsBlocked = stat.IsBlocked;
+			dto.AttackType = (stat.Failed > 0 && stat.Successful == 0)
+				? "BruteForce"
+				: (stat.Failed > 0 && stat.Successful > 0)
+					? "BruteForceWithSuccess"
+					: "LogonActivity";
+		}
+		else
+		{
+			dto.IsBlocked = await db.ActiveBlocks.AsNoTracking()
+				.AnyAsync(b => b.Ip == ip
+					&& (b.Status == ActiveBlockStatus.Active || b.Status == ActiveBlockStatus.Pending), ct)
+				.ConfigureAwait(false);
+		}
+
+		foreach (RawEvent ev in recent)
+		{
+			dto.Events.Add(new IpEventEntryDto
+			{
+				Id = ev.Id,
+				TimeUtc = ev.TimeUtc,
+				EventId = ev.EventId,
+				Channel = ev.Channel,
+				UserName = ev.UserName,
+				Domain = ev.Domain,
+				LogonType = ev.LogonType,
+				AuthPackage = ev.AuthPackage,
+				ProcessName = ev.ProcessName,
+				Status = ev.Status,
+			});
+		}
+
+		dto.Message = string.Format(CultureInfo.InvariantCulture,
+			"events for {0}: returned={1} total={2}",
+			ip, recent.Count, dto.TotalEvents);
+		return dto;
+	}
+
+	private static EventsForIpRequest ParseEventsForIpRequest(string? payload)
+	{
+		if (string.IsNullOrWhiteSpace(payload))
+		{
+			throw new IpcException("GetEventsForIp requires a JSON payload with an Ip field.");
+		}
+
+		EventsForIpRequest? parsed;
+		try
+		{
+			parsed = JsonSerializer.Deserialize<EventsForIpRequest>(payload, JsonOptions.Default);
+		}
+		catch (JsonException ex)
+		{
+			throw new IpcException("GetEventsForIp payload is not valid JSON: " + ex.Message);
+		}
+
+		if (parsed is null || string.IsNullOrWhiteSpace(parsed.Ip))
+		{
+			throw new IpcException("GetEventsForIp requires an Ip field.");
+		}
+
+		return parsed;
 	}
 
 	// ----------------------------------------------------------------------------------------------

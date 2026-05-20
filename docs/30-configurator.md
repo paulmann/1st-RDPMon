@@ -191,3 +191,74 @@ No new IPC ordinals are introduced in Stage 6B.
 - All IPC calls are awaited with `ConfigureAwait(true)` so continuations land on the UI thread.
 - `_statusLabel.Text` updates honour `InvokeRequired` and marshal via `BeginInvoke`.
 - The UI never calls `.Result` / `.Wait()`.
+
+## Stage A — Overview dashboard, Firewall layout, MikroTik instructions, Export All IP Events
+
+### Overview dashboard cards
+
+The Overview tab now hosts a row of six summary cards above the existing status report:
+
+| Card | Source | Notes |
+|------|--------|-------|
+| Attacks today | `Alerts.Count where TimeUtc >= utc-day-start` via `GetOverviewSummary`. | Alerts of any severity / rule count; the Overview tab reports incident pressure, not classification. |
+| Blocked IPs | `ActiveBlocks` rows in `Active` or `Pending` state, distinct by IP. | Reflects what the firewall provider has installed right now, not historical totals. |
+| Active sessions | `RdpSessionListDto` filtered by `state == Active`. | Returns `0` on non-Windows hosts (no session manager wired up). |
+| Failed logins (24h) | `RawEvents.Count where EventId = 4625 and TimeUtc >= now - 24h`. | Matches the Attack Statistics page's failure tally for the same window. |
+| Service health | Service IPC status (`"Running"` when the IPC handler responds) combined with the existing `ServiceController` probe. | Highlights `Stopped` / `not installed` paths transparently. |
+| DB size | Current SQLite file length (`Storage.DatabasePath`). | Sub-title reports growth versus the closest snapshots in the day / week / month windows (`+1.2 MB d:+512 KB w:+8.5 MB`). |
+
+The card row refreshes on tab load and whenever `Refresh status` / `Install` / `Backup Settings`
+finish. Errors are actionable — a service-unreachable refresh swaps the values for `—` and the card
+sub-title for `service unreachable`, while the existing status report remains the source of truth for
+the detailed install / backup workflow.
+
+DB-size snapshots are written by `Service/Workers/MaintenanceWorker.CaptureDbSizeSnapshotAsync` on
+each daily maintenance pass into the existing `DbProps` table under the `OverviewDbSize:<yyyymmdd>`
+key. Growth windows use `Core/Util/DbSizeGrowthCalculator.Compute` to pick the snapshot closest to
+each target lookback (1 / 7 / 30 days) within documented caps (2 / 10 / 45 days). Until snapshots
+accrue, growth lines render `snapshot pending (24h required)` — the current size is still shown so
+operators can sanity-check the file at any time.
+
+### Firewall layout (Stage A fix)
+
+The Firewall tab now uses a `TableLayoutPanel` root with auto-sized provider / policy rows and a
+filling inner-tab row. This guarantees the auto-block policy controls are never overlapped by the
+Blocklist / Whitelist / Login trip-wires / Active blocks tabs at the screenshot size and at high
+DPI. The `Default block duration` controls live in a single compact `FlowLayoutPanel` so the
+days / hours / minutes numeric inputs stay grouped at a usable density (`[d] [h] [m]`) regardless
+of the parent column width.
+
+### MikroTik tab — Copy commands
+
+The MikroTik tab carries a read-only monospace block with the full RouterOS v7 shell setup bundle:
+least-privilege group + user, REST endpoint enable (`www-ssl` / `www`), allowed-address restriction
+to the RdpAudit host, optional TLS certificate notes, and verification queries
+(`/ip/service/print where name~"www"`, `/user/print where name=rdpaudit`,
+`/ip/firewall/filter/print where comment~"^RdpAudit"`). A `Copy commands` button copies the bundle
+verbatim to the clipboard and reports the result in the status label (`Copied RouterOS setup
+commands to clipboard (N chars).`). Operators substitute `<RDPAUDIT-HOST-IP>` and
+`<STRONG-PASSWORD>` before pasting into the RouterOS console.
+
+### Export All IP Events
+
+Both Live Events and Attack Statistics context menus now expose an `Export All IP Events` submenu
+with `JSON…`, `TXT…`, `Markdown…`, and `CSV…` items. The submenu enables when the right-clicked
+row carries a value that parses via `IPAddress.TryParse`.
+
+Selecting a format triggers:
+
+1. `GetEventsForIp` IPC (ordinal 39) — service-side bounded query returning recent / full-for-IP
+   RawEvents (default cap 1000, ceiling 5000) plus summary metadata (IP, attack type, first / last
+   UTC, failed / success counts, attempted usernames, duration, threat level, block status).
+2. `Core/Events/IpEventsExportFormatter.Format` — renders JSON / TXT / Markdown / CSV.
+   - JSON / TXT / Markdown include the summary header.
+   - CSV is a clean tabular event stream (no summary) with a stable column order ready for Excel.
+   - Embedded tabs / CR / LF are sanitised inside TXT and CSV so a pasted row never breaks the structure.
+3. `SaveFileDialog` with a sensible default filename
+   (`rdpaudit-events-<ip>-<yyyymmdd-hhmmss>.<ext>`) and the matching filter / extension.
+4. UTF-8 write (CSV uses UTF-8 BOM so Excel auto-detects the encoding; other formats are
+   plain UTF-8).
+5. Status line: `Export OK (JSON): wrote N chars to <path>.` or a controlled failure message.
+
+The Configurator never writes to an arbitrary path — exports only happen after the operator confirms
+a path in `SaveFileDialog`. The runner lives in `Configurator/Services/IpEventsExportRunner.cs`.

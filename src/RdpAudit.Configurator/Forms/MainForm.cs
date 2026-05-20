@@ -31,7 +31,7 @@ public sealed class MainForm : Form
 		StartPosition = FormStartPosition.CenterScreen;
 
 		_tabs = new TabControl { Dock = DockStyle.Fill };
-		_tabs.TabPages.Add(new OverviewPage { Text = "Overview" });
+		_tabs.TabPages.Add(new OverviewPage(_ipc) { Text = "Overview" });
 		_tabs.TabPages.Add(new PrerequisitesPage { Text = "Prerequisites" });
 		_tabs.TabPages.Add(new AuditPolicyPage { Text = "Audit Policy" });
 		_tabs.TabPages.Add(new ServicePage(_ipc) { Text = "Service" });

@@ -17,6 +17,8 @@ using System.Globalization;
 using System.Runtime.Versioning;
 using System.Text.Json;
 using RdpAudit.Configurator.Ipc;
+using RdpAudit.Configurator.Services;
+using RdpAudit.Core.Events;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
 using RdpAudit.Core.Models;
@@ -75,6 +77,7 @@ public sealed class AttackStatisticsPage : TabPage
 	private readonly ToolStripMenuItem _menuCopyIp;
 	private readonly ToolStripMenuItem _menuBlockIp;
 	private readonly ToolStripMenuItem _menuWhitelistIp;
+	private readonly ToolStripMenuItem _menuExportEvents;
 
 	private AttackStatRow? _menuRow;
 
@@ -192,12 +195,15 @@ public sealed class AttackStatisticsPage : TabPage
 		_menuCopyIp = new ToolStripMenuItem("Copy IP", null, (_, _) => OnCopyIp());
 		_menuBlockIp = new ToolStripMenuItem("Block IP…", null, async (_, _) => await OnBlockIpAsync().ConfigureAwait(true));
 		_menuWhitelistIp = new ToolStripMenuItem("Whitelist IP…", null, async (_, _) => await OnWhitelistIpAsync().ConfigureAwait(true));
+		_menuExportEvents = BuildExportSubmenu();
 		_menu = new ContextMenuStrip();
 		_menu.Items.Add(_menuCopyDetails);
 		_menu.Items.Add(_menuCopyIp);
 		_menu.Items.Add(new ToolStripSeparator());
 		_menu.Items.Add(_menuBlockIp);
 		_menu.Items.Add(_menuWhitelistIp);
+		_menu.Items.Add(new ToolStripSeparator());
+		_menu.Items.Add(_menuExportEvents);
 		_menu.Opening += OnMenuOpening;
 		_grid.ContextMenuStrip = _menu;
 
@@ -526,10 +532,12 @@ public sealed class AttackStatisticsPage : TabPage
 	private void OnMenuOpening(object? sender, CancelEventArgs e)
 	{
 		bool hasRow = _menuRow is not null;
+		bool hasValidIp = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip) && AddressListFilter.IsValidIp(_menuRow.Ip);
 		_menuCopyDetails.Enabled = hasRow;
 		_menuCopyIp.Enabled = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip);
 		_menuBlockIp.Enabled = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip) && !_menuRow.IsBlocked;
 		_menuWhitelistIp.Enabled = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip);
+		_menuExportEvents.Enabled = hasValidIp;
 	}
 
 	private void OnCopyDetails()
@@ -642,6 +650,31 @@ public sealed class AttackStatisticsPage : TabPage
 	// ---------------------------------------------------------------------------------------------
 	// Helpers
 	// ---------------------------------------------------------------------------------------------
+
+	// ---------------------------------------------------------------------------------------------
+	// Export All IP Events (Stage A) — submenu wired into the attack stats context menu.
+	// ---------------------------------------------------------------------------------------------
+
+	private ToolStripMenuItem BuildExportSubmenu()
+	{
+		ToolStripMenuItem root = new("Export All IP Events");
+		root.DropDownItems.Add(new ToolStripMenuItem("JSON…", null, async (_, _) => await OnExportEventsAsync(IpEventsExportFormat.Json).ConfigureAwait(true)));
+		root.DropDownItems.Add(new ToolStripMenuItem("TXT…", null, async (_, _) => await OnExportEventsAsync(IpEventsExportFormat.Txt).ConfigureAwait(true)));
+		root.DropDownItems.Add(new ToolStripMenuItem("Markdown…", null, async (_, _) => await OnExportEventsAsync(IpEventsExportFormat.Markdown).ConfigureAwait(true)));
+		root.DropDownItems.Add(new ToolStripMenuItem("CSV…", null, async (_, _) => await OnExportEventsAsync(IpEventsExportFormat.Csv).ConfigureAwait(true)));
+		return root;
+	}
+
+	private async Task OnExportEventsAsync(IpEventsExportFormat format)
+	{
+		if (_menuRow is null || string.IsNullOrEmpty(_menuRow.Ip) || !AddressListFilter.IsValidIp(_menuRow.Ip))
+		{
+			SetStatus("Export aborted: no valid IP in the selected row.");
+			return;
+		}
+
+		await IpEventsExportRunner.RunAsync(_ipc, _menuRow.Ip, format, SetStatus).ConfigureAwait(true);
+	}
 
 	private async Task<bool> SendMutationAsync(IpcCommand command, object payload)
 	{
