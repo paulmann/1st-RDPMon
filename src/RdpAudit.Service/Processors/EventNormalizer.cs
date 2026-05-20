@@ -24,6 +24,10 @@ public sealed class EventNormalizer
 {
 	internal const int MaxDetails = 65_536;
 
+	/// <summary>TS-RCM Operational channel name. Stage IP-D promotes this constant out of the resolver
+	/// so the normalizer can apply 1149-specific Param1/Param2 logic without re-parsing the payload.</summary>
+	internal const string TsRcmChannel = "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational";
+
 	private readonly SessionCorrelationCache _correlation;
 
 	public EventNormalizer(SessionCorrelationCache correlation)
@@ -43,6 +47,25 @@ public sealed class EventNormalizer
 		string? domain = EventXmlParser.GetData(doc, "TargetDomainName")
 			?? EventXmlParser.GetData(doc, "SubjectDomainName")
 			?? EventXmlParser.GetData(doc, "Domain");
+
+		// Stage IP-D: TS-RCM 1149 carries its identity in UserData/EventXML/Param1..Param3 — there is
+		// no TargetUserName / TargetDomainName, so without this fallback the connection-fact and
+		// correlation layers see a userless event and lose the brute-force attribution. Param3 is the
+		// source IP (handled by PerEventIpResolver); we still pull Param1 (user) and Param2 (domain)
+		// here so RawEvent.UserName / Domain are populated when standard fields are absent. Param2 is
+		// often empty for stand-alone hosts — treat blank as "no domain" rather than overwriting.
+		if (IsTsRcm1149(dto.Channel, dto.EventId))
+		{
+			if (string.IsNullOrEmpty(userName))
+			{
+				userName = EventXmlParser.GetData(doc, "Param1");
+			}
+
+			if (string.IsNullOrEmpty(domain))
+			{
+				domain = EventXmlParser.GetData(doc, "Param2");
+			}
+		}
 
 		string? logonId = EventXmlParser.GetData(doc, "TargetLogonId") ?? EventXmlParser.GetData(doc, "SubjectLogonId");
 		int? sessionId = EventXmlParser.GetInt(doc, "SessionID") ?? EventXmlParser.GetInt(doc, "SessionId");
@@ -156,6 +179,12 @@ public sealed class EventNormalizer
 			: string.Format(CultureInfo.InvariantCulture, "{{\"truncated\":true,\"originalLength\":{0}}}", raw.Length);
 	}
 
+	private static bool IsTsRcm1149(string channel, int eventId)
+	{
+		return eventId == 1149
+			&& string.Equals(channel, TsRcmChannel, StringComparison.OrdinalIgnoreCase);
+	}
+
 	private static Dictionary<string, string?> ExtractAllEventData(XmlDocument? doc)
 	{
 		Dictionary<string, string?> map = new(StringComparer.OrdinalIgnoreCase);
@@ -165,21 +194,56 @@ public sealed class EventNormalizer
 		}
 
 		XmlNodeList? nodes = doc.SelectNodes("//*[local-name()='EventData']/*[local-name()='Data']");
-		if (nodes is null)
+		if (nodes is not null)
 		{
-			return map;
+			foreach (XmlNode node in nodes)
+			{
+				string? key = node.Attributes?["Name"]?.Value;
+				if (string.IsNullOrEmpty(key))
+				{
+					continue;
+				}
+
+				string? value = node.InnerText?.Trim();
+				map[key] = value;
+			}
 		}
 
-		foreach (XmlNode node in nodes)
+		// Stage IP-D: also flatten UserData/EventXML children (TS-RCM 1149, TS-LSM 21/24/25, RdpCoreTS).
+		// These events do NOT use EventData/Data — without this pass the Details JSON would be empty
+		// for the highest-signal RDP-specific events and downstream rules would have no payload to
+		// inspect. We skip the EventXML wrapper itself and any namespace-prefix-only element with no
+		// inner text.
+		XmlNodeList? userDataLeaves = doc.SelectNodes("//*[local-name()='UserData']//*");
+		if (userDataLeaves is not null)
 		{
-			string? key = node.Attributes?["Name"]?.Value;
-			if (string.IsNullOrEmpty(key))
+			foreach (XmlNode node in userDataLeaves)
 			{
-				continue;
-			}
+				if (node.HasChildNodes && node.FirstChild?.NodeType == XmlNodeType.Element)
+				{
+					// Skip container nodes like EventXML — only leaf elements carry text.
+					continue;
+				}
 
-			string? value = node.InnerText?.Trim();
-			map[key] = value;
+				string key = node.LocalName;
+				if (string.IsNullOrEmpty(key))
+				{
+					continue;
+				}
+
+				string? value = node.InnerText?.Trim();
+				if (string.IsNullOrEmpty(value))
+				{
+					continue;
+				}
+
+				// Do not overwrite a value that was already captured from EventData/Data — the structured
+				// EventData form is authoritative whenever both schemas appear in a single payload.
+				if (!map.ContainsKey(key))
+				{
+					map[key] = value;
+				}
+			}
 		}
 
 		return map;

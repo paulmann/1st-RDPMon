@@ -53,6 +53,29 @@ public sealed class RdpSessionDto
 	/// <summary>True when the session is in a disconnected state and may be reconnected.</summary>
 	[Key(11)]
 	public bool IsDisconnected { get; set; }
+
+	// --- Stage IP-D additions (append-only). Historical context derived from RdpConnectionFacts.
+	// These never overwrite live data and are populated only when a matching fact exists.
+
+	/// <summary>Earliest <c>FirstSeenUtc</c> across matching connection facts; null when none exist.</summary>
+	[Key(12)]
+	public DateTime? HistoricalFirstSeenUtc { get; set; }
+
+	/// <summary>Latest <c>LastSeenUtc</c> across matching connection facts; null when none exist.</summary>
+	[Key(13)]
+	public DateTime? HistoricalLastSeenUtc { get; set; }
+
+	/// <summary>Sum of failed logons across matching connection facts; zero when no facts exist.</summary>
+	[Key(14)]
+	public long HistoricalFailedLogons { get; set; }
+
+	/// <summary>Sum of successful logons across matching connection facts; zero when no facts exist.</summary>
+	[Key(15)]
+	public long HistoricalSuccessfulLogons { get; set; }
+
+	/// <summary>Comma-separated, deduplicated list of usernames attempted from this IP across matching facts. Bounded width.</summary>
+	[Key(16)]
+	public string? HistoricalUserNamesAttempted { get; set; }
 }
 
 /// <summary>List wrapper for <c>ListRdpSessions</c> so the response carries an operation status.</summary>

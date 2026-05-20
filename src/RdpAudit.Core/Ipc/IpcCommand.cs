@@ -65,4 +65,12 @@ public enum IpcCommand
 
 	/// <summary>Returns bounded recent / full-for-IP RawEvents plus summary metadata for one IP (export-all-IP-events context action).</summary>
 	GetEventsForIp = 39,
+
+	// --- Stage IP-D additions (append-only). ---
+
+	/// <summary>Returns the most recent connection facts (LastSeenUtc desc), bounded by a server-clamped limit and filtered by optional IP / User substrings.</summary>
+	ListConnectionFacts = 40,
+
+	/// <summary>Returns bounded connection facts for a single IP plus aggregate counters (failed/successful logons, first/last seen, active flag).</summary>
+	GetConnectionFactsForIp = 41,
 }
