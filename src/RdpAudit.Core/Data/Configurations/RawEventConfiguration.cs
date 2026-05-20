@@ -23,6 +23,7 @@ public sealed class RawEventConfiguration : IEntityTypeConfiguration<RawEvent>
 		b.Property(e => e.UserName).HasMaxLength(256);
 		b.Property(e => e.Domain).HasMaxLength(256);
 		b.Property(e => e.SourceIp).HasMaxLength(45);
+		b.Property(e => e.SourceIpDerived).HasDefaultValue(false);
 		b.Property(e => e.LogonId).HasMaxLength(32);
 		b.Property(e => e.AuthPackage).HasMaxLength(64);
 		b.Property(e => e.Status).HasMaxLength(64);
