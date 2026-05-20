@@ -41,6 +41,8 @@ public sealed class AuditDbContext : DbContext
 
 	public DbSet<AttackStat> AttackStats => Set<AttackStat>();
 
+	public DbSet<SessionIpCorrelation> SessionIpCorrelations => Set<SessionIpCorrelation>();
+
 	protected override void OnModelCreating(ModelBuilder modelBuilder)
 	{
 		base.OnModelCreating(modelBuilder);

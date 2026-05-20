@@ -140,6 +140,7 @@ public static class Program
 		services.AddSingleton<EventChannel>();
 		services.AddSingleton<ServiceMetrics>();
 		services.AddSingleton<SessionCorrelationCache>();
+		services.AddSingleton<SessionIpCorrelationUpserter>();
 		services.AddSingleton<EventNormalizer>();
 		services.AddSingleton<DbAlertContext>();
 		services.AddSingleton<IAlertContext>(sp => sp.GetRequiredService<DbAlertContext>());
@@ -173,6 +174,7 @@ public static class Program
 
 		services.AddHostedService<EventCollectorWorker>();
 		services.AddHostedService<EventProcessorWorker>();
+		services.AddHostedService<SessionCorrelationHydrationWorker>();
 		services.AddHostedService<AlertWorker>();
 		services.AddHostedService<IpcServerWorker>();
 		services.AddHostedService<MaintenanceWorker>();

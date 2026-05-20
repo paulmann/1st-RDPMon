@@ -117,6 +117,66 @@ public sealed class SessionCorrelationCache
 	/// <summary>Total entry count across all indexes. Intended for tests / metrics.</summary>
 	internal int Count => _byLogonId.Count + _bySessionUser.Count + _byUser.Count;
 
+	/// <summary>True once <see cref="HydrateFromAsync"/> has populated the cache (whether it loaded
+	/// any rows or not). Used by the warmup worker to make hydration a one-shot operation per
+	/// process.</summary>
+	public bool IsHydrated { get; private set; }
+
+	/// <summary>
+	/// Seed the cache from persisted correlation rows. Caller must restrict the query to the
+	/// retention window relevant to the active TTL — typically the last 24h. The method is async
+	/// so the caller (a background warmup) can stream rows from EF without blocking startup.
+	/// Subsequent calls update <see cref="IsHydrated"/> but never overwrite a fresher live
+	/// observation already in the indexes.
+	/// </summary>
+	public async Task HydrateFromAsync(
+		IAsyncEnumerable<HydrationRow> rows,
+		CancellationToken ct)
+	{
+		await foreach (HydrationRow row in rows.WithCancellation(ct).ConfigureAwait(false))
+		{
+			if (string.IsNullOrWhiteSpace(row.Ip))
+			{
+				continue;
+			}
+
+			Entry incoming = new(row.Ip, row.LastSeenUtc);
+			if (!string.IsNullOrWhiteSpace(row.LogonId))
+			{
+				string key = NormalizeLogonId(row.LogonId!);
+				_byLogonId.AddOrUpdate(key, incoming, (_, existing) =>
+					existing.ObservedUtc >= incoming.ObservedUtc ? existing : incoming);
+			}
+
+			if (row.WtsSessionId is int sid && !string.IsNullOrWhiteSpace(row.UserName))
+			{
+				string key = SessionUserKey(sid, row.UserName!);
+				_bySessionUser.AddOrUpdate(key, incoming, (_, existing) =>
+					existing.ObservedUtc >= incoming.ObservedUtc ? existing : incoming);
+			}
+
+			if (!string.IsNullOrWhiteSpace(row.UserName))
+			{
+				string key = row.UserName!.Trim();
+				_byUser.AddOrUpdate(key, incoming, (_, existing) =>
+					existing.ObservedUtc >= incoming.ObservedUtc ? existing : incoming);
+			}
+		}
+
+		EnforceCapacityIfNeeded(_byLogonId);
+		EnforceCapacityIfNeeded(_bySessionUser);
+		EnforceCapacityIfNeeded(_byUser);
+		IsHydrated = true;
+	}
+
+	/// <summary>One row of correlation data shaped for cache hydration.</summary>
+	public readonly record struct HydrationRow(
+		string? LogonId,
+		int? WtsSessionId,
+		string? UserName,
+		string Ip,
+		DateTime LastSeenUtc);
+
 	private bool TryReadFresh(ConcurrentDictionary<string, Entry> map, string? key, DateTime now, out string? ip)
 	{
 		ip = null;
