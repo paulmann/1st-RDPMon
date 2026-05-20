@@ -1000,39 +1000,99 @@ public sealed class IpcDispatcher
 
 		RdpSessionListDto list = await _sessions.ListAsync(ct).ConfigureAwait(false);
 
-		// Best-effort source IP correlation from the RawEvents table for active sessions.
+		// Stage IP-B: resolve missing ClientAddress from the durable SessionIpCorrelations table.
+		// Preference order per session: (WtsSessionId + UserName) → UserName fallback. We never
+		// fall back to a 24h RawEvents heuristic any more — the dedicated correlation table
+		// already carries the deterministic facts the processor persists.
 		if (list.Sessions.Count > 0)
 		{
 			await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-			DateTime cutoff = DateTime.UtcNow - TimeSpan.FromDays(1);
-			Dictionary<string, string> userToIp = new(StringComparer.OrdinalIgnoreCase);
-			List<(string User, string? Ip)> recent = await db.RawEvents
-				.AsNoTracking()
-				.Where(e => e.TimeUtc >= cutoff && e.UserName != null && e.SourceIp != null && e.SourceIp != string.Empty)
-				.OrderByDescending(e => e.TimeUtc)
-				.Take(2000)
-				.Select(e => new ValueTuple<string, string?>(e.UserName!, e.SourceIp))
-				.ToListAsync(ct).ConfigureAwait(false);
-			foreach ((string user, string? ip) in recent)
-			{
-				if (!string.IsNullOrEmpty(ip) && !userToIp.ContainsKey(user))
-				{
-					userToIp[user] = ip!;
-				}
-			}
+			await EnrichSessionsFromCorrelationsAsync(db, list.Sessions, ct).ConfigureAwait(false);
+		}
 
-			foreach (RdpSessionDto session in list.Sessions)
+		return list;
+	}
+
+	/// <summary>Stage IP-B helper: enriches the supplied sessions with <c>ClientAddress</c> values
+	/// resolved from <see cref="SessionIpCorrelation"/> rows. Exposed internally for unit testing
+	/// without needing a Windows <c>RdpSessionManager</c>.</summary>
+	internal static async Task EnrichSessionsFromCorrelationsAsync(
+		AuditDbContext db,
+		IList<RdpSessionDto> sessions,
+		CancellationToken ct)
+	{
+		List<RdpSessionDto> needIp = new(sessions.Count);
+		foreach (RdpSessionDto s in sessions)
+		{
+			if (string.IsNullOrEmpty(s.ClientAddress) && !string.IsNullOrEmpty(s.UserName))
 			{
-				if (string.IsNullOrEmpty(session.ClientAddress)
-					&& !string.IsNullOrEmpty(session.UserName)
-					&& userToIp.TryGetValue(session.UserName, out string? ip))
+				needIp.Add(s);
+			}
+		}
+
+		if (needIp.Count == 0)
+		{
+			return;
+		}
+
+		HashSet<int> wtsIds = new();
+		HashSet<string> usernames = new(StringComparer.OrdinalIgnoreCase);
+		foreach (RdpSessionDto s in needIp)
+		{
+			wtsIds.Add(s.SessionId);
+			usernames.Add(s.UserName);
+		}
+
+		List<SessionIpCorrelation> wtsMatches = await db.SessionIpCorrelations
+			.AsNoTracking()
+			.Where(r => r.WtsSessionId != null
+				&& wtsIds.Contains(r.WtsSessionId.Value)
+				&& r.UserName != null
+				&& usernames.Contains(r.UserName))
+			.OrderByDescending(r => r.LastSeenUtc)
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		Dictionary<(int Wts, string User), string> wtsUserToIp = new();
+		foreach (SessionIpCorrelation row in wtsMatches)
+		{
+			if (row.WtsSessionId is int wts && row.UserName is string u)
+			{
+				(int, string) key = (wts, u.Trim());
+				if (!wtsUserToIp.ContainsKey(key))
 				{
-					session.ClientAddress = ip;
+					wtsUserToIp[key] = row.Ip;
 				}
 			}
 		}
 
-		return list;
+		List<SessionIpCorrelation> userMatches = await db.SessionIpCorrelations
+			.AsNoTracking()
+			.Where(r => r.UserName != null && usernames.Contains(r.UserName))
+			.OrderByDescending(r => r.LastSeenUtc)
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		Dictionary<string, string> userToIp = new(StringComparer.OrdinalIgnoreCase);
+		foreach (SessionIpCorrelation row in userMatches)
+		{
+			if (row.UserName is string u && !userToIp.ContainsKey(u.Trim()))
+			{
+				userToIp[u.Trim()] = row.Ip;
+			}
+		}
+
+		foreach (RdpSessionDto session in needIp)
+		{
+			if (wtsUserToIp.TryGetValue((session.SessionId, session.UserName.Trim()), out string? ip))
+			{
+				session.ClientAddress = ip;
+				continue;
+			}
+
+			if (userToIp.TryGetValue(session.UserName.Trim(), out ip))
+			{
+				session.ClientAddress = ip;
+			}
+		}
 	}
 
 	private async Task<object?> DisconnectSessionAsync(string? payload, CancellationToken ct)

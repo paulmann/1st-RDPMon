@@ -38,6 +38,7 @@ public sealed class EventProcessorWorker : BackgroundService
 	private readonly EventChannel _channel;
 	private readonly IDbContextFactory<AuditDbContext> _factory;
 	private readonly EventNormalizer _normalizer;
+	private readonly SessionIpCorrelationUpserter _correlationUpserter;
 	private readonly ILogger<EventProcessorWorker> _logger;
 	private readonly IOptionsMonitor<RdpAuditOptions> _options;
 	private int _consecutiveFailures;
@@ -46,12 +47,14 @@ public sealed class EventProcessorWorker : BackgroundService
 		EventChannel channel,
 		IDbContextFactory<AuditDbContext> factory,
 		EventNormalizer normalizer,
+		SessionIpCorrelationUpserter correlationUpserter,
 		ILogger<EventProcessorWorker> logger,
 		IOptionsMonitor<RdpAuditOptions> options)
 	{
 		_channel = channel;
 		_factory = factory;
 		_normalizer = normalizer;
+		_correlationUpserter = correlationUpserter;
 		_logger = logger;
 		_options = options;
 	}
@@ -221,6 +224,28 @@ public sealed class EventProcessorWorker : BackgroundService
 			}
 
 			db.RawEvents.AddRange(entities);
+
+			List<SessionIpCorrelationCandidate> candidates = new(entities.Count);
+			foreach (RawEvent entity in entities)
+			{
+				if (entity.SourceIpDerived || string.IsNullOrEmpty(entity.SourceIp))
+				{
+					continue;
+				}
+
+				candidates.Add(new SessionIpCorrelationCandidate(
+					LogonId: entity.LogonId,
+					WtsSessionId: entity.SessionId,
+					UserName: entity.UserName,
+					Domain: entity.Domain,
+					Ip: entity.SourceIp!,
+					ObservedUtc: entity.TimeUtc,
+					EventId: entity.EventId,
+					IsDirectObservation: true));
+			}
+
+			await _correlationUpserter.ApplyAsync(db, candidates, ct).ConfigureAwait(false);
+
 			await db.SaveChangesAsync(ct).ConfigureAwait(false);
 			await tx.CommitAsync(ct).ConfigureAwait(false);
 		}

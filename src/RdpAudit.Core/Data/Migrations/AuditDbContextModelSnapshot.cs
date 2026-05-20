@@ -532,6 +532,62 @@ namespace RdpAudit.Core.Data.Migrations
 					b.ToTable("Sessions", (string)null);
 				});
 
+			modelBuilder.Entity("RdpAudit.Core.Models.SessionIpCorrelation", b =>
+				{
+					b.Property<long>("Id")
+						.ValueGeneratedOnAdd()
+						.HasColumnType("INTEGER");
+
+					b.Property<string>("Domain")
+						.HasMaxLength(256)
+						.HasColumnType("TEXT");
+
+					b.Property<DateTime>("FirstSeenUtc")
+						.HasColumnType("TEXT");
+
+					b.Property<string>("Ip")
+						.IsRequired()
+						.HasMaxLength(45)
+						.HasColumnType("TEXT");
+
+					b.Property<bool>("IsDirectObservation")
+						.ValueGeneratedOnAdd()
+						.HasColumnType("INTEGER")
+						.HasDefaultValue(false);
+
+					b.Property<DateTime>("LastSeenUtc")
+						.HasColumnType("TEXT");
+
+					b.Property<string>("LogonId")
+						.HasMaxLength(32)
+						.HasColumnType("TEXT");
+
+					b.Property<string>("ObservedEventIds")
+						.HasMaxLength(128)
+						.HasColumnType("TEXT");
+
+					b.Property<string>("UserName")
+						.HasMaxLength(256)
+						.HasColumnType("TEXT");
+
+					b.Property<int?>("WtsSessionId")
+						.HasColumnType("INTEGER");
+
+					b.HasKey("Id");
+
+					b.HasIndex("LastSeenUtc");
+
+					b.HasIndex("LogonId");
+
+					b.HasIndex("Ip", "LastSeenUtc");
+
+					b.HasIndex("UserName", "LastSeenUtc");
+
+					b.HasIndex("WtsSessionId", "UserName");
+
+					b.ToTable("SessionIpCorrelations", (string)null);
+				});
+
 			modelBuilder.Entity("RdpAudit.Core.Models.WhitelistEntry", b =>
 				{
 					b.Property<long>("Id")
