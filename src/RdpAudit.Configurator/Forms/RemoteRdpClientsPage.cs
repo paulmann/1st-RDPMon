@@ -40,6 +40,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 	private readonly ShadowLauncher _launcher = new();
 	private readonly LocalRdpSessionProvider _localSessions = new();
 	private readonly LocalShadowPolicyReader _localShadowPolicy = new();
+	private readonly LocalSessionEnrichmentProvider _localEnrichment = new();
 
 	private readonly DataGridView _grid;
 	private readonly BindingList<SessionRow> _binding = new();
@@ -471,10 +472,10 @@ public sealed class RemoteRdpClientsPage : TabPage
 
 			_allSessions.Clear();
 			_allSessions.AddRange(snapshot.Sessions);
-			ApplyLocalFilter();
 
 			if (snapshot.Source == RdpSessionListSource.ServiceIpc)
 			{
+				ApplyLocalFilter();
 				SetStatus(string.Format(CultureInfo.InvariantCulture,
 					"Sessions refresh OK (service IPC). count={0}, active={1}, disconnected={2}.",
 					_allSessions.Count,
@@ -483,14 +484,24 @@ public sealed class RemoteRdpClientsPage : TabPage
 			}
 			else
 			{
+				LocalSessionEnrichmentReport enrichment = await _localEnrichment
+					.EnrichAsync(_allSessions)
+					.ConfigureAwait(true);
+				ApplyLocalFilter();
+
+				string enrichmentStatus = enrichment.Available
+					? "historical enrichment: " + enrichment.Status
+					: "historical enrichment unavailable: " + enrichment.Status;
+
 				SetStatus(string.Format(CultureInfo.InvariantCulture,
-					"Source: local session fallback ({4}); historical enrichment unavailable. "
+					"Source: local session fallback ({4}); {5}. "
 					+ "count={0}, active={1}, disconnected={2}. Service IPC: {3}.",
 					_allSessions.Count,
 					_allSessions.Count(s => s.IsActive),
 					_allSessions.Count(s => s.IsDisconnected),
 					snapshot.IpcDetail ?? "unreachable",
-					snapshot.LocalDetail ?? "unspecified mode"));
+					snapshot.LocalDetail ?? "unspecified mode",
+					enrichmentStatus));
 			}
 		}
 		catch (Exception ex)
