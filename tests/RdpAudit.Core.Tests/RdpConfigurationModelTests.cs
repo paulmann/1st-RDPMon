@@ -78,4 +78,25 @@ public class RdpConfigurationModelTests
 		// fallback when the registry does not configure a port; verify the literal stays at 3389.
 		Assert.Equal(3389, RdpConfigurationModel.DefaultRdpPort);
 	}
+
+	[Theory]
+	[InlineData(3390)]
+	[InlineData(40000)]
+	[InlineData(13389)]
+	[InlineData(65535)]
+	public void IsValidPort_AcceptsCustomNonDefaultPorts(int customPort)
+	{
+		// Guards against any regression that would treat 3389 as the only acceptable RDP port.
+		Assert.True(RdpConfigurationModel.IsValidPort(customPort));
+	}
+
+	[Theory]
+	[InlineData(0)]
+	[InlineData(-5)]
+	[InlineData(70000)]
+	public void IsValidPort_RejectsOutOfRangePorts(int badPort)
+	{
+		// Out-of-range values must surface as invalid so the reader can fall back to the default.
+		Assert.False(RdpConfigurationModel.IsValidPort(badPort));
+	}
 }
