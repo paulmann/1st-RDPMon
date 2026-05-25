@@ -82,6 +82,13 @@ public sealed class RdpConfigurationReader
 				ShadowPolicyModel.ShadowValueName);
 		dto.ShadowModeRaw = shadowPolicy ?? -1;
 
+		dto.PromptForPasswordPolicyRaw = ReadHklmInt(
+			RdpConfigurationModel.TerminalServicesPolicyKey,
+			RdpConfigurationModel.PromptForPasswordValueName);
+		dto.PromptForPasswordListenerRaw = ReadHklmInt(
+			RdpConfigurationModel.RdpTcpListenerKey,
+			RdpConfigurationModel.PromptForPasswordValueName);
+
 		(bool installed, bool running) = QueryTermService();
 		dto.TermServiceInstalled = installed;
 		dto.TermServiceRunning = running;

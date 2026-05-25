@@ -99,4 +99,50 @@ public class RdpConfigurationModelTests
 		// Out-of-range values must surface as invalid so the reader can fall back to the default.
 		Assert.False(RdpConfigurationModel.IsValidPort(badPort));
 	}
+
+	[Fact]
+	public void PromptForPasswordValueName_IsCanonical()
+	{
+		// Locks the Microsoft-documented value name so the reader / writer / backup paths
+		// all target exactly the same registry symbol.
+		Assert.Equal("fPromptForPassword", RdpConfigurationModel.PromptForPasswordValueName);
+	}
+
+	[Fact]
+	public void TerminalServicesPolicyKey_PointsAtTheTerminalServicesGroupPolicyKey()
+	{
+		// The policy key is shared with ShadowPolicyModel and must keep pointing at the canonical
+		// Group Policy location so the fPromptForPassword write lands where the OS expects it.
+		Assert.Equal(
+			@"HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services",
+			RdpConfigurationModel.TerminalServicesPolicyKey);
+	}
+
+	[Theory]
+	[InlineData(1, null, true)]
+	[InlineData(0, null, false)]
+	[InlineData(1, 0, true)]
+	[InlineData(0, 1, false)]
+	public void EffectivePromptForPassword_PolicyWinsOverListenerFallback(
+		int? policy, int? listener, bool expected)
+	{
+		// When the policy value is present, it must always override the listener fallback.
+		Assert.Equal(expected, RdpConfigurationModel.EffectivePromptForPassword(policy, listener));
+	}
+
+	[Theory]
+	[InlineData(null, 1, true)]
+	[InlineData(null, 0, false)]
+	public void EffectivePromptForPassword_FallsBackToListener_WhenPolicyAbsent(
+		int? policy, int? listener, bool expected)
+	{
+		// When the policy value is absent, the per-listener fallback drives the effective state.
+		Assert.Equal(expected, RdpConfigurationModel.EffectivePromptForPassword(policy, listener));
+	}
+
+	[Fact]
+	public void EffectivePromptForPassword_NullWhenBothSourcesAbsent()
+	{
+		Assert.Null(RdpConfigurationModel.EffectivePromptForPassword(null, null));
+	}
 }

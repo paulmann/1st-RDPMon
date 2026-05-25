@@ -83,6 +83,13 @@ public static class RdpConfigurationModel
 	/// the connected-user picker on the logon screen.</summary>
 	public const string DontEnumerateConnectedUsersValueName = "DontEnumerateConnectedUsers";
 
+	/// <summary><c>fPromptForPassword</c> DWORD — when 1 the host always asks for credentials on
+	/// every connection (server-side enforcement of the "Always prompt for password upon connection"
+	/// policy). Lives under <see cref="TerminalServicesPolicyKey"/> when configured by Group Policy
+	/// and under <see cref="RdpTcpListenerKey"/> as a per-listener fallback. The policy key is the
+	/// authoritative source when present.</summary>
+	public const string PromptForPasswordValueName = "fPromptForPassword";
+
 	/// <summary>Default Windows RDP TCP port when no override has been written to the registry.</summary>
 	public const int DefaultRdpPort = 3389;
 
@@ -183,4 +190,36 @@ public static class RdpConfigurationModel
 		"Whether the host accepts incoming RDP connections. Stored at HKLM\\…\\Terminal Server\\"
 		+ "fDenyTSConnections (0 = enabled, 1 = disabled). When disabled, the listener is unloaded "
 		+ "and remote desktop is unreachable on all ports.";
+
+	/// <summary>Human-readable description for the "Always prompt for password" toggle.</summary>
+	public const string DescribePromptForPassword =
+		"When enabled, this RDS host asks for credentials on every RDP connection and may prevent "
+		+ "use of saved client credentials (the server overrides the client and re-prompts). When "
+		+ "disabled or not configured, saved credentials can be used if client-side Credential "
+		+ "Delegation/CredSSP and NLA policy allow it. This is server-side only; if prompts continue "
+		+ "after disabling it, check client-side policies such as \"Do not allow passwords to be "
+		+ "saved\" and Credential Delegation/CredSSP settings. Stored at HKLM\\SOFTWARE\\Policies\\"
+		+ "Microsoft\\Windows NT\\Terminal Services\\fPromptForPassword (policy key — authoritative) "
+		+ "with a per-listener fallback at HKLM\\…\\WinStations\\RDP-Tcp\\fPromptForPassword.";
+
+	/// <summary>Resolves the effective "Always prompt for password" state given the policy value
+	/// and the per-listener fallback. The policy key wins when present (any 0/1 value); the
+	/// listener fallback is consulted only when the policy value is absent. Returns null when
+	/// neither source has a usable value so the UI can render "not configured".</summary>
+	/// <param name="policyRaw">Raw DWORD under the Terminal Services policy key, or null when absent.</param>
+	/// <param name="listenerRaw">Raw DWORD under the RDP-Tcp listener key, or null when absent.</param>
+	public static bool? EffectivePromptForPassword(int? policyRaw, int? listenerRaw)
+	{
+		if (policyRaw is int p)
+		{
+			return p != 0;
+		}
+
+		if (listenerRaw is int l)
+		{
+			return l != 0;
+		}
+
+		return null;
+	}
 }
