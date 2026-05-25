@@ -1,10 +1,18 @@
 // File:    src/RdpAudit.Core/Util/QwinstaParser.cs
 // Module:  RdpAudit.Core.Util
 // Purpose: Pure parser for the textual output of "query session" / "qwinsta" used by the
-//          Remote RDP Clients tab. Extracts session id, user name, station/client name and
-//          state from English Windows output. Robust against header lines, locale-specific
-//          whitespace and "current session" marker. Kept free of any Windows-specific APIs
-//          so it can be unit-tested cross-platform.
+//          Remote RDP Clients tab. Header-agnostic: data rows are detected by the
+//          presence of an integer session-id token rather than by English column names,
+//          so Russian, English and any other localized Windows output parses identically.
+//          When an English header line is present the parser pins the SessionName /
+//          UserName / ID / STATE column offsets so empty-session-name rows (a
+//          disconnected user with no station) are still attributed to the correct column;
+//          when no English header is found (Russian / other localized output) the parser
+//          falls back to a pure whitespace heuristic. Robust against the leading
+//          "current session" marker (">"), variable inter-column whitespace, missing
+//          username columns (services / console / Listen rows) and trailing TYPE/DEVICE
+//          columns. Kept free of any Windows-specific APIs so it can be unit-tested
+//          cross-platform.
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
@@ -24,14 +32,18 @@ public sealed record QwinstaSessionRow(
 /// <summary>Pure parser for the textual output of <c>qwinsta</c> / <c>query session</c>.</summary>
 public static class QwinstaParser
 {
+	private const int MinColumnGap = 2;
 	private const string HeaderSessionName = "SESSIONNAME";
 	private const string HeaderUserName = "USERNAME";
 	private const string HeaderId = "ID";
 	private const string HeaderState = "STATE";
 
-	/// <summary>Parses the combined stdout output of <c>qwinsta</c>.
-	/// Returns rows whose <see cref="QwinstaSessionRow.SessionId"/> is a non-negative integer.
-	/// Lines that cannot be parsed are silently skipped — never throw on operator input.</summary>
+	/// <summary>Parses the combined stdout output of <c>qwinsta</c> regardless of console
+	/// language. If an English header is present, the SessionName/UserName/ID/STATE column
+	/// offsets are used directly; otherwise data rows are detected by the first
+	/// whitespace-separated integer token on the line and split with a whitespace heuristic.
+	/// Header lines and noise are skipped automatically. Lines that cannot be parsed are
+	/// silently dropped — the parser never throws on operator input.</summary>
 	public static IReadOnlyList<QwinstaSessionRow> Parse(string? stdOut)
 	{
 		List<QwinstaSessionRow> rows = new();
@@ -41,7 +53,7 @@ public static class QwinstaParser
 		}
 
 		string[] lines = stdOut.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
-		ColumnLayout? layout = null;
+		ColumnLayout? layout = LocateEnglishHeader(lines);
 
 		foreach (string raw in lines)
 		{
@@ -51,13 +63,9 @@ public static class QwinstaParser
 				continue;
 			}
 
-			if (layout is null)
-			{
-				layout = TryParseHeader(line);
-				continue;
-			}
-
-			QwinstaSessionRow? row = TryParseDataLine(line, layout);
+			QwinstaSessionRow? row = layout is not null
+				? TryParseWithLayout(line, layout)
+				: TryParseHeuristic(line);
 			if (row is not null)
 			{
 				rows.Add(row);
@@ -67,26 +75,34 @@ public static class QwinstaParser
 		return rows;
 	}
 
-	/// <summary>Locates each header keyword and remembers its column offset so wide spaces in
-	/// fields cannot confuse the splitter. Returns null if the header looks unrecognised.</summary>
-	private static ColumnLayout? TryParseHeader(string line)
+	private static ColumnLayout? LocateEnglishHeader(IReadOnlyList<string> lines)
 	{
-		string upper = line.ToUpperInvariant();
-		int sessionNameCol = IndexOfWord(upper, HeaderSessionName);
-		int userNameCol = IndexOfWord(upper, HeaderUserName);
-		int idCol = IndexOfWord(upper, HeaderId);
-		int stateCol = IndexOfWord(upper, HeaderState);
-
-		if (sessionNameCol < 0 || idCol < 0 || stateCol < 0)
+		foreach (string raw in lines)
 		{
-			return null;
+			string line = raw.TrimEnd();
+			if (line.Length == 0)
+			{
+				continue;
+			}
+
+			string upper = line.ToUpperInvariant();
+			int sessionNameCol = IndexOfWord(upper, HeaderSessionName);
+			int userNameCol = IndexOfWord(upper, HeaderUserName);
+			int idCol = IndexOfWord(upper, HeaderId);
+			int stateCol = IndexOfWord(upper, HeaderState);
+			if (sessionNameCol < 0 || idCol < 0 || stateCol < 0)
+			{
+				continue;
+			}
+
+			return new ColumnLayout(
+				SessionNameStart: sessionNameCol,
+				UserNameStart: userNameCol,
+				IdStart: idCol,
+				StateStart: stateCol);
 		}
 
-		return new ColumnLayout(
-			SessionNameStart: sessionNameCol,
-			UserNameStart: userNameCol,
-			IdStart: idCol,
-			StateStart: stateCol);
+		return null;
 	}
 
 	private static int IndexOfWord(string upper, string word)
@@ -97,7 +113,6 @@ public static class QwinstaParser
 			return -1;
 		}
 
-		// Make sure it is a whole-word match (preceded by whitespace or start, followed by whitespace or end).
 		if (idx > 0 && !char.IsWhiteSpace(upper[idx - 1]))
 		{
 			return -1;
@@ -112,43 +127,32 @@ public static class QwinstaParser
 		return idx;
 	}
 
-	private static QwinstaSessionRow? TryParseDataLine(string line, ColumnLayout layout)
+	private static QwinstaSessionRow? TryParseWithLayout(string raw, ColumnLayout layout)
 	{
 		bool isCurrent = false;
-		string trimmed = line;
-		if (trimmed.Length > 0 && trimmed[0] == '>')
+		string line = raw;
+		if (line.Length > 0 && line[0] == '>')
 		{
 			isCurrent = true;
-			trimmed = ' ' + trimmed[1..];
+			line = ' ' + line[1..];
 		}
 
-		string sessionName = SliceColumn(trimmed, layout.SessionNameStart, layout.UserNameStart);
-		string userName = SliceColumn(trimmed, layout.UserNameStart, layout.IdStart);
-		string idText = SliceColumn(trimmed, layout.IdStart, layout.StateStart);
-		string state = SliceColumn(trimmed, layout.StateStart, trimmed.Length);
+		string sessionName = SliceColumn(line, layout.SessionNameStart, layout.UserNameStart);
+		string userName = SliceColumn(line, layout.UserNameStart, layout.IdStart);
+		string idText = SliceColumn(line, layout.IdStart, layout.StateStart);
+		string state = SliceColumn(line, layout.StateStart, line.Length);
 
-		if (string.IsNullOrWhiteSpace(idText))
+		if (string.IsNullOrWhiteSpace(idText)
+			|| !int.TryParse(idText.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int sessionId)
+			|| sessionId < 0)
 		{
 			return null;
 		}
 
-		if (!int.TryParse(idText.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int sessionId))
+		string stateClean = TrimStateToken(state);
+		if (stateClean.Length == 0)
 		{
 			return null;
-		}
-
-		if (sessionId < 0)
-		{
-			return null;
-		}
-
-		// Tidy state column — keep only the leading token so " Disc " becomes "Disc" and
-		// "Active extra" becomes "Active" when extra columns (Type/Device) follow.
-		string stateClean = state.Trim();
-		int spaceIdx = stateClean.IndexOf(' ', StringComparison.Ordinal);
-		if (spaceIdx > 0)
-		{
-			stateClean = stateClean[..spaceIdx];
 		}
 
 		return new QwinstaSessionRow(
@@ -175,7 +179,188 @@ public static class QwinstaParser
 		return line[start..safeEnd];
 	}
 
-	/// <summary>Maps the raw qwinsta state token to a stable canonical state name surfaced over IPC.</summary>
+	private static string TrimStateToken(string state)
+	{
+		string trimmed = state.Trim();
+		int spaceIdx = trimmed.IndexOf(' ', StringComparison.Ordinal);
+		return spaceIdx > 0 ? trimmed[..spaceIdx] : trimmed;
+	}
+
+	private static QwinstaSessionRow? TryParseHeuristic(string raw)
+	{
+		bool isCurrent = false;
+		string line = raw;
+		if (line.Length > 0 && line[0] == '>')
+		{
+			isCurrent = true;
+			line = ' ' + line[1..];
+		}
+
+		if (!TryLocateSessionIdToken(line, out int idStart, out int idEnd, out int sessionId)
+			|| sessionId < 0)
+		{
+			return null;
+		}
+
+		string prefix = line[..idStart].TrimEnd();
+		string suffix = idEnd >= line.Length ? string.Empty : line[idEnd..].Trim();
+
+		(string sessionName, string userName) = SplitPrefix(prefix);
+		string stateToken = ExtractStateToken(suffix);
+		if (stateToken.Length == 0)
+		{
+			return null;
+		}
+
+		return new QwinstaSessionRow(
+			SessionName: sessionName,
+			UserName: userName,
+			SessionId: sessionId,
+			State: stateToken,
+			IsCurrent: isCurrent);
+	}
+
+	private static bool TryLocateSessionIdToken(string line, out int start, out int end, out int sessionId)
+	{
+		start = -1;
+		end = -1;
+		sessionId = -1;
+
+		int i = 0;
+		while (i < line.Length)
+		{
+			while (i < line.Length && char.IsWhiteSpace(line[i]))
+			{
+				i++;
+			}
+
+			int tokenStart = i;
+			while (i < line.Length && !char.IsWhiteSpace(line[i]))
+			{
+				i++;
+			}
+
+			int tokenEnd = i;
+			if (tokenEnd <= tokenStart)
+			{
+				continue;
+			}
+
+			string token = line[tokenStart..tokenEnd];
+			if (IsAllDigits(token)
+				&& int.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed))
+			{
+				start = tokenStart;
+				end = tokenEnd;
+				sessionId = parsed;
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private static bool IsAllDigits(string token)
+	{
+		if (token.Length == 0)
+		{
+			return false;
+		}
+
+		foreach (char c in token)
+		{
+			if (c < '0' || c > '9')
+			{
+				return false;
+			}
+		}
+
+		return true;
+	}
+
+	/// <summary>Splits the pre-id portion of a heuristically-parsed row into
+	/// (SessionName, UserName). When the trimmed prefix contains a run of two or more
+	/// spaces, that run is treated as the column separator (SessionName + UserName);
+	/// otherwise the prefix is treated as the session name with an empty username — the
+	/// dominant shape for "services" / "console" / "Listen" rows in localized qwinsta
+	/// output.</summary>
+	private static (string SessionName, string UserName) SplitPrefix(string prefix)
+	{
+		string trimmed = prefix.Trim();
+		if (trimmed.Length == 0)
+		{
+			return (string.Empty, string.Empty);
+		}
+
+		int gapStart = -1;
+		int gapEnd = -1;
+		int run = 0;
+		for (int i = 0; i < trimmed.Length; i++)
+		{
+			if (trimmed[i] == ' ')
+			{
+				if (run == 0)
+				{
+					gapStart = i;
+				}
+
+				run++;
+				if (run >= MinColumnGap)
+				{
+					int j = i + 1;
+					while (j < trimmed.Length && trimmed[j] == ' ')
+					{
+						j++;
+					}
+
+					gapEnd = j;
+					break;
+				}
+			}
+			else
+			{
+				run = 0;
+				gapStart = -1;
+			}
+		}
+
+		if (gapStart < 0 || gapEnd < 0)
+		{
+			return (trimmed, string.Empty);
+		}
+
+		string sessionName = trimmed[..gapStart].Trim();
+		string userName = trimmed[gapEnd..].Trim();
+		return (sessionName, userName);
+	}
+
+	private static string ExtractStateToken(string suffix)
+	{
+		if (suffix.Length == 0)
+		{
+			return string.Empty;
+		}
+
+		int i = 0;
+		while (i < suffix.Length && char.IsWhiteSpace(suffix[i]))
+		{
+			i++;
+		}
+
+		int start = i;
+		while (i < suffix.Length && !char.IsWhiteSpace(suffix[i]))
+		{
+			i++;
+		}
+
+		return i <= start ? string.Empty : suffix[start..i];
+	}
+
+	/// <summary>Maps the raw qwinsta state token to a stable canonical state name
+	/// surfaced over IPC. Recognises English Windows output as well as the localized
+	/// strings emitted by the Russian-language console (Активно / Подключено / Диск /
+	/// Отключено / Прием / Приём). Unknown states are returned verbatim so the row
+	/// reaches the operator instead of being silently dropped.</summary>
 	public static string NormalizeState(string state)
 	{
 		if (string.IsNullOrWhiteSpace(state))
@@ -183,21 +368,77 @@ public static class QwinstaParser
 			return "Unknown";
 		}
 
-		string upper = state.Trim().ToUpperInvariant();
-		return upper switch
+		string token = state.Trim();
+		string upper = token.ToUpperInvariant();
+		switch (upper)
 		{
-			"ACTIVE" => "Active",
-			"CONN" or "CONNECTED" => "Connected",
-			"CONNQ" or "CONNECTQUERY" => "ConnectQuery",
-			"SHADOW" => "Shadow",
-			"DISC" or "DISCONNECTED" => "Disconnected",
-			"IDLE" => "Idle",
-			"LISTEN" => "Listen",
-			"RESET" => "Reset",
-			"DOWN" => "Down",
-			"INIT" => "Init",
-			_ => state.Trim(),
-		};
+			case "ACTIVE":
+				return "Active";
+			case "CONN":
+			case "CONNECTED":
+				return "Connected";
+			case "CONNQ":
+			case "CONNECTQUERY":
+				return "ConnectQuery";
+			case "SHADOW":
+				return "Shadow";
+			case "DISC":
+			case "DISCONNECTED":
+				return "Disconnected";
+			case "IDLE":
+				return "Idle";
+			case "LISTEN":
+				return "Listen";
+			case "RESET":
+				return "Reset";
+			case "DOWN":
+				return "Down";
+			case "INIT":
+				return "Init";
+			default:
+				return MapLocalizedState(token);
+		}
+	}
+
+	private static string MapLocalizedState(string token)
+	{
+		if (string.Equals(token, "Активно", StringComparison.OrdinalIgnoreCase))
+		{
+			return "Active";
+		}
+
+		if (string.Equals(token, "Подключено", StringComparison.OrdinalIgnoreCase))
+		{
+			return "Connected";
+		}
+
+		if (string.Equals(token, "Отключено", StringComparison.OrdinalIgnoreCase))
+		{
+			return "Disconnected";
+		}
+
+		if (string.Equals(token, "Диск", StringComparison.OrdinalIgnoreCase))
+		{
+			return "Disconnected";
+		}
+
+		if (string.Equals(token, "Прием", StringComparison.OrdinalIgnoreCase)
+			|| string.Equals(token, "Приём", StringComparison.OrdinalIgnoreCase))
+		{
+			return "Listen";
+		}
+
+		if (string.Equals(token, "Простой", StringComparison.OrdinalIgnoreCase))
+		{
+			return "Idle";
+		}
+
+		if (string.Equals(token, "Теневая", StringComparison.OrdinalIgnoreCase))
+		{
+			return "Shadow";
+		}
+
+		return token;
 	}
 
 	private sealed record ColumnLayout(
