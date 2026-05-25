@@ -14,6 +14,7 @@ using System.Runtime.Versioning;
 using System.ServiceProcess;
 using Microsoft.Win32;
 using RdpAudit.Core.Events;
+using RdpAudit.Core.Firewall;
 using RdpAudit.Core.Util;
 
 namespace RdpAudit.Configurator.Services;
@@ -171,18 +172,71 @@ public sealed class PrerequisiteChecker
 
 	private static PrerequisiteResult CheckRdpFirewallRule()
 	{
-		int code = RunCommand("netsh", "advfirewall firewall show rule name=\"Remote Desktop - User Mode (TCP-In)\"");
-		PrerequisiteFix? fix = code != 0
-			? new PrerequisiteFix("Enable RDP firewall group", () =>
-				Task.FromResult(RunCommand("netsh", "advfirewall firewall set rule group=\"remote desktop\" new enable=Yes") == 0
-					? "Enabled" : "netsh failed"))
-			: null;
-		return new PrerequisiteResult(
-			"Windows Firewall RDP rule present",
-			code == 0,
-			code == 0 ? "Found" : $"netsh exit {code}",
-			fix);
+		int port = ReadConfiguredRdpPort();
+		string portString = port.ToString(CultureInfo.InvariantCulture);
+
+		// Probe for ANY allow-inbound rule on the configured port using a localisation-stable
+		// "show rule name=all" output filter; we then scan stdout for a LocalPort=<port> hit.
+		// Matching by configured port + protocol avoids relying on the localised Windows group
+		// name ("Remote Desktop - User Mode (TCP-In)" / "Удаленный рабочий стол - пользовательский режим (TCP-входящий)").
+		string[] showArgs = new[]
+		{
+			"advfirewall", "firewall", "show", "rule", "name=all", "verbose",
+		};
+		CapturedCommand probe = RunCapturedCommand("netsh", showArgs);
+		bool ruleMatches = NetshRuleScanner.ContainsAllowInboundForPort(probe.StdOut, port);
+
+		NetshProbeOutcome outcome = new(
+			Command: "netsh",
+			Arguments: showArgs,
+			ExitCode: probe.ExitCode,
+			StdOut: probe.StdOut,
+			StdErr: probe.StdErr,
+			ConfiguredRdpPort: port,
+			RuleNameAttempted: null,
+			TimedOut: probe.TimedOut);
+
+		bool ok = probe.ExitCode == 0 && ruleMatches;
+		string detail = ok
+			? string.Format(CultureInfo.InvariantCulture, "Found rule allowing inbound TCP/{0}.", portString)
+			: NetshDiagnosticsFormatter.FormatShort(outcome);
+
+		PrerequisiteFix? fix = ok ? null : new PrerequisiteFix(
+			string.Format(CultureInfo.InvariantCulture, "Add RdpAudit RDP allow rule on TCP/{0}", portString),
+			() =>
+			{
+				string ruleName = "RdpAudit-RDP-Allow-" + portString;
+				string[] addArgs = new[]
+				{
+					"advfirewall", "firewall", "add", "rule",
+					"name=" + ruleName,
+					"dir=in",
+					"action=allow",
+					"protocol=TCP",
+					"localport=" + portString,
+				};
+				CapturedCommand fixResult = RunCapturedCommand("netsh", addArgs);
+				if (fixResult.ExitCode == 0)
+				{
+					return Task.FromResult(string.Format(CultureInfo.InvariantCulture,
+						"Added rule '{0}' for TCP/{1}.", ruleName, portString));
+				}
+
+				NetshProbeOutcome fixOutcome = new(
+					Command: "netsh",
+					Arguments: addArgs,
+					ExitCode: fixResult.ExitCode,
+					StdOut: fixResult.StdOut,
+					StdErr: fixResult.StdErr,
+					ConfiguredRdpPort: port,
+					RuleNameAttempted: ruleName,
+					TimedOut: fixResult.TimedOut);
+				return Task.FromResult(NetshDiagnosticsFormatter.FormatShort(fixOutcome));
+			});
+
+		return new PrerequisiteResult("Windows Firewall RDP rule present", ok, detail, fix);
 	}
+
 
 	private static PrerequisiteResult CheckSecurityChannel()
 		=> CheckEventChannelExists("Security");
@@ -344,6 +398,59 @@ public sealed class PrerequisiteChecker
 		catch
 		{
 			return -1;
+		}
+	}
+
+	/// <summary>Captured outcome of one process invocation: exit code + both standard streams.</summary>
+	internal readonly record struct CapturedCommand(int ExitCode, string StdOut, string StdErr, bool TimedOut);
+
+	/// <summary>Spawns <paramref name="exe"/> using <see cref="ProcessStartInfo.ArgumentList"/> —
+	/// arguments are NEVER concatenated into a shell string — and returns both captured
+	/// streams along with the process exit code. A hard 15s timeout bounds UI hangs.</summary>
+	internal static CapturedCommand RunCapturedCommand(string exe, IReadOnlyList<string> arguments)
+	{
+		try
+		{
+			ProcessStartInfo psi = new(exe)
+			{
+				UseShellExecute = false,
+				RedirectStandardOutput = true,
+				RedirectStandardError = true,
+				CreateNoWindow = true,
+			};
+			foreach (string a in arguments)
+			{
+				psi.ArgumentList.Add(a);
+			}
+
+			using Process? proc = Process.Start(psi);
+			if (proc is null)
+			{
+				return new CapturedCommand(-1, string.Empty, "Process.Start returned null", TimedOut: false);
+			}
+
+			string stdout = proc.StandardOutput.ReadToEnd();
+			string stderr = proc.StandardError.ReadToEnd();
+			bool exited = proc.WaitForExit(15_000);
+			if (!exited)
+			{
+				try
+				{
+					proc.Kill(entireProcessTree: true);
+				}
+				catch (InvalidOperationException)
+				{
+					// Already exited between WaitForExit and Kill.
+				}
+
+				return new CapturedCommand(-1, stdout, stderr, TimedOut: true);
+			}
+
+			return new CapturedCommand(proc.ExitCode, stdout, stderr, TimedOut: false);
+		}
+		catch (Exception ex)
+		{
+			return new CapturedCommand(-1, string.Empty, ex.GetType().Name + ": " + ex.Message, TimedOut: false);
 		}
 	}
 }
