@@ -77,4 +77,16 @@ public sealed class RdpConfigurationDto
 	/// <summary>Captured UTC timestamp of the snapshot.</summary>
 	[Key(14)]
 	public DateTime CapturedUtc { get; set; } = DateTime.UtcNow;
+
+	/// <summary>Raw <c>fPromptForPassword</c> DWORD read from the Terminal Services policy key
+	/// (HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services). null when the value is
+	/// absent or unreadable. Policy value is authoritative when present.</summary>
+	[Key(15)]
+	public int? PromptForPasswordPolicyRaw { get; set; }
+
+	/// <summary>Raw <c>fPromptForPassword</c> DWORD read from the per-listener RDP-Tcp key
+	/// (HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp). null when
+	/// absent. Used as a fallback only when <see cref="PromptForPasswordPolicyRaw"/> is null.</summary>
+	[Key(16)]
+	public int? PromptForPasswordListenerRaw { get; set; }
 }

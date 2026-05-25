@@ -25,6 +25,18 @@ public class BackupCommandBuilderTests
 	}
 
 	[Fact]
+	public void RegistryKeys_CoverBothFPromptForPasswordHostKeys()
+	{
+		// The "Always prompt for password" policy lives under the Terminal Services policy key;
+		// the per-listener fallback lives under the RDP-Tcp WinStation. Both must be backed up so
+		// LocalRdpConfigurationWriter's policy-key mutation is recoverable from disk.
+		Assert.Contains(BackupCommandBuilder.RegistryKeys, k => string.Equals(
+			k, @"HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services", StringComparison.OrdinalIgnoreCase));
+		Assert.Contains(BackupCommandBuilder.RegistryKeys, k => string.Equals(
+			k, @"HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp", StringComparison.OrdinalIgnoreCase));
+	}
+
+	[Fact]
 	public void BuildAuditPolicyBackup_UsesGlueedFileSwitch()
 	{
 		IReadOnlyList<string> args = BackupCommandBuilder.BuildAuditPolicyBackup("C:/snap/audit.csv");

@@ -58,6 +58,9 @@ public sealed class RdpConfigurationPage : TabPage
 	private readonly ComboBox _shadowMode;
 	private readonly Label _shadowDescription;
 
+	private readonly CheckBox _alwaysPrompt;
+	private readonly Label _alwaysPromptDescription;
+
 	private readonly Button _refresh;
 	private readonly Button _apply;
 	private readonly Button _cancel;
@@ -184,13 +187,25 @@ public sealed class RdpConfigurationPage : TabPage
 		_shadowDescription = NewDescription(586);
 		_shadowDescription.Text = RdpConfigurationModel.DescribeShadowMode;
 
-		_refresh = new Button { Text = "Reload", Width = 100, Height = 28, Location = new Point(12, 650) };
+		_alwaysPrompt = new CheckBox
+		{
+			AutoSize = true,
+			Location = new Point(12, 634),
+			Text = "Always prompt for password upon connection (fPromptForPassword = 1)",
+		};
+		_alwaysPrompt.CheckedChanged += (_, _) =>
+			OnEditChanged(() => _edits.AlwaysPromptForPassword = _alwaysPrompt.Checked);
+		_alwaysPromptDescription = NewDescription(658);
+		_alwaysPromptDescription.Height = 76;
+		_alwaysPromptDescription.Text = RdpConfigurationModel.DescribePromptForPassword;
+
+		_refresh = new Button { Text = "Reload", Width = 100, Height = 28, Location = new Point(12, 746) };
 		_refresh.Click += async (_, _) => await RefreshAsync().ConfigureAwait(true);
 
-		_apply = new Button { Text = "Apply", Width = 100, Height = 28, Location = new Point(124, 650), Enabled = false };
+		_apply = new Button { Text = "Apply", Width = 100, Height = 28, Location = new Point(124, 746), Enabled = false };
 		_apply.Click += (_, _) => OnApply();
 
-		_cancel = new Button { Text = "Cancel", Width = 100, Height = 28, Location = new Point(236, 650), Enabled = false };
+		_cancel = new Button { Text = "Cancel", Width = 100, Height = 28, Location = new Point(236, 746), Enabled = false };
 		_cancel.Click += (_, _) => OnCancel();
 
 		_status = new Label
@@ -198,7 +213,7 @@ public sealed class RdpConfigurationPage : TabPage
 			AutoSize = false,
 			Width = 1100,
 			Height = 36,
-			Location = new Point(12, 686),
+			Location = new Point(12, 782),
 			Text = "Ready.",
 		};
 
@@ -221,6 +236,8 @@ public sealed class RdpConfigurationPage : TabPage
 		Controls.Add(shadowHeader);
 		Controls.Add(_shadowMode);
 		Controls.Add(_shadowDescription);
+		Controls.Add(_alwaysPrompt);
+		Controls.Add(_alwaysPromptDescription);
 		Controls.Add(_refresh);
 		Controls.Add(_apply);
 		Controls.Add(_cancel);
@@ -323,6 +340,7 @@ public sealed class RdpConfigurationPage : TabPage
 			_singleSession.Checked = false;
 			_hideUsers.Checked = false;
 			_shadowMode.SelectedIndex = 0;
+			_alwaysPrompt.Checked = false;
 		}
 		finally
 		{
@@ -359,6 +377,7 @@ public sealed class RdpConfigurationPage : TabPage
 			_hideUsers.Checked = _edits.HideUsersOnLogon;
 			SelectAuthMode(_edits.AuthenticationMode);
 			_shadowMode.SelectedIndex = ComboIndexFromShadow(_edits.ShadowMode);
+			_alwaysPrompt.Checked = _edits.AlwaysPromptForPassword;
 		}
 		finally
 		{
@@ -374,6 +393,12 @@ public sealed class RdpConfigurationPage : TabPage
 		_hideUsersDescription.Text = RdpConfigurationModel.DescribeHideUsersOnLogon + hideDetail;
 		_singleSessionDescription.Text = RdpConfigurationModel.DescribeSingleSession
 			+ (dto.SingleSessionPerUserRaw is null ? " (value is currently absent)" : string.Empty);
+
+		string promptDetail = string.Format(CultureInfo.InvariantCulture,
+			" Current values: policy={0}, listener={1}.",
+			dto.PromptForPasswordPolicyRaw?.ToString(CultureInfo.InvariantCulture) ?? "missing",
+			dto.PromptForPasswordListenerRaw?.ToString(CultureInfo.InvariantCulture) ?? "missing");
+		_alwaysPromptDescription.Text = RdpConfigurationModel.DescribePromptForPassword + promptDetail;
 	}
 
 	private void SelectAuthMode(RdpAuthenticationMode mode)
@@ -444,6 +469,7 @@ public sealed class RdpConfigurationPage : TabPage
 		_singleSession.Enabled = enabled;
 		_hideUsers.Enabled = enabled;
 		_shadowMode.Enabled = enabled;
+		_alwaysPrompt.Enabled = enabled;
 	}
 
 	private void OnCancel()

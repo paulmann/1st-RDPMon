@@ -72,6 +72,12 @@ public sealed class RdpConfigurationEditModel
 	/// to leave the registry value absent).</summary>
 	public ShadowPolicyMode ShadowMode { get; set; } = ShadowPolicyMode.NotConfigured;
 
+	/// <summary>True when the host must prompt for credentials on every RDP connection (writes
+	/// fPromptForPassword = 1 under the Terminal Services policy key; the apply path also clears
+	/// the per-listener fallback when it is set to a contradictory value so the effective state
+	/// stays deterministic).</summary>
+	public bool AlwaysPromptForPassword { get; set; }
+
 	/// <summary>Builds an edit model preloaded with the values captured in <paramref name="dto"/>.
 	/// Missing / out-of-range values fall back to the conservative recommended defaults so the
 	/// operator never accidentally clears a setting just by hitting Apply.</summary>
@@ -96,6 +102,10 @@ public sealed class RdpConfigurationEditModel
 			? ShadowPolicyMode.NotConfigured
 			: ShadowPolicyModel.FromRawValue(dto.ShadowModeRaw);
 
+		bool alwaysPrompt = RdpConfigurationModel.EffectivePromptForPassword(
+			dto.PromptForPasswordPolicyRaw,
+			dto.PromptForPasswordListenerRaw) ?? false;
+
 		return new RdpConfigurationEditModel
 		{
 			RdpEnabled = rdpEnabled,
@@ -104,6 +114,7 @@ public sealed class RdpConfigurationEditModel
 			HideUsersOnLogon = hideUsers,
 			AuthenticationMode = auth,
 			ShadowMode = shadow,
+			AlwaysPromptForPassword = alwaysPrompt,
 		};
 	}
 
@@ -232,6 +243,23 @@ public sealed class RdpConfigurationEditModel
 				ShadowPolicyModel.TerminalServicesPolicyKey,
 				ShadowPolicyModel.ShadowValueName,
 				desiredShadow));
+		}
+
+		// --- Always prompt for password (policy key is authoritative) ----------------------------
+		// The policy key wins over the per-listener fallback. We emit a write only when the
+		// effective current state (policy if set, otherwise listener) differs from the desired
+		// state. The write always targets the policy key — never the listener fallback — so the
+		// applied value is enforced exactly the way Group Policy would enforce it.
+		bool? currentEffectivePrompt = RdpConfigurationModel.EffectivePromptForPassword(
+			baseline.PromptForPasswordPolicyRaw,
+			baseline.PromptForPasswordListenerRaw);
+		bool currentPromptBool = currentEffectivePrompt ?? false;
+		if (currentPromptBool != AlwaysPromptForPassword)
+		{
+			writes.Add(new RdpRegistryWrite(
+				RdpConfigurationModel.TerminalServicesPolicyKey,
+				RdpConfigurationModel.PromptForPasswordValueName,
+				AlwaysPromptForPassword ? 1 : 0));
 		}
 
 		return new RdpConfigurationChangeSet(writes);

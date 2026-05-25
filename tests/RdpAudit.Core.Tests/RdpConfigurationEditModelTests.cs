@@ -243,4 +243,118 @@ public class RdpConfigurationEditModelTests
 			&& w.ValueName == ShadowPolicyModel.ShadowValueName
 			&& w.Value is null);
 	}
+
+	[Fact]
+	public void FromSnapshot_AlwaysPromptForPassword_PolicyWinsOverListener()
+	{
+		RdpConfigurationDto dto = new()
+		{
+			PromptForPasswordPolicyRaw = 1,
+			PromptForPasswordListenerRaw = 0,
+		};
+
+		RdpConfigurationEditModel model = RdpConfigurationEditModel.FromSnapshot(dto);
+		Assert.True(model.AlwaysPromptForPassword);
+	}
+
+	[Fact]
+	public void FromSnapshot_AlwaysPromptForPassword_FallsBackToListenerWhenPolicyAbsent()
+	{
+		RdpConfigurationDto dto = new()
+		{
+			PromptForPasswordPolicyRaw = null,
+			PromptForPasswordListenerRaw = 1,
+		};
+
+		RdpConfigurationEditModel model = RdpConfigurationEditModel.FromSnapshot(dto);
+		Assert.True(model.AlwaysPromptForPassword);
+	}
+
+	[Fact]
+	public void FromSnapshot_AlwaysPromptForPassword_DefaultsFalseWhenBothAbsent()
+	{
+		RdpConfigurationDto dto = new()
+		{
+			PromptForPasswordPolicyRaw = null,
+			PromptForPasswordListenerRaw = null,
+		};
+
+		RdpConfigurationEditModel model = RdpConfigurationEditModel.FromSnapshot(dto);
+		Assert.False(model.AlwaysPromptForPassword);
+	}
+
+	[Fact]
+	public void ComputeChanges_EmitsPolicyWrite_WhenAlwaysPromptToggledOn()
+	{
+		RdpConfigurationDto baseline = new()
+		{
+			PromptForPasswordPolicyRaw = null,
+			PromptForPasswordListenerRaw = null,
+		};
+		RdpConfigurationEditModel model = RdpConfigurationEditModel.FromSnapshot(baseline);
+		model.AlwaysPromptForPassword = true;
+
+		RdpConfigurationChangeSet changes = model.ComputeChanges(baseline);
+		Assert.Contains(changes.Writes, w =>
+			w.KeyPath == RdpConfigurationModel.TerminalServicesPolicyKey
+			&& w.ValueName == RdpConfigurationModel.PromptForPasswordValueName
+			&& w.Value == 1);
+	}
+
+	[Fact]
+	public void ComputeChanges_EmitsPolicyWriteZero_WhenAlwaysPromptToggledOff()
+	{
+		RdpConfigurationDto baseline = new()
+		{
+			PromptForPasswordPolicyRaw = 1,
+			PromptForPasswordListenerRaw = 1,
+		};
+		RdpConfigurationEditModel model = RdpConfigurationEditModel.FromSnapshot(baseline);
+		Assert.True(model.AlwaysPromptForPassword);
+		model.AlwaysPromptForPassword = false;
+
+		RdpConfigurationChangeSet changes = model.ComputeChanges(baseline);
+		Assert.Contains(changes.Writes, w =>
+			w.KeyPath == RdpConfigurationModel.TerminalServicesPolicyKey
+			&& w.ValueName == RdpConfigurationModel.PromptForPasswordValueName
+			&& w.Value == 0);
+	}
+
+	[Fact]
+	public void ComputeChanges_AlwaysPromptForPassword_NoWrite_WhenEffectiveStateMatches()
+	{
+		RdpConfigurationDto baseline = new()
+		{
+			PromptForPasswordPolicyRaw = 1,
+			PromptForPasswordListenerRaw = 0,
+		};
+		RdpConfigurationEditModel model = RdpConfigurationEditModel.FromSnapshot(baseline);
+		Assert.True(model.AlwaysPromptForPassword);
+
+		RdpConfigurationChangeSet changes = model.ComputeChanges(baseline);
+		Assert.DoesNotContain(changes.Writes, w =>
+			w.ValueName == RdpConfigurationModel.PromptForPasswordValueName);
+	}
+
+	[Fact]
+	public void ComputeChanges_AlwaysPromptForPassword_WritesPolicyKey_NotListener()
+	{
+		RdpConfigurationDto baseline = new()
+		{
+			PromptForPasswordPolicyRaw = null,
+			PromptForPasswordListenerRaw = null,
+		};
+		RdpConfigurationEditModel model = RdpConfigurationEditModel.FromSnapshot(baseline);
+		model.AlwaysPromptForPassword = true;
+
+		RdpConfigurationChangeSet changes = model.ComputeChanges(baseline);
+
+		// Should target the Terminal Services group policy key, NOT the per-listener RDP-Tcp key.
+		Assert.Contains(changes.Writes, w =>
+			w.ValueName == RdpConfigurationModel.PromptForPasswordValueName
+			&& w.KeyPath == RdpConfigurationModel.TerminalServicesPolicyKey);
+		Assert.DoesNotContain(changes.Writes, w =>
+			w.ValueName == RdpConfigurationModel.PromptForPasswordValueName
+			&& w.KeyPath == RdpConfigurationModel.RdpTcpListenerKey);
+	}
 }
