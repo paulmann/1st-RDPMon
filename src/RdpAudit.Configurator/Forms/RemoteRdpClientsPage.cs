@@ -38,6 +38,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 
 	private readonly IpcClient _ipc;
 	private readonly ShadowLauncher _launcher = new();
+	private readonly LocalRdpSessionProvider _localSessions = new();
 
 	private readonly DataGridView _grid;
 	private readonly BindingList<SessionRow> _binding = new();
@@ -453,31 +454,42 @@ public sealed class RemoteRdpClientsPage : TabPage
 		_refreshButton.Enabled = false;
 		try
 		{
-			RdpSessionListDto? response = await _ipc
-				.SendAsync<RdpSessionListDto>(IpcCommand.ListRdpSessions)
-				.ConfigureAwait(true);
+			RdpSessionFallbackOrchestrator orchestrator = new(
+				ipcFetch: ct => _ipc.SendAsync<RdpSessionListDto>(IpcCommand.ListRdpSessions, null, ct),
+				localFetch: _localSessions.FetchForOrchestratorAsync);
+			RdpSessionListSnapshot snapshot = await orchestrator.CaptureAsync().ConfigureAwait(true);
 
-			if (response is null)
+			if (!snapshot.HasSessions)
 			{
-				SetStatus("ListRdpSessions FAILED: service unreachable.");
+				SetStatus(string.Format(CultureInfo.InvariantCulture,
+					"Sessions refresh FAILED: service IPC ({0}); local fallback ({1}).",
+					snapshot.IpcDetail ?? "unknown",
+					snapshot.LocalDetail ?? "unknown"));
 				return;
 			}
 
-			if (response.Status != IpcResultStatus.Success)
+			_allSessions.Clear();
+			_allSessions.AddRange(snapshot.Sessions);
+			ApplyLocalFilter();
+
+			if (snapshot.Source == RdpSessionListSource.ServiceIpc)
 			{
 				SetStatus(string.Format(CultureInfo.InvariantCulture,
-					"ListRdpSessions returned status {0}: {1}",
-					response.Status, response.Message ?? "no message"));
+					"Sessions refresh OK (service IPC). count={0}, active={1}, disconnected={2}.",
+					_allSessions.Count,
+					_allSessions.Count(s => s.IsActive),
+					_allSessions.Count(s => s.IsDisconnected)));
 			}
-
-			_allSessions.Clear();
-			_allSessions.AddRange(response.Sessions);
-			ApplyLocalFilter();
-			SetStatus(string.Format(CultureInfo.InvariantCulture,
-				"Sessions refresh OK. count={0}, active={1}, disconnected={2}.",
-				_allSessions.Count,
-				_allSessions.Count(s => s.IsActive),
-				_allSessions.Count(s => s.IsDisconnected)));
+			else
+			{
+				SetStatus(string.Format(CultureInfo.InvariantCulture,
+					"Source: local session fallback; historical enrichment unavailable. "
+					+ "count={0}, active={1}, disconnected={2}. Service IPC: {3}.",
+					_allSessions.Count,
+					_allSessions.Count(s => s.IsActive),
+					_allSessions.Count(s => s.IsDisconnected),
+					snapshot.IpcDetail ?? "unreachable"));
+			}
 		}
 		catch (Exception ex)
 		{
