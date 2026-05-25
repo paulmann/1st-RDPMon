@@ -17,6 +17,7 @@ using RdpAudit.Configurator.Services;
 using RdpAudit.Core.Backup;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
+using RdpAudit.Core.Util;
 
 namespace RdpAudit.Configurator.Forms;
 
@@ -44,6 +45,7 @@ public sealed class OverviewPage : TabPage
 	private readonly Button _restore;
 	private readonly Label _status;
 	private readonly OverviewProbe _probe = new();
+	private readonly LocalRdpSessionProvider _localSessions = new();
 	private readonly SummaryCard _cardAttacksToday;
 	private readonly SummaryCard _cardBlockedIps;
 	private readonly SummaryCard _cardActiveSessions;
@@ -295,11 +297,17 @@ public sealed class OverviewPage : TabPage
 			}
 		}
 
+		// Active sessions: prefer the value from the same orchestrator the Remote RDP Clients tab
+		// uses so the cards stay consistent even when the service IPC is unreachable.
+		(int? activeSessions, string activeSessionsSubtitle) = await CountActiveSessionsAsync(summary).ConfigureAwait(true);
+
 		if (summary is null)
 		{
 			_cardAttacksToday.SetValue("—", "service unreachable");
 			_cardBlockedIps.SetValue("—", "service unreachable");
-			_cardActiveSessions.SetValue("—", "service unreachable");
+			_cardActiveSessions.SetValue(
+				activeSessions.HasValue ? activeSessions.Value.ToString("N0", CultureInfo.InvariantCulture) : "—",
+				activeSessionsSubtitle);
 			_cardFailedLogins.SetValue("—", "service unreachable");
 			_cardServiceHealth.SetValue(snapshot.ServiceStatus, snapshot.ServiceInstalled ? "installed" : "not installed");
 			_cardDbSize.SetValue(snapshot.DatabaseExists ? "see below" : "n/a", snapshot.DatabaseExists ? "snapshot pending" : "missing");
@@ -313,8 +321,8 @@ public sealed class OverviewPage : TabPage
 			summary.BlockedIps.ToString("N0", CultureInfo.InvariantCulture),
 			"active firewall blocks");
 		_cardActiveSessions.SetValue(
-			summary.ActiveSessions.ToString("N0", CultureInfo.InvariantCulture),
-			"RDP sessions in Active state");
+			(activeSessions ?? summary.ActiveSessions).ToString("N0", CultureInfo.InvariantCulture),
+			activeSessionsSubtitle);
 		_cardFailedLogins.SetValue(
 			summary.FailedLogins24h.ToString("N0", CultureInfo.InvariantCulture),
 			"event id 4625, last 24 hours");
@@ -324,6 +332,42 @@ public sealed class OverviewPage : TabPage
 		_cardDbSize.SetValue(
 			FormatBytes(summary.DatabaseSizeBytes),
 			FormatGrowth(summary));
+	}
+
+	/// <summary>Resolves the "Active sessions" card value. When the service summary is
+	/// available and reports a non-zero count, the IPC value is preferred; otherwise the
+	/// Configurator falls back to the same <see cref="LocalRdpSessionProvider"/> the
+	/// Remote RDP Clients tab uses so the two surfaces never disagree.</summary>
+	private async Task<(int? Count, string Subtitle)> CountActiveSessionsAsync(OverviewSummaryDto? summary)
+	{
+		bool ipcUsable = summary is not null && summary.Status == IpcResultStatus.Success && summary.ActiveSessions > 0;
+		if (ipcUsable)
+		{
+			return ((int)summary!.ActiveSessions, "RDP sessions in Active state (service IPC)");
+		}
+
+		try
+		{
+			LocalSessionFallbackResult fallback = await _localSessions
+				.FetchForOrchestratorAsync(CancellationToken.None)
+				.ConfigureAwait(true);
+			if (fallback.Success)
+			{
+				int count = ActiveSessionCounter.CountActiveUserSessions(fallback.Sessions);
+				string subtitle = summary is null
+					? "RDP sessions in Active state (local fallback)"
+					: "RDP sessions in Active state (local fallback; IPC reported 0)";
+				return (count, subtitle);
+			}
+		}
+		catch (Exception)
+		{
+			// Swallow — the card will show "—" with the unreachable subtitle below.
+		}
+
+		return summary is null
+			? ((int?)null, "service unreachable")
+			: ((int)summary.ActiveSessions, "RDP sessions in Active state (service IPC reported 0)");
 	}
 
 	private static string FormatBytes(long bytes)

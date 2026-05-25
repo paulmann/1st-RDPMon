@@ -60,23 +60,25 @@ public class SessionCommandBuilderTests
 	}
 
 	[Fact]
-	public void BuildShadow_Control_AddsControlOnly()
+	public void BuildShadow_Control_AddsControlAndAdmin()
 	{
 		IReadOnlyList<string> args = SessionCommandBuilder.BuildShadow(4, SessionCommandBuilder.ShadowMode.Control);
-		Assert.Equal(2, args.Count);
+		Assert.Equal(3, args.Count);
 		Assert.Equal("/shadow:4", args[0]);
 		Assert.Equal("/control", args[1]);
+		Assert.Equal("/admin", args[2]);
 		Assert.DoesNotContain("/noConsentPrompt", args);
 	}
 
 	[Fact]
-	public void BuildShadow_ControlNoConsent_AddsBothSwitches()
+	public void BuildShadow_ControlNoConsent_MatchesOperatorManualCommandLine()
 	{
-		IReadOnlyList<string> args = SessionCommandBuilder.BuildShadow(5, SessionCommandBuilder.ShadowMode.ControlNoConsent);
-		Assert.Equal(3, args.Count);
-		Assert.Equal("/shadow:5", args[0]);
+		IReadOnlyList<string> args = SessionCommandBuilder.BuildShadow(2, SessionCommandBuilder.ShadowMode.ControlNoConsent);
+		Assert.Equal(4, args.Count);
+		Assert.Equal("/shadow:2", args[0]);
 		Assert.Equal("/control", args[1]);
 		Assert.Equal("/noConsentPrompt", args[2]);
+		Assert.Equal("/admin", args[3]);
 	}
 
 	[Fact]

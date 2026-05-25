@@ -213,14 +213,15 @@ public sealed class LocalRdpSessionProvider
 		CancellationToken ct)
 	{
 		string exe = ResolveQwinstaPath();
+		Encoding encoding = QwinstaConsoleEncoding.Resolve();
 		ProcessStartInfo psi = new(exe)
 		{
 			UseShellExecute = false,
 			CreateNoWindow = true,
 			RedirectStandardOutput = true,
 			RedirectStandardError = true,
-			StandardOutputEncoding = GetConsoleOutputEncoding(),
-			StandardErrorEncoding = GetConsoleOutputEncoding(),
+			StandardOutputEncoding = encoding,
+			StandardErrorEncoding = encoding,
 		};
 		foreach (string a in args)
 		{
@@ -297,24 +298,6 @@ public sealed class LocalRdpSessionProvider
 		}
 
 		return "qwinsta.exe";
-	}
-
-	/// <summary>Returns the console output encoding to use when reading qwinsta stdout.
-	/// qwinsta writes through the standard Windows console pipe using the active OEM code
-	/// page (cp866 on Russian builds, cp437 on English builds), so we prefer that
-	/// encoding when available and degrade to UTF-8 otherwise. Wrapped in a try/catch
-	/// because <see cref="Console.OutputEncoding"/> can throw under headless / detached
-	/// scenarios.</summary>
-	private static Encoding GetConsoleOutputEncoding()
-	{
-		try
-		{
-			return Console.OutputEncoding;
-		}
-		catch (System.IO.IOException)
-		{
-			return Encoding.UTF8;
-		}
 	}
 
 	private static string Truncate(string? value, int max)

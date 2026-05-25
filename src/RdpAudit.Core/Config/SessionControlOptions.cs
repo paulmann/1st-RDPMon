@@ -23,8 +23,13 @@ public sealed class SessionControlOptions
 	/// <summary>Allows operators to log off RDP sessions through the Configurator.</summary>
 	public bool AllowLogoff { get; set; } = true;
 
-	/// <summary>Allows operators to initiate session shadowing through the Configurator.</summary>
-	public bool AllowShadow { get; set; }
+	/// <summary>Allows operators to initiate session shadowing through the Configurator.
+	/// Defaults to true — the actual gate is the Microsoft Terminal Services Shadow
+	/// registry policy, which is consulted before the launch; an additional service-side
+	/// hard-deny defeated the operator's intent when the OS policy already permitted the
+	/// action (e.g. when <c>mstsc /shadow:N /control /noConsentPrompt /admin</c> works
+	/// manually).</summary>
+	public bool AllowShadow { get; set; } = true;
 
 	/// <summary>Requires the configured shadow policy to be present before shadowing is permitted.</summary>
 	public bool RequireShadowPolicy { get; set; } = true;

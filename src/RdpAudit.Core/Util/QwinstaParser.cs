@@ -400,45 +400,40 @@ public static class QwinstaParser
 		}
 	}
 
+	// Mirrors the WtsStateMap used by the reference qwinsta-en.ps1 script: covers the
+	// Russian (Активно / Подключено / Диск / Прием / Тень / Простой), English short
+	// (Conn / Disc), and German (Aktiv / Getrennt / Warten) tokens emitted by localized
+	// Windows builds. Normalization is OrdinalIgnoreCase so case / encoding artifacts do
+	// not block the canonical mapping.
+	private static readonly System.Collections.Generic.Dictionary<string, string> LocalizedStateMap =
+		new(StringComparer.OrdinalIgnoreCase)
+		{
+			// Russian
+			["Активно"] = "Active",
+			["Подключено"] = "Connected",
+			["Отключено"] = "Disconnected",
+			["Диск"] = "Disconnected",
+			["Прием"] = "Listen",
+			["Приём"] = "Listen",
+			["Простой"] = "Idle",
+			["Тень"] = "Shadow",
+			["Теневая"] = "Shadow",
+			// German
+			["Aktiv"] = "Active",
+			["Getrennt"] = "Disconnected",
+			["Warten"] = "Listen",
+			["Verbunden"] = "Connected",
+			// English shorthand from older Windows releases
+			["Conn"] = "Connected",
+			["Disc"] = "Disconnected",
+			["Listening"] = "Listen",
+			["ConnectQuery"] = "ConnectQuery",
+			["ConnQ"] = "ConnectQuery",
+		};
+
 	private static string MapLocalizedState(string token)
 	{
-		if (string.Equals(token, "Активно", StringComparison.OrdinalIgnoreCase))
-		{
-			return "Active";
-		}
-
-		if (string.Equals(token, "Подключено", StringComparison.OrdinalIgnoreCase))
-		{
-			return "Connected";
-		}
-
-		if (string.Equals(token, "Отключено", StringComparison.OrdinalIgnoreCase))
-		{
-			return "Disconnected";
-		}
-
-		if (string.Equals(token, "Диск", StringComparison.OrdinalIgnoreCase))
-		{
-			return "Disconnected";
-		}
-
-		if (string.Equals(token, "Прием", StringComparison.OrdinalIgnoreCase)
-			|| string.Equals(token, "Приём", StringComparison.OrdinalIgnoreCase))
-		{
-			return "Listen";
-		}
-
-		if (string.Equals(token, "Простой", StringComparison.OrdinalIgnoreCase))
-		{
-			return "Idle";
-		}
-
-		if (string.Equals(token, "Теневая", StringComparison.OrdinalIgnoreCase))
-		{
-			return "Shadow";
-		}
-
-		return token;
+		return LocalizedStateMap.TryGetValue(token, out string? mapped) ? mapped : token;
 	}
 
 	private sealed record ColumnLayout(

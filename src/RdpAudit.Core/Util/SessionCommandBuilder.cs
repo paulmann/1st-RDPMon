@@ -84,9 +84,13 @@ public static class SessionCommandBuilder
 		ControlNoConsent,
 	}
 
-	/// <summary>Builds the argument list for <c>mstsc.exe /shadow:&lt;id&gt; [/control] [/noConsentPrompt]</c>.
+	/// <summary>Builds the argument list for <c>mstsc.exe /shadow:&lt;id&gt; [/control] [/noConsentPrompt] [/admin]</c>.
 	/// Always non-blocking: mstsc launches its own window. The session id is interpolated only
-	/// into the <c>/shadow:</c> switch and is validated as a non-negative integer first.</summary>
+	/// into the <c>/shadow:</c> switch and is validated as a non-negative integer first.
+	/// Control modes append <c>/admin</c> so the shadow connects to the administrative listener
+	/// on hardened Windows hosts where the regular RDP listener is restricted — mirrors the
+	/// operator's known-good manual command line
+	/// (<c>mstsc /noConsentPrompt /control /admin /shadow:&lt;id&gt;</c>).</summary>
 	public static IReadOnlyList<string> BuildShadow(int sessionId, ShadowMode mode)
 	{
 		SessionIdValidation v = ValidateSessionId(sessionId);
@@ -108,6 +112,11 @@ public static class SessionCommandBuilder
 		if (mode == ShadowMode.ControlNoConsent)
 		{
 			args.Add("/noConsentPrompt");
+		}
+
+		if (mode == ShadowMode.Control || mode == ShadowMode.ControlNoConsent)
+		{
+			args.Add("/admin");
 		}
 
 		return args;

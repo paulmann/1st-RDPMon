@@ -2112,7 +2112,7 @@ public sealed class IpcDispatcher
 			}
 			dto.ActiveSessions = sessions is null
 				? 0
-				: sessions.Sessions.Count(s => string.Equals(s.State, "Active", StringComparison.OrdinalIgnoreCase));
+				: ActiveSessionCounter.CountActiveUserSessions(sessions.Sessions);
 
 			dto.ServiceHealth = "Running";
 			dto.Message = string.Format(CultureInfo.InvariantCulture,
