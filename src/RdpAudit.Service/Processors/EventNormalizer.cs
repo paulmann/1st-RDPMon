@@ -81,7 +81,12 @@ public sealed class EventNormalizer
 		}
 		else
 		{
-			string? cached = _correlation.Lookup(logonId, sessionId, userName);
+			// FIX(ip-correlation): freshness reference is the event's own timestamp, not the wall
+			// clock. EventLog backfill at startup, replayed payloads, and any deterministic test
+			// fixture seed and look up entries in event-time order — using DateTime.UtcNow here
+			// would mark just-seeded entries as TTL-expired whenever the event stream lags
+			// behind real time, which is the common case during startup hydration.
+			string? cached = _correlation.Lookup(logonId, sessionId, userName, dto.TimeUtc);
 			if (cached is not null)
 			{
 				resolvedIp = cached;

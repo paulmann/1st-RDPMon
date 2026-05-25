@@ -87,12 +87,29 @@ public sealed class SessionCorrelationCache
 
 	/// <summary>
 	/// Resolve the most specific cached IP for the supplied tuple. Order: LogonId →
-	/// (SessionId+UserName) → UserName. Entries past the TTL are skipped.
+	/// (SessionId+UserName) → UserName. Entries past the TTL are skipped. The freshness reference
+	/// is taken from the configured clock; pass an explicit timestamp via the
+	/// <see cref="Lookup(string?, int?, string?, DateTime)"/> overload when the caller is driving
+	/// the cache from an event-time stream (e.g. EventLog backfill) where wall-clock comparisons
+	/// would falsely classify just-seeded entries as expired.
 	/// </summary>
 	public string? Lookup(string? logonId, int? sessionId, string? userName)
 	{
-		DateTime now = _utcNow();
-		if (TryReadFresh(_byLogonId, !string.IsNullOrWhiteSpace(logonId) ? NormalizeLogonId(logonId!) : null, now, out string? ip))
+		return Lookup(logonId, sessionId, userName, _utcNow());
+	}
+
+	/// <summary>
+	/// Resolve the most specific cached IP for the supplied tuple, measuring TTL against an
+	/// externally-supplied reference time. Order: LogonId → (SessionId+UserName) → UserName.
+	/// Entries past the TTL relative to <paramref name="nowUtc"/> are skipped. This overload exists
+	/// so the pipeline can use the current event's timestamp — TTL is a property of the event
+	/// stream being processed, not of the wall clock; mixing the two means backfilled or
+	/// replayed events would skip the cache entirely even when seed and lookup are seconds apart
+	/// in event time.
+	/// </summary>
+	public string? Lookup(string? logonId, int? sessionId, string? userName, DateTime nowUtc)
+	{
+		if (TryReadFresh(_byLogonId, !string.IsNullOrWhiteSpace(logonId) ? NormalizeLogonId(logonId!) : null, nowUtc, out string? ip))
 		{
 			return ip;
 		}
@@ -100,13 +117,13 @@ public sealed class SessionCorrelationCache
 		string? suKey = sessionId is int sid && !string.IsNullOrWhiteSpace(userName)
 			? SessionUserKey(sid, userName!)
 			: null;
-		if (TryReadFresh(_bySessionUser, suKey, now, out ip))
+		if (TryReadFresh(_bySessionUser, suKey, nowUtc, out ip))
 		{
 			return ip;
 		}
 
 		string? uKey = !string.IsNullOrWhiteSpace(userName) ? userName!.Trim() : null;
-		if (TryReadFresh(_byUser, uKey, now, out ip))
+		if (TryReadFresh(_byUser, uKey, nowUtc, out ip))
 		{
 			return ip;
 		}
