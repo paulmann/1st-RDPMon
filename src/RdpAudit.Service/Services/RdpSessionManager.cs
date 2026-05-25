@@ -65,19 +65,9 @@ public sealed class RdpSessionManager
 		}
 
 		IReadOnlyList<QwinstaSessionRow> rows = QwinstaParser.Parse(tool.StdOut);
-		foreach (QwinstaSessionRow row in rows)
+		IReadOnlyList<RdpSessionDto> dtos = QwinstaSessionMapper.MapAll(rows);
+		foreach (RdpSessionDto dto in dtos)
 		{
-			string state = QwinstaParser.NormalizeState(row.State);
-			RdpSessionDto dto = new()
-			{
-				SessionId = row.SessionId,
-				UserName = row.UserName,
-				SessionName = row.SessionName,
-				State = state,
-				IsCurrent = row.IsCurrent,
-				IsActive = string.Equals(state, "Active", StringComparison.OrdinalIgnoreCase),
-				IsDisconnected = string.Equals(state, "Disconnected", StringComparison.OrdinalIgnoreCase),
-			};
 			result.Sessions.Add(dto);
 		}
 
