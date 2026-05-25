@@ -42,6 +42,7 @@ public sealed class IpcDispatcher
 	private readonly ILogger<IpcDispatcher> _logger;
 	private readonly RdpSessionManager? _sessions;
 	private readonly ShadowPolicyManager? _shadow;
+	private readonly RdpConfigurationReader? _rdpConfigReader;
 	private readonly IAbuseIpDbClient? _abuseClient;
 	private readonly ISecretProtector? _protector;
 	private readonly IMikroTikClient? _mikroTikClient;
@@ -58,7 +59,8 @@ public sealed class IpcDispatcher
 		ShadowPolicyManager? shadow = null,
 		IAbuseIpDbClient? abuseClient = null,
 		ISecretProtector? protector = null,
-		IMikroTikClient? mikroTikClient = null)
+		IMikroTikClient? mikroTikClient = null,
+		RdpConfigurationReader? rdpConfigReader = null)
 	{
 		_factory = factory;
 		_metrics = metrics;
@@ -72,6 +74,7 @@ public sealed class IpcDispatcher
 		_abuseClient = abuseClient;
 		_protector = protector;
 		_mikroTikClient = mikroTikClient;
+		_rdpConfigReader = rdpConfigReader;
 	}
 
 	public async Task<IpcResponse> DispatchAsync(IpcRequest request, CancellationToken ct)
@@ -138,6 +141,9 @@ public sealed class IpcDispatcher
 				// --- Stage IP-D handlers (RdpConnectionFacts read paths). ---
 				IpcCommand.ListConnectionFacts => await ListConnectionFactsAsync(request.Payload, ct).ConfigureAwait(false),
 				IpcCommand.GetConnectionFactsForIp => await GetConnectionFactsForIpAsync(request.Payload, ct).ConfigureAwait(false),
+
+				// --- Stage RDP-Config handler (RDP Configuration tab). ---
+				IpcCommand.GetRdpConfiguration => GetRdpConfigurationHandler(),
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
 
@@ -1488,6 +1494,20 @@ public sealed class IpcDispatcher
 			SessionId = req.SessionId,
 			Message = "Shadow request approved by policy. Configurator must launch mstsc in the operator's desktop.",
 		};
+	}
+
+	private RdpConfigurationDto GetRdpConfigurationHandler()
+	{
+		if (!OperatingSystem.IsWindows() || _rdpConfigReader is null)
+		{
+			return new RdpConfigurationDto
+			{
+				Status = IpcResultStatus.Unavailable,
+				Message = "RDP configuration is only available on Windows hosts.",
+			};
+		}
+
+		return _rdpConfigReader.Read();
 	}
 
 	private ShadowPolicyStatusDto GetShadowPolicyStatusHandler()

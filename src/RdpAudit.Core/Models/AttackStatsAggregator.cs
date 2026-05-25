@@ -10,6 +10,22 @@
 
 namespace RdpAudit.Core.Models;
 
+/// <summary>The auth outcome an <see cref="AttackEventSample"/> represents.</summary>
+public enum AttackEventOutcome
+{
+	/// <summary>The sample is not a logon outcome event for an RDP host. It should be skipped —
+	/// it must NOT increment Total / Successful / Failed.</summary>
+	Unrelated = 0,
+
+	/// <summary>The sample is a confirmed successful logon (Security 4624 with an RDP-relevant
+	/// logon type, TS-RCM 1149 authenticated connection, TS-LSM 21 session logon, or TS-LSM 25
+	/// reconnect).</summary>
+	Successful = 1,
+
+	/// <summary>The sample is a confirmed failed logon (Security 4625).</summary>
+	Failed = 2,
+}
+
 /// <summary>Pure projection helper for Attack Statistics aggregation.</summary>
 /// <remarks>
 /// The Service-side worker pulls bounded slices of <c>RawEvents</c> (logon successes / failures)
@@ -25,6 +41,70 @@ public static class AttackStatsAggregator
 
 	/// <summary>Security channel logon-failure event id (Windows Security log).</summary>
 	public const int EventIdLogonFailure = 4625;
+
+	internal const string SecurityChannel = "Security";
+	internal const string TsLsmChannel = "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational";
+	internal const string TsRcmChannel = "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational";
+
+	/// <summary>
+	/// Classifies an event into <see cref="AttackEventOutcome"/>. Mapping mirrors the same set of
+	/// events <see cref="RdpConnectionFact"/> upserts treat as authoritative for an RDP login outcome.
+	/// </summary>
+	/// <remarks>
+	/// On many Windows SKUs, a successful RDP logon does not produce a usable Security 4624 (the
+	/// IpAddress field is "-" or local), while the TerminalServices channels carry the IP and the
+	/// authoritative successful-auth signal — TS-RCM 1149 / TS-LSM 21. Without this classifier the
+	/// aggregator was scoring TS-RCM 1149 as a failure (because the old fallback counted any
+	/// unknown event id toward _failed), which inverted the Attack Statistics tab. We now require
+	/// an explicit positive classification before incrementing Failed.
+	/// </remarks>
+	public static AttackEventOutcome Classify(string? channel, int eventId, int? logonType)
+	{
+		string ch = channel ?? string.Empty;
+
+		if (string.Equals(ch, SecurityChannel, StringComparison.OrdinalIgnoreCase) || ch.Length == 0)
+		{
+			switch (eventId)
+			{
+				case EventIdLogonSuccess:
+					// Only count remote/RDP-relevant logon types as connection successes —
+					// 2 Interactive, 3 Network, 7 Unlock, 10 RemoteInteractive, 11 CachedInteractive.
+					// LogonType 0 (or missing) is permitted because some channels omit the field but
+					// still represent an RDP success when paired with a non-null source IP.
+					if (logonType is null or 0 or 2 or 3 or 7 or 10 or 11)
+					{
+						return AttackEventOutcome.Successful;
+					}
+
+					return AttackEventOutcome.Unrelated;
+				case EventIdLogonFailure:
+					return AttackEventOutcome.Failed;
+				default:
+					return AttackEventOutcome.Unrelated;
+			}
+		}
+
+		if (string.Equals(ch, TsRcmChannel, StringComparison.OrdinalIgnoreCase))
+		{
+			return eventId switch
+			{
+				1149 => AttackEventOutcome.Successful, // RD Gateway / NLA authenticated connection.
+				_ => AttackEventOutcome.Unrelated,
+			};
+		}
+
+		if (string.Equals(ch, TsLsmChannel, StringComparison.OrdinalIgnoreCase))
+		{
+			return eventId switch
+			{
+				21 => AttackEventOutcome.Successful, // session logon with IP
+				25 => AttackEventOutcome.Successful, // session reconnected
+				_ => AttackEventOutcome.Unrelated,
+			};
+		}
+
+		return AttackEventOutcome.Unrelated;
+	}
 
 	/// <summary>
 	/// Aggregates one row per distinct source IP from <paramref name="samples"/>, scoring each row
@@ -50,6 +130,12 @@ public static class AttackStatsAggregator
 				continue;
 			}
 
+			AttackEventOutcome outcome = Classify(sample.Channel, sample.EventId, sample.LogonType);
+			if (outcome == AttackEventOutcome.Unrelated)
+			{
+				continue;
+			}
+
 			string ip = sample.SourceIp.Trim();
 			if (!byIp.TryGetValue(ip, out Accumulator? acc))
 			{
@@ -57,7 +143,7 @@ public static class AttackStatsAggregator
 				byIp[ip] = acc;
 			}
 
-			acc.Apply(sample);
+			acc.Apply(sample, outcome);
 		}
 
 		List<AttackStat> result = new(byIp.Count);
@@ -96,20 +182,15 @@ public static class AttackStatsAggregator
 			Ip = ip;
 		}
 
-		public void Apply(AttackEventSample sample)
+		public void Apply(AttackEventSample sample, AttackEventOutcome outcome)
 		{
 			_total++;
-			switch (sample.EventId)
+			switch (outcome)
 			{
-				case EventIdLogonSuccess:
+				case AttackEventOutcome.Successful:
 					_successful++;
 					break;
-				case EventIdLogonFailure:
-					_failed++;
-					break;
-				default:
-					// Unknown event id contributes only to the total/seen window — counted as a
-					// failure for scoring purposes when no Channel/EventId hint suggests success.
+				case AttackEventOutcome.Failed:
 					_failed++;
 					break;
 			}
@@ -166,13 +247,18 @@ public static class AttackStatsAggregator
 
 /// <summary>Compact event sample fed to <see cref="AttackStatsAggregator.Aggregate"/>.</summary>
 /// <param name="SourceIp">Trimmed source IP (any non-empty IPv4 / IPv6 textual form).</param>
-/// <param name="EventId">Windows event id (4624 / 4625; unknown ids count toward the failed total).</param>
+/// <param name="EventId">Windows event id.</param>
 /// <param name="TimeUtc">Event UTC timestamp.</param>
 /// <param name="UserName">Optional attempted login name; null / blank entries are dropped.</param>
 /// <param name="LogonType">Optional Windows logon type captured from the event.</param>
+/// <param name="Channel">Originating Windows event channel — used by
+/// <see cref="AttackStatsAggregator.Classify"/> to recognise TS-RCM 1149 / TS-LSM 21/25 as
+/// successful authentications. Defaults to <c>"Security"</c> when omitted so legacy callers that
+/// only pass Security-channel events keep their behaviour.</param>
 public readonly record struct AttackEventSample(
 	string? SourceIp,
 	int EventId,
 	DateTime TimeUtc,
 	string? UserName,
-	int? LogonType);
+	int? LogonType,
+	string? Channel = AttackStatsAggregator.SecurityChannel);

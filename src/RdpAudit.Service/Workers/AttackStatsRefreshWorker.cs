@@ -134,7 +134,8 @@ public sealed class AttackStatsRefreshWorker : BackgroundService
 			e.EventId,
 			e.TimeUtc,
 			e.UserName,
-			e.LogonType));
+			e.LogonType,
+			e.Channel));
 
 		IReadOnlyList<AttackStat> projected = AttackStatsAggregator.Aggregate(samples, blockedIps, nowUtc);
 

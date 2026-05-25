@@ -39,28 +39,36 @@ public sealed class ServicePage : TabPage
 	private readonly System.Windows.Forms.Timer _timer;
 	private readonly ServiceControlRunner _runner = new(ServiceName, ServiceDisplayName);
 
+	// FIX-3: keep lifecycle buttons as fields so RefreshAsync can disable/enable each one based
+	// on whether the Windows service is currently installed and running.
+	private readonly Button _btnInstall;
+	private readonly Button _btnUninstall;
+	private readonly Button _btnStart;
+	private readonly Button _btnStop;
+	private readonly Button _btnRestart;
+
 	public ServicePage(IpcClient ipc)
 	{
 		_ipc = ipc;
 
 		FlowLayoutPanel buttons = new() { Dock = DockStyle.Top, Height = 36 };
-		Button install = new() { Text = "Install service", Width = 130 };
-		Button uninstall = new() { Text = "Uninstall service", Width = 130 };
-		Button start = new() { Text = "Start", Width = 80 };
-		Button stop = new() { Text = "Stop", Width = 80 };
-		Button restart = new() { Text = "Restart", Width = 80 };
+		_btnInstall = new Button { Text = "Install service", Width = 130 };
+		_btnUninstall = new Button { Text = "Uninstall service", Width = 130 };
+		_btnStart = new Button { Text = "Start", Width = 80 };
+		_btnStop = new Button { Text = "Stop", Width = 80 };
+		_btnRestart = new Button { Text = "Restart", Width = 80 };
 		Button backup = new() { Text = "Backup Settings", Width = 140 };
 		Button restore = new() { Text = "Restore Registry/Policy", Width = 180 };
 
-		install.Click += async (_, _) => await InstallServiceAsync().ConfigureAwait(true);
-		uninstall.Click += async (_, _) => await RunLifecycleAsync(uninstall, _runner.UninstallAsync, "RdpAudit Uninstall").ConfigureAwait(true);
-		start.Click += async (_, _) => await RunLifecycleAsync(start, _runner.StartAsync, "RdpAudit Start").ConfigureAwait(true);
-		stop.Click += async (_, _) => await RunLifecycleAsync(stop, _runner.StopAsync, "RdpAudit Stop").ConfigureAwait(true);
-		restart.Click += async (_, _) => await RunLifecycleAsync(restart, _runner.RestartAsync, "RdpAudit Restart").ConfigureAwait(true);
+		_btnInstall.Click += async (_, _) => await InstallServiceAsync().ConfigureAwait(true);
+		_btnUninstall.Click += async (_, _) => await RunLifecycleAsync(_btnUninstall, _runner.UninstallAsync, "RdpAudit Uninstall").ConfigureAwait(true);
+		_btnStart.Click += async (_, _) => await RunLifecycleAsync(_btnStart, _runner.StartAsync, "RdpAudit Start").ConfigureAwait(true);
+		_btnStop.Click += async (_, _) => await RunLifecycleAsync(_btnStop, _runner.StopAsync, "RdpAudit Stop").ConfigureAwait(true);
+		_btnRestart.Click += async (_, _) => await RunLifecycleAsync(_btnRestart, _runner.RestartAsync, "RdpAudit Restart").ConfigureAwait(true);
 		backup.Click += async (_, _) => await BackupAsync().ConfigureAwait(true);
 		restore.Click += async (_, _) => await RestoreAsync().ConfigureAwait(true);
 
-		buttons.Controls.AddRange(new Control[] { install, uninstall, start, stop, restart, backup, restore });
+		buttons.Controls.AddRange(new Control[] { _btnInstall, _btnUninstall, _btnStart, _btnStop, _btnRestart, backup, restore });
 
 		_process = new Label
 		{
@@ -155,6 +163,23 @@ public sealed class ServicePage : TabPage
 		_process.Text = FormatProcessInfo(processInfo);
 		_layoutPanel.Text = FormatLayout(layout);
 		_alertsGrid.DataSource = alerts ?? new List<Alert>();
+		UpdateButtonStates(processInfo);
+	}
+
+	/// <summary>FIX-3: reflect the live service state in the button row so the operator cannot
+	/// click Install when already installed, or Start when already running. The mapping itself
+	/// lives in <see cref="ServiceButtonStateModel"/> so it can be unit tested.</summary>
+	private void UpdateButtonStates(ServiceProcessInfo info)
+	{
+		bool running = info.Installed
+			&& info.ProcessId is not null
+			&& string.Equals(info.FinalState, "RUNNING", StringComparison.OrdinalIgnoreCase);
+		ServiceButtonState state = ServiceButtonStateModel.Compute(info.Installed, running);
+		_btnInstall.Enabled = state.Install;
+		_btnUninstall.Enabled = state.Uninstall;
+		_btnStart.Enabled = state.Start;
+		_btnStop.Enabled = state.Stop;
+		_btnRestart.Enabled = state.Restart;
 	}
 
 	private static string FormatProcessInfo(ServiceProcessInfo info)
@@ -239,8 +264,15 @@ public sealed class ServicePage : TabPage
 		}
 		finally
 		{
+			// FIX-3: re-enable the trigger button temporarily so that if RefreshAsync below cannot
+			// reach the service IPC, the operator is not stranded with a permanently-disabled
+			// button. The follow-up RefreshAsync() restores the correct enabled state based on
+			// the live service install/run status — when the service is now Running, Start will
+			// be re-disabled by UpdateButtonStates immediately afterwards.
 			trigger.Enabled = true;
 		}
+
+		await RefreshAsync().ConfigureAwait(true);
 	}
 
 	/// <summary>Discover the sibling Service distribution, copy it under Program Files,
