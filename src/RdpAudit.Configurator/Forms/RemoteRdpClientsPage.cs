@@ -39,6 +39,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 	private readonly IpcClient _ipc;
 	private readonly ShadowLauncher _launcher = new();
 	private readonly LocalRdpSessionProvider _localSessions = new();
+	private readonly LocalShadowPolicyReader _localShadowPolicy = new();
 
 	private readonly DataGridView _grid;
 	private readonly BindingList<SessionRow> _binding = new();
@@ -505,17 +506,37 @@ public sealed class RemoteRdpClientsPage : TabPage
 
 	public async Task RefreshShadowPolicyAsync()
 	{
+		ShadowPolicyStatusDto? response = null;
 		try
 		{
-			ShadowPolicyStatusDto? response = await _ipc
+			response = await _ipc
 				.SendAsync<ShadowPolicyStatusDto>(IpcCommand.GetShadowPolicyStatus)
 				.ConfigureAwait(true);
-			ApplyShadowStatus(response);
 		}
 		catch (Exception ex)
 		{
-			SetStatus("Shadow policy refresh FAILED: " + ex.GetType().Name + " — " + ex.Message);
+			SetStatus("Shadow policy refresh via IPC failed (" + ex.GetType().Name + "): " + ex.Message
+				+ " — falling back to local registry read.");
 		}
+
+		if (response is not null)
+		{
+			ApplyShadowStatus(response);
+			return;
+		}
+
+		// Local fallback: synthesize a minimal ShadowPolicyStatusDto from the registry so the
+		// operator still sees the effective policy when the service IPC is unreachable.
+		ShadowPolicyMode local = _localShadowPolicy.Read();
+		int rawValue = local == ShadowPolicyMode.NotConfigured ? -1 : (int)local;
+		ShadowPolicyStatusDto localSnapshot = new()
+		{
+			Status = IpcResultStatus.Success,
+			ShadowMode = rawValue,
+			AllPermissionsEnabled = rawValue == ShadowPolicyModel.EnableAllPermissionsValue,
+			Message = "Local registry fallback (service IPC unreachable).",
+		};
+		ApplyShadowStatus(localSnapshot);
 	}
 
 	private void ApplyShadowStatus(ShadowPolicyStatusDto? status)
@@ -733,35 +754,61 @@ public sealed class RemoteRdpClientsPage : TabPage
 			return;
 		}
 
-		// 1) Ask the service to validate against policy.
-		SessionActionResult? policy = await _ipc
-			.SendAsync<SessionActionResult>(IpcCommand.ShadowSession, new SessionActionRequest
-			{
-				SessionId = _menuRow.SessionId,
-				Reason = "Configurator shadow request",
-				ShadowMode = (int)mode,
-			})
-			.ConfigureAwait(true);
-
-		if (policy is null)
+		// 1) Ask the service to validate against policy — service may be unreachable.
+		ShadowServiceDecision serviceDecision;
+		try
 		{
-			SetStatus("ShadowSession FAILED: service unreachable.");
-			return;
+			SessionActionResult? policy = await _ipc
+				.SendAsync<SessionActionResult>(IpcCommand.ShadowSession, new SessionActionRequest
+				{
+					SessionId = _menuRow.SessionId,
+					Reason = "Configurator shadow request",
+					ShadowMode = (int)mode,
+				})
+				.ConfigureAwait(true);
+
+			if (policy is null)
+			{
+				serviceDecision = ShadowServiceDecision.FromUnreachable("IPC returned null");
+			}
+			else if (policy.Status == IpcResultStatus.Success)
+			{
+				serviceDecision = ShadowServiceDecision.FromApproval(policy.Message);
+			}
+			else
+			{
+				serviceDecision = ShadowServiceDecision.FromRefusal(policy.Message ?? policy.Status.ToString());
+			}
+		}
+		catch (Exception ex)
+		{
+			serviceDecision = ShadowServiceDecision.FromUnreachable(ex.GetType().Name + " — " + ex.Message);
 		}
 
-		if (policy.Status != IpcResultStatus.Success)
+		// 2) Read the local Shadow policy as a fallback / cross-check.
+		ShadowPolicyMode localPolicy = _localShadowPolicy.Read();
+		ShadowGateDecision decision = ShadowGate.Evaluate(serviceDecision, localPolicy, mode);
+
+		if (!decision.ShouldLaunch)
 		{
 			SetStatus(string.Format(CultureInfo.InvariantCulture,
-				"ShadowSession refused by service: {0}", policy.Message ?? policy.Status.ToString()));
+				"ShadowSession refused: {0}", decision.Reason));
 			return;
 		}
 
-		// 2) Spawn mstsc with sanitized arguments.
+		// 3) Spawn mstsc with sanitized arguments.
 		ShadowLaunchResult launch = _launcher.Launch(_menuRow.SessionId, mode);
+		string sourceTag = decision.Outcome switch
+		{
+			ShadowGateOutcome.AllowByService => "service-approved",
+			ShadowGateOutcome.AllowByLocalPolicy => "local-policy fallback (service unreachable)",
+			ShadowGateOutcome.AllowOverridingStaleService => "local-policy override (service refusal treated as stale)",
+			_ => "approved",
+		};
 		SetStatus(launch.Started
 			? string.Format(CultureInfo.InvariantCulture,
-				"mstsc /shadow started for session {0} (pid {1}, mode {2}).",
-				_menuRow.SessionId, launch.ProcessId, mode)
+				"mstsc /shadow started for session {0} (pid {1}, mode {2}, gate={3}).",
+				_menuRow.SessionId, launch.ProcessId, mode, sourceTag)
 			: string.Format(CultureInfo.InvariantCulture,
 				"mstsc /shadow FAILED for session {0}: {1}",
 				_menuRow.SessionId, launch.Error ?? "(unknown error)"));

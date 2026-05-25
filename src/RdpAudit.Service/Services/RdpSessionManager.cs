@@ -154,12 +154,15 @@ public sealed class RdpSessionManager
 
 	private static async Task<SessionToolResult> RunToolAsync(string tool, IReadOnlyList<string> args, CancellationToken ct)
 	{
+		System.Text.Encoding encoding = QwinstaConsoleEncoding.Resolve();
 		ProcessStartInfo psi = new(tool)
 		{
 			UseShellExecute = false,
 			CreateNoWindow = true,
 			RedirectStandardOutput = true,
 			RedirectStandardError = true,
+			StandardOutputEncoding = encoding,
+			StandardErrorEncoding = encoding,
 		};
 		foreach (string a in args)
 		{
