@@ -12,7 +12,9 @@ using System.Net;
 using System.Net.Sockets;
 using System.Runtime.Versioning;
 using System.ServiceProcess;
+using Microsoft.Win32;
 using RdpAudit.Core.Events;
+using RdpAudit.Core.Util;
 
 namespace RdpAudit.Configurator.Services;
 
@@ -121,23 +123,50 @@ public sealed class PrerequisiteChecker
 
 	private static PrerequisiteResult CheckRdpPort()
 	{
+		int port = ReadConfiguredRdpPort();
+		string name = string.Format(CultureInfo.InvariantCulture, "RDP port {0} listening", port);
 		try
 		{
 			using TcpClient client = new();
-			IAsyncResult result = client.BeginConnect(IPAddress.Loopback, 3389, null, null);
+			IAsyncResult result = client.BeginConnect(IPAddress.Loopback, port, null, null);
 			bool ok = result.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(2));
 			if (ok && client.Connected)
 			{
 				client.EndConnect(result);
-				return new PrerequisiteResult("RDP port 3389 listening", true, "Connected to 127.0.0.1:3389");
+				return new PrerequisiteResult(name, true, string.Format(CultureInfo.InvariantCulture, "Connected to 127.0.0.1:{0}", port));
 			}
 
-			return new PrerequisiteResult("RDP port 3389 listening", false, "No listener on 127.0.0.1:3389");
+			return new PrerequisiteResult(name, false, string.Format(CultureInfo.InvariantCulture, "No listener on 127.0.0.1:{0}", port));
 		}
 		catch (Exception ex)
 		{
-			return new PrerequisiteResult("RDP port 3389 listening", false, ex.Message);
+			return new PrerequisiteResult(name, false, ex.Message);
 		}
+	}
+
+	/// <summary>Reads the configured RDP TCP port from the WinStations\RDP-Tcp\PortNumber
+	/// registry value. Falls back to <see cref="RdpConfigurationModel.DefaultRdpPort"/> when
+	/// the value is missing or out of range — the listener is the source of truth, not the
+	/// well-known default.</summary>
+	private static int ReadConfiguredRdpPort()
+	{
+		try
+		{
+			using RegistryKey? key = Registry.LocalMachine.OpenSubKey(
+				@"SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp",
+				writable: false);
+			if (key?.GetValue(RdpConfigurationModel.PortNumberValueName) is int dword
+				&& RdpConfigurationModel.IsValidPort(dword))
+			{
+				return dword;
+			}
+		}
+		catch
+		{
+			// Best-effort fallback — registry not readable on this host or under this account.
+		}
+
+		return RdpConfigurationModel.DefaultRdpPort;
 	}
 
 	private static PrerequisiteResult CheckRdpFirewallRule()

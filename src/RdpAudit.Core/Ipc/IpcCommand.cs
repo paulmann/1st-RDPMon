@@ -73,4 +73,10 @@ public enum IpcCommand
 
 	/// <summary>Returns bounded connection facts for a single IP plus aggregate counters (failed/successful logons, first/last seen, active flag).</summary>
 	GetConnectionFactsForIp = 41,
+
+	// --- Stage RDP-Config additions (append-only). ---
+
+	/// <summary>Returns the current RDP listener configuration snapshot (port, fDenyTSConnections,
+	/// NLA, SecurityLayer, single-session, hide-users, shadow mode, plus TermService context).</summary>
+	GetRdpConfiguration = 42,
 }

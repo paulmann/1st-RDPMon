@@ -157,6 +157,7 @@ public static class Program
 		{
 			services.AddSingleton<RdpSessionManager>();
 			services.AddSingleton<ShadowPolicyManager>();
+			services.AddSingleton<RdpConfigurationReader>();
 		}
 		services.AddHttpClient("AbuseIpDb");
 		services.AddSingleton<IAbuseIpDbClient, AbuseIpDbClient>();

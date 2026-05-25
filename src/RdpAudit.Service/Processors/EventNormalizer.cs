@@ -99,14 +99,25 @@ public sealed class EventNormalizer
 			UserName = userName,
 			Domain = domain,
 			LogonId = logonId,
+			// FIX-2: Locked extraction — Windows Security 4624 / 4625 store LogonType under
+			// <Data Name='LogonType'>; the structured XPath already handles UserData payloads.
 			LogonType = EventXmlParser.GetInt(doc, "LogonType"),
 			AuthPackage = EventXmlParser.GetData(doc, "AuthenticationPackageName")
 				?? EventXmlParser.GetData(doc, "Package")
 				?? EventXmlParser.GetData(doc, "PackageName"),
 			SessionId = sessionId,
 			Status = EventXmlParser.GetData(doc, "Status") ?? EventXmlParser.GetData(doc, "FailureReason"),
-			ProcessName = EventXmlParser.GetData(doc, "NewProcessName") ?? EventXmlParser.GetData(doc, "ProcessName"),
-			CommandLine = EventXmlParser.GetData(doc, "CommandLine"),
+			// FIX-2: Broaden Process extraction so 4688 (NewProcessName), 4624/4625/4634
+			// (ProcessName) and the rarer SubjectProcessName / CallerProcessName variants all
+			// surface in the LiveEvents grid. Prior to this list the Process column was empty
+			// for any event id that did not use NewProcessName / ProcessName.
+			ProcessName = EventXmlParser.GetData(doc, "NewProcessName")
+				?? EventXmlParser.GetData(doc, "ProcessName")
+				?? EventXmlParser.GetData(doc, "CallerProcessName")
+				?? EventXmlParser.GetData(doc, "SubjectProcessName")
+				?? EventXmlParser.GetData(doc, "Application"),
+			CommandLine = EventXmlParser.GetData(doc, "CommandLine")
+				?? EventXmlParser.GetData(doc, "ProcessCommandLine"),
 			ObjectName = EventXmlParser.GetData(doc, "ObjectName"),
 			AccessMask = EventXmlParser.GetData(doc, "AccessMask") ?? EventXmlParser.GetData(doc, "AccessList"),
 			Details = detailsJson,

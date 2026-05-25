@@ -122,8 +122,11 @@ public class AttackStatsAggregatorTests
 	}
 
 	[Fact]
-	public void UnknownEventId_CountsTowardFailedTotal()
+	public void UnknownEventId_IsSkippedNotCountedAsFailed()
 	{
+		// Stage FIX-1: prior behaviour counted unknown event ids toward Failed; that inverted the
+		// Attack Statistics tab because TS-RCM 1149 / TS-LSM 21 (successful auths) carry a source
+		// IP and would land here. Unknown events must now be skipped entirely.
 		AttackEventSample[] samples =
 		{
 			new("172.16.0.10", 9999, Now, "guest", null),
@@ -132,10 +135,80 @@ public class AttackStatsAggregatorTests
 			samples,
 			new HashSet<string>(StringComparer.OrdinalIgnoreCase),
 			Now);
+		Assert.Empty(rows);
+	}
+
+	[Fact]
+	public void TsRcm1149_CountsAsSuccessfulNotFailed()
+	{
+		// Regression: TS-RCM 1149 represents a successful authenticated connection. Before the
+		// fix this incremented Failed because the aggregator only recognised Security 4624.
+		AttackEventSample[] samples =
+		{
+			new("10.20.30.40", 1149, Now, "alice", null,
+				"Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational"),
+		};
+		IReadOnlyList<AttackStat> rows = AttackStatsAggregator.Aggregate(
+			samples,
+			new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+			Now);
 		AttackStat row = Assert.Single(rows);
 		Assert.Equal(1, row.TotalAttempts);
-		Assert.Equal(0, row.Successful);
+		Assert.Equal(1, row.Successful);
+		Assert.Equal(0, row.Failed);
+	}
+
+	[Fact]
+	public void TsLsm21_CountsAsSuccessfulNotFailed()
+	{
+		AttackEventSample[] samples =
+		{
+			new("10.20.30.41", 21, Now, "bob", 10,
+				"Microsoft-Windows-TerminalServices-LocalSessionManager/Operational"),
+		};
+		IReadOnlyList<AttackStat> rows = AttackStatsAggregator.Aggregate(
+			samples,
+			new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+			Now);
+		AttackStat row = Assert.Single(rows);
+		Assert.Equal(1, row.Successful);
+		Assert.Equal(0, row.Failed);
+	}
+
+	[Fact]
+	public void Security_4624Success_And_4625Failure_AreCountedCorrectly()
+	{
+		// FIX-1 regression: a successful 4624 must increment Successful (not Failed); a 4625 must
+		// increment Failed; both must end up on the same per-IP row.
+		AttackEventSample[] samples =
+		{
+			new("203.0.113.10", AttackStatsAggregator.EventIdLogonSuccess, Now, "alice", 10, "Security"),
+			new("203.0.113.10", AttackStatsAggregator.EventIdLogonFailure, Now.AddSeconds(-15), "alice", 3, "Security"),
+		};
+		IReadOnlyList<AttackStat> rows = AttackStatsAggregator.Aggregate(
+			samples,
+			new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+			Now);
+		AttackStat row = Assert.Single(rows);
+		Assert.Equal(2, row.TotalAttempts);
+		Assert.Equal(1, row.Successful);
 		Assert.Equal(1, row.Failed);
+	}
+
+	[Fact]
+	public void Security_4624WithNonRdpLogonType_IsSkipped()
+	{
+		// LogonType 4 (Batch) / 5 (Service) are not RDP-relevant — they must not count toward
+		// either Successful or Failed for the Attack Statistics view.
+		AttackEventSample[] samples =
+		{
+			new("10.0.0.99", AttackStatsAggregator.EventIdLogonSuccess, Now, "svcacct", 5, "Security"),
+		};
+		IReadOnlyList<AttackStat> rows = AttackStatsAggregator.Aggregate(
+			samples,
+			new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+			Now);
+		Assert.Empty(rows);
 	}
 
 	[Fact]
