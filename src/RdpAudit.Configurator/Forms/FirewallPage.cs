@@ -17,7 +17,9 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using RdpAudit.Configurator.Ipc;
+using RdpAudit.Configurator.Services;
 using RdpAudit.Core.Config;
+using RdpAudit.Core.Firewall;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
 using RdpAudit.Core.Util;
@@ -81,6 +83,16 @@ public sealed class FirewallPage : TabPage
 
 	private RdpAuditOptions _lastLoadedOptions = new();
 	private FirewallStatusDto? _lastStatus;
+
+	// --- Firewall provider diagnostics panel (Kaspersky / third-party awareness).
+	private readonly Label _providerKindLabel;
+	private readonly Label _providerKasperskyLabel;
+	private readonly Label _providerLocalRulesLabel;
+	private readonly TextBox _providerDiagnosticsText;
+	private readonly Button _providerRefreshButton;
+	private readonly Button _providerCopyButton;
+	private readonly FirewallProviderDiagnosticsProbe _providerProbe = new();
+	private FirewallProviderDiagnostics? _lastProviderDiagnostics;
 
 	public FirewallPage(IpcClient ipc)
 	{
@@ -315,6 +327,83 @@ public sealed class FirewallPage : TabPage
 		Button activeUnblock = MakeButton("Unblock selected", async (_, _) => await OnUnblockActiveAsync().ConfigureAwait(true));
 		_innerTabs.TabPages.Add(BuildGridTab("Active blocks", _activeBlocksGrid, _activeBlocksFilter, null, activeUnblock));
 
+		// --- Firewall provider diagnostics panel -------------------------------------------------
+		// Surfaces the detected provider (plain Windows Defender Firewall vs. Kaspersky-detected vs.
+		// Kaspersky-managed vs. unclassified third-party) so the operator immediately understands
+		// whether direct rule writes are expected to succeed. The Copy diagnostics button puts the
+		// full provider / netsh state on the clipboard for inclusion in support tickets.
+		GroupBox diagnosticsBox = new()
+		{
+			Text = "Firewall provider diagnostics",
+			Dock = DockStyle.Fill,
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
+			MinimumSize = new Size(0, 140),
+		};
+		TableLayoutPanel diagnosticsLayout = new()
+		{
+			Dock = DockStyle.Fill,
+			ColumnCount = 4,
+			RowCount = 4,
+			Padding = new Padding(8),
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
+		};
+		diagnosticsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 220));
+		diagnosticsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+		diagnosticsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
+		diagnosticsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
+		for (int i = 0; i < 4; i++)
+		{
+			diagnosticsLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+		}
+
+		_providerKindLabel = new Label
+		{
+			Dock = DockStyle.Fill,
+			AutoSize = false,
+			Text = "Detected provider: probe pending…",
+		};
+		_providerKasperskyLabel = new Label
+		{
+			Dock = DockStyle.Fill,
+			AutoSize = false,
+			Text = "Kaspersky / third-party: probe pending…",
+		};
+		_providerLocalRulesLabel = new Label
+		{
+			Dock = DockStyle.Fill,
+			AutoSize = false,
+			Text = "Direct Windows Firewall rule management: probe pending…",
+		};
+		_providerDiagnosticsText = new TextBox
+		{
+			Dock = DockStyle.Fill,
+			Multiline = true,
+			ReadOnly = true,
+			ScrollBars = ScrollBars.Vertical,
+			WordWrap = false,
+			Height = 110,
+			Text = "(diagnostics will appear after refresh)",
+		};
+		_providerRefreshButton = new Button { Text = "Refresh diagnostics", AutoSize = true };
+		_providerRefreshButton.Click += (_, _) => RefreshProviderDiagnostics();
+
+		_providerCopyButton = new Button { Text = "Copy diagnostics", AutoSize = true };
+		_providerCopyButton.Click += (_, _) => CopyProviderDiagnostics();
+
+		diagnosticsLayout.Controls.Add(_providerKindLabel, 0, 0);
+		diagnosticsLayout.SetColumnSpan(_providerKindLabel, 2);
+		diagnosticsLayout.Controls.Add(_providerRefreshButton, 2, 0);
+		diagnosticsLayout.Controls.Add(_providerCopyButton, 3, 0);
+		diagnosticsLayout.Controls.Add(_providerKasperskyLabel, 0, 1);
+		diagnosticsLayout.SetColumnSpan(_providerKasperskyLabel, 4);
+		diagnosticsLayout.Controls.Add(_providerLocalRulesLabel, 0, 2);
+		diagnosticsLayout.SetColumnSpan(_providerLocalRulesLabel, 4);
+		diagnosticsLayout.Controls.Add(_providerDiagnosticsText, 0, 3);
+		diagnosticsLayout.SetColumnSpan(_providerDiagnosticsText, 4);
+		diagnosticsBox.Controls.Add(diagnosticsLayout);
+
 		// Root layout: TableLayoutPanel guarantees the auto-block policy controls are never
 		// overlapped by the inner tabs at small client sizes or high DPI. Provider and policy
 		// panels auto-size to their content; the inner tabs absorb remaining vertical space; the
@@ -325,18 +414,20 @@ public sealed class FirewallPage : TabPage
 		{
 			Dock = DockStyle.Fill,
 			ColumnCount = 1,
-			RowCount = 4,
+			RowCount = 5,
 			AutoScroll = true,
 		};
 		root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 		root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 		root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+		root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 		root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 		root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 		root.Controls.Add(providerBox, 0, 0);
-		root.Controls.Add(policyBox, 0, 1);
-		root.Controls.Add(_innerTabs, 0, 2);
-		root.Controls.Add(_statusStrip, 0, 3);
+		root.Controls.Add(diagnosticsBox, 0, 1);
+		root.Controls.Add(policyBox, 0, 2);
+		root.Controls.Add(_innerTabs, 0, 3);
+		root.Controls.Add(_statusStrip, 0, 4);
 
 		Controls.Add(root);
 
@@ -347,7 +438,67 @@ public sealed class FirewallPage : TabPage
 			_timer.Start();
 			await ReloadPolicyAsync().ConfigureAwait(true);
 			await RefreshAllAsync().ConfigureAwait(true);
+			RefreshProviderDiagnostics();
 		};
+	}
+
+	private void RefreshProviderDiagnostics()
+	{
+		try
+		{
+			FirewallProviderDiagnostics diag = _providerProbe.Probe();
+			_lastProviderDiagnostics = diag;
+
+			_providerKindLabel.Text = string.Format(CultureInfo.InvariantCulture,
+				"Detected provider: {0} ({1}). Configured RDP port: {2}.",
+				diag.ProviderName,
+				diag.ProviderKind,
+				diag.ConfiguredRdpPort?.ToString(CultureInfo.InvariantCulture) ?? "unknown");
+
+			_providerKasperskyLabel.Text = diag.ProviderKind switch
+			{
+				FirewallProviderDetectedKind.KasperskyManagedWindowsFirewall =>
+					"Kaspersky is likely managing Windows Firewall — direct netsh writes may be blocked. "
+					+ "Add allow / block rules through Kaspersky Security Center policy instead.",
+				FirewallProviderDetectedKind.KasperskyDetected =>
+					"Kaspersky product detected. Direct Windows Firewall writes may still succeed; "
+					+ "watch the Copy diagnostics output for netsh failures.",
+				FirewallProviderDetectedKind.ThirdPartyFirewallUnknown =>
+					"Third-party security stack detected — RdpAudit cannot guarantee direct Windows Firewall writes.",
+				FirewallProviderDetectedKind.WindowsDefenderFirewall =>
+					"Plain Windows Defender Firewall — RdpAudit can manage rules directly via netsh.",
+				_ => "Provider context could not be classified.",
+			};
+
+			string localRulesText = diag.LocalRuleManagementAllowed switch
+			{
+				true => "yes — RdpAudit will attempt direct rule writes.",
+				false => "no — direct rule writes are expected to fail / be overridden.",
+				_ => "unknown — see netsh diagnostics below.",
+			};
+			_providerLocalRulesLabel.Text = "Direct Windows Firewall rule management: " + localRulesText;
+
+			_providerDiagnosticsText.Text = diag.BuildDiagnosticsText();
+			SetStatus("Firewall provider diagnostics refreshed.");
+		}
+		catch (Exception ex)
+		{
+			SetStatus("Firewall provider diagnostics FAILED: " + ex.GetType().Name + " — " + ex.Message);
+		}
+	}
+
+	private void CopyProviderDiagnostics()
+	{
+		try
+		{
+			string payload = _lastProviderDiagnostics?.BuildDiagnosticsText() ?? "(no diagnostics captured yet)";
+			Clipboard.SetText(payload);
+			SetStatus("Firewall provider diagnostics copied to clipboard.");
+		}
+		catch (Exception ex)
+		{
+			SetStatus("Copy diagnostics FAILED: " + ex.GetType().Name + " — " + ex.Message);
+		}
 	}
 
 	// ---------------------------------------------------------------------------------------------
