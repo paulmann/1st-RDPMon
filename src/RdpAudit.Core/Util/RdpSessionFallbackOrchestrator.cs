@@ -112,22 +112,30 @@ public sealed class RdpSessionFallbackOrchestrator
 			Sessions: local.Sessions,
 			Source: RdpSessionListSource.LocalFallback,
 			IpcDetail: ipcDetail,
-			LocalDetail: null);
+			LocalDetail: local.Detail);
 	}
 }
 
 /// <summary>Outcome of a local fallback session enumeration, surfaced through
-/// <see cref="RdpSessionFallbackOrchestrator"/>.</summary>
+/// <see cref="RdpSessionFallbackOrchestrator"/>. <see cref="Detail"/> is an optional
+/// human-readable note about how the listing was sourced (e.g. "stable English qwinsta
+/// output" vs "localized qwinsta output (Cyrillic-tolerant parse)"), shown by the UI in
+/// the status line so the operator can tell which path served the rows.</summary>
 public sealed record LocalSessionFallbackResult(
 	bool Success,
 	IReadOnlyList<RdpSessionDto> Sessions,
-	string? Error)
+	string? Error,
+	string? Detail)
 {
-	/// <summary>Convenience factory for a successful local listing.</summary>
+	/// <summary>Convenience factory for a successful local listing without a sub-source label.</summary>
 	public static LocalSessionFallbackResult Ok(IReadOnlyList<RdpSessionDto> sessions) =>
-		new(true, sessions, null);
+		new(true, sessions, null, null);
+
+	/// <summary>Convenience factory for a successful local listing with a sub-source label.</summary>
+	public static LocalSessionFallbackResult Ok(IReadOnlyList<RdpSessionDto> sessions, string detail) =>
+		new(true, sessions, null, detail);
 
 	/// <summary>Convenience factory for a failed local listing.</summary>
 	public static LocalSessionFallbackResult Failed(string error) =>
-		new(false, Array.Empty<RdpSessionDto>(), error);
+		new(false, Array.Empty<RdpSessionDto>(), error, null);
 }

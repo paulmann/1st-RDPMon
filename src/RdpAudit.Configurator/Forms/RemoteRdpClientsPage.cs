@@ -483,12 +483,13 @@ public sealed class RemoteRdpClientsPage : TabPage
 			else
 			{
 				SetStatus(string.Format(CultureInfo.InvariantCulture,
-					"Source: local session fallback; historical enrichment unavailable. "
+					"Source: local session fallback ({4}); historical enrichment unavailable. "
 					+ "count={0}, active={1}, disconnected={2}. Service IPC: {3}.",
 					_allSessions.Count,
 					_allSessions.Count(s => s.IsActive),
 					_allSessions.Count(s => s.IsDisconnected),
-					snapshot.IpcDetail ?? "unreachable"));
+					snapshot.IpcDetail ?? "unreachable",
+					snapshot.LocalDetail ?? "unspecified mode"));
 			}
 		}
 		catch (Exception ex)

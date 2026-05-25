@@ -110,6 +110,25 @@ public class RdpSessionFallbackOrchestratorTests
 	}
 
 	[Fact]
+	public async Task CaptureAsync_PropagatesLocalDetail_WhenLocalFallbackUsed()
+	{
+		// The Configurator-side LocalRdpSessionProvider tags its result with a Detail string
+		// (e.g. "stable English qwinsta output" vs the Cyrillic-tolerant variant). The
+		// orchestrator must surface that tag through Snapshot.LocalDetail so the UI status
+		// line can tell which path served the rows.
+		RdpSessionDto local = new() { SessionId = 11, UserName = "af", State = "Active", IsActive = true };
+		RdpSessionFallbackOrchestrator sut = new(
+			ipcFetch: _ => Task.FromResult<RdpSessionListDto?>(null),
+			localFetch: _ => Task.FromResult(LocalSessionFallbackResult.Ok(
+				new[] { local }, "stable English qwinsta output")));
+
+		RdpSessionListSnapshot snapshot = await sut.CaptureAsync().ConfigureAwait(true);
+
+		Assert.Equal(RdpSessionListSource.LocalFallback, snapshot.Source);
+		Assert.Equal("stable English qwinsta output", snapshot.LocalDetail);
+	}
+
+	[Fact]
 	public async Task CaptureAsync_LocalFallback_AccessibleEvenWhenIpcReturnsEmptySuccess()
 	{
 		// Stage IP-D edge: ListRdpSessions can return Success with an empty Sessions list when
