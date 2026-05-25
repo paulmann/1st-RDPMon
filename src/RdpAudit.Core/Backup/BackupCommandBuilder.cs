@@ -21,9 +21,12 @@ public static class BackupCommandBuilder
 	public static IReadOnlyList<string> RegistryKeys { get; } = new[]
 	{
 		@"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options",
+		@"HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server",
 		@"HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp",
 		@"HKLM\SYSTEM\CurrentControlSet\Control\Lsa",
+		@"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System",
 		@"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit",
+		@"HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services",
 	};
 
 	/// <summary>Builds <c>auditpol /backup /file:&lt;path&gt;</c> arguments.</summary>
