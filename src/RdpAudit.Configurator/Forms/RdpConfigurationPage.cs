@@ -4,11 +4,14 @@
 //          relevant to RDP — listener port, enabled state, NLA / SecurityLayer authentication mode,
 //          Single Session per User, Hide Users on Logon Screen, Session Shadowing mode — plus
 //          TermService status and the termsrv.dll product version. Each control carries a short
-//          description so the operator understands exactly what each setting controls. All values
-//          are pulled over IPC from RdpAudit.Service so the Configurator never touches the
-//          registry directly. Mutating the registry is intentionally NOT exposed in this stage;
-//          write-paths flow through the existing elevated registry / policy helpers and are
-//          tracked separately.
+//          description so the operator understands exactly what each setting controls. Values are
+//          requested from RdpAudit.Service over IPC first; when the service is not reachable
+//          (not installed, stopped, or pipe timeout) the page falls back to an in-process direct
+//          registry / service inspection equivalent to the model used by stascorp/rdpwrap's
+//          RDPConf.exe. The UI clearly indicates whether the displayed snapshot came from the
+//          service or the local fallback. Mutating the registry is intentionally NOT exposed in
+//          this stage; write-paths flow through the existing elevated registry / policy helpers
+//          and are tracked separately.
 // Extends: System.Windows.Forms.TabPage
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
@@ -17,17 +20,19 @@ using System.Globalization;
 using System.Runtime.Versioning;
 using System.Text;
 using RdpAudit.Configurator.Ipc;
+using RdpAudit.Configurator.Services;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
 using RdpAudit.Core.Util;
 
 namespace RdpAudit.Configurator.Forms;
 
-/// <summary>Read-only view of the live RDP configuration the Service reports over IPC.</summary>
+/// <summary>Read-only view of the live RDP configuration the Service reports over IPC, with an
+/// in-process registry-based fallback when IPC is unavailable.</summary>
 [SupportedOSPlatform("windows")]
 public sealed class RdpConfigurationPage : TabPage
 {
-	private readonly IpcClient _ipc;
+	private readonly RdpConfigurationSnapshotService _snapshots;
 	private readonly Label _header;
 	private readonly Label _serviceLine;
 	private readonly Label _versionLine;
@@ -51,8 +56,14 @@ public sealed class RdpConfigurationPage : TabPage
 	private readonly Label _status;
 
 	public RdpConfigurationPage(IpcClient ipc)
+		: this(BuildSnapshotService(ipc, new LocalRdpConfigurationProvider()))
 	{
-		_ipc = ipc;
+	}
+
+	public RdpConfigurationPage(RdpConfigurationSnapshotService snapshots)
+	{
+		ArgumentNullException.ThrowIfNull(snapshots);
+		_snapshots = snapshots;
 		Text = "RDP Configuration";
 		Padding = new Padding(12);
 		AutoScroll = true;
@@ -175,6 +186,17 @@ public sealed class RdpConfigurationPage : TabPage
 		HandleCreated += async (_, _) => await RefreshAsync().ConfigureAwait(true);
 	}
 
+	private static RdpConfigurationSnapshotService BuildSnapshotService(
+		IpcClient ipc,
+		LocalRdpConfigurationProvider local)
+	{
+		ArgumentNullException.ThrowIfNull(ipc);
+		ArgumentNullException.ThrowIfNull(local);
+		return new RdpConfigurationSnapshotService(
+			ipcFetch: ct => ipc.SendAsync<RdpConfigurationDto>(IpcCommand.GetRdpConfiguration, null, ct),
+			localFetch: local.Read);
+	}
+
 	private static Label NewSectionHeader(string text, int y)
 	{
 		return new Label
@@ -204,32 +226,57 @@ public sealed class RdpConfigurationPage : TabPage
 		_status.Text = "Reading live configuration...";
 		try
 		{
-			RdpConfigurationDto? dto = await _ipc.SendAsync<RdpConfigurationDto>(IpcCommand.GetRdpConfiguration).ConfigureAwait(true);
-			if (dto is null)
+			RdpConfigurationSnapshotResult result = await _snapshots.CaptureAsync().ConfigureAwait(true);
+			if (!result.HasSnapshot || result.Snapshot is null)
 			{
-				_status.Text = "Service did not return a configuration snapshot.";
+				ApplyUnreadableSnapshot();
+				_status.Text = result.Error is null
+					? "Could not read RDP configuration from the service or the local registry."
+					: "Refresh failed: " + result.Error;
 				return;
 			}
 
-			if (dto.Status != IpcResultStatus.Success)
-			{
-				_status.Text = "Service: " + (dto.Message ?? dto.Status.ToString());
-				return;
-			}
-
-			ApplySnapshot(dto);
+			ApplySnapshot(result.Snapshot);
 			_status.Text = string.Format(CultureInfo.InvariantCulture,
-				"Snapshot captured {0:yyyy-MM-dd HH:mm:ss} UTC.",
-				dto.CapturedUtc);
+				"Source: {0}. Snapshot captured {1:yyyy-MM-dd HH:mm:ss} UTC.",
+				DescribeSource(result.Source),
+				result.Snapshot.CapturedUtc);
 		}
 		catch (Exception ex)
 		{
+			ApplyUnreadableSnapshot();
 			_status.Text = "Refresh failed: " + ex.GetType().Name + ": " + ex.Message;
 		}
 		finally
 		{
 			_refresh.Enabled = true;
 		}
+	}
+
+	private static string DescribeSource(RdpConfigurationSnapshotSource source) => source switch
+	{
+		RdpConfigurationSnapshotSource.ServiceIpc => "RdpAudit service (IPC)",
+		RdpConfigurationSnapshotSource.LocalFallback => "local machine fallback",
+		_ => "unknown",
+	};
+
+	private void ApplyUnreadableSnapshot()
+	{
+		// Replace any lingering "probing..." placeholders with explicit "unknown" so the operator
+		// is not left looking at a perpetually in-progress UI when both paths failed.
+		_serviceLine.Text = "TermService: unknown";
+		_versionLine.Text = "OS: unknown    termsrv.dll: unknown";
+		_portLine.Text = string.Format(CultureInfo.InvariantCulture,
+			"Configured RDP port: unknown (registry not readable; default would be {0})",
+			RdpConfigurationModel.DefaultRdpPort);
+		_enabledLine.Text = "RDP enabled: unknown (fDenyTSConnections not readable).";
+		_authValue.Text = "Unknown (UserAuthentication value not readable)";
+		_authDescription.Text = RdpConfigurationModel.DescribeAuthenticationMode(RdpUserAuthenticationMode.Unknown);
+		_secLayerValue.Text = "Unknown (SecurityLayer value not readable)";
+		_secLayerDescription.Text = RdpConfigurationModel.DescribeSecurityLayer(RdpSecurityLayerMode.Unknown);
+		_singleSession.Checked = false;
+		_hideUsers.Checked = false;
+		_shadowMode.SelectedIndex = 0;
 	}
 
 	private void ApplySnapshot(RdpConfigurationDto dto)
@@ -250,7 +297,9 @@ public sealed class RdpConfigurationPage : TabPage
 
 		int displayedPort = dto.ConfiguredPort ?? RdpConfigurationModel.DefaultRdpPort;
 		string portHint = dto.ConfiguredPort is null
-			? " (PortNumber not configured — Windows defaults to 3389)"
+			? string.Format(CultureInfo.InvariantCulture,
+				" (PortNumber not configured — Windows defaults to {0})",
+				RdpConfigurationModel.DefaultRdpPort)
 			: string.Empty;
 		_portLine.Text = string.Format(CultureInfo.InvariantCulture,
 			"Configured RDP port: {0}{1}",
