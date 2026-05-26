@@ -36,7 +36,21 @@ public sealed class BruteForceRule : AlertRuleBase
 
 	public override async Task<Alert?> EvaluateAsync(RawEvent evt, IAlertContext ctx, CancellationToken ct)
 	{
-		if (evt.EventId != 4625 || string.IsNullOrEmpty(evt.SourceIp))
+		if (evt.EventId != 4625)
+		{
+			return null;
+		}
+
+		// Stage 6: a 4625 whose source IP was never parseable still represents brute-force
+		// pressure on the named account. Detect it through a per-username stream instead of
+		// the per-IP one so the alert is preserved without false attribution to a synthetic
+		// address.
+		if (evt.SourceIpUnresolved && !string.IsNullOrEmpty(evt.UserName))
+		{
+			return await EvaluateUnresolvedAsync(evt, ctx, ct).ConfigureAwait(false);
+		}
+
+		if (string.IsNullOrEmpty(evt.SourceIp))
 		{
 			return null;
 		}
@@ -68,5 +82,32 @@ public sealed class BruteForceRule : AlertRuleBase
 		return CreateAlert(evt,
 			$"Brute force from {evt.SourceIp}: {fails} failures in {window.TotalMinutes:0} min",
 			new { FailCount = fails, WindowMinutes = window.TotalMinutes, Mitre = "T1110" });
+	}
+
+	private async Task<Alert?> EvaluateUnresolvedAsync(RawEvent evt, IAlertContext ctx, CancellationToken ct)
+	{
+		string user = evt.UserName!;
+		TimeSpan window = TimeSpan.FromMinutes(Math.Max(1, ctx.Options.Alerts.BruteForceWindowMinutes));
+		IReadOnlyList<RawEvent> recent = await ctx.GetRecentByUserAsync(user, 500, window, ct).ConfigureAwait(false);
+		int fails = recent.Count(e => e.EventId == 4625 && e.SourceIpUnresolved);
+		int threshold = Math.Max(1, ctx.Options.Alerts.BruteForceThreshold);
+		if (fails < threshold)
+		{
+			return null;
+		}
+
+		string cooldownKey = "user:" + user;
+		if (_cooldown is not null)
+		{
+			TimeSpan cooldown = TimeSpan.FromMinutes(Math.Max(1, ctx.Options.Alerts.ThresholdCooldownMinutes));
+			if (!_cooldown.TryRegister(RuleId, cooldownKey, cooldown))
+			{
+				return null;
+			}
+		}
+
+		return CreateAlert(evt,
+			$"Brute force from (unresolved) against {user}: {fails} failures in {window.TotalMinutes:0} min",
+			new { FailCount = fails, WindowMinutes = window.TotalMinutes, Mitre = "T1110", SourceIp = "(unresolved)" });
 	}
 }

@@ -51,7 +51,9 @@ public static class PerEventIpResolver
 		{
 			return eventId switch
 			{
-				21 or 24 or 25 => EventXmlParser.GetData(doc, "Address"),
+				// 39/40 are session-shadow / disconnect lifecycle events that, when an IP is present
+				// at all, expose it through the same Address field as 21/24/25.
+				21 or 24 or 25 or 39 or 40 => EventXmlParser.GetData(doc, "Address"),
 				_ => null,
 			};
 		}
@@ -61,6 +63,12 @@ public static class PerEventIpResolver
 			return eventId switch
 			{
 				1149 => EventXmlParser.GetData(doc, "Param3"),
+				// 261 is the TS-RCM listener "received a connection" pre-auth observation. The IP can
+				// appear under several provider-specific names depending on the Windows build; probe
+				// the IP-only fields in priority order. Hostnames are never consulted here.
+				261 => EventXmlParser.GetData(doc, "Address")
+					?? EventXmlParser.GetData(doc, "IpAddress")
+					?? EventXmlParser.GetData(doc, "ClientAddress"),
 				_ => null,
 			};
 		}
@@ -81,6 +89,10 @@ public static class PerEventIpResolver
 			{
 				4778 or 4779 => EventXmlParser.GetData(doc, "ClientAddress"),
 				4624 or 4625 or 4648 or 4768 or 4769 or 4770 or 4771 => EventXmlParser.GetData(doc, "IpAddress"),
+				// 4634 (logoff) and 4647 (user-initiated logoff) rarely carry an IP, but when they do
+				// the field is IpAddress (same shape as 4624 family). Probe only that field — no
+				// hostname-only sources.
+				4634 or 4647 => EventXmlParser.GetData(doc, "IpAddress"),
 				_ => null,
 			};
 		}

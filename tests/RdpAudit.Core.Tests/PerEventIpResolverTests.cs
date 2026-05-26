@@ -192,4 +192,86 @@ public class PerEventIpResolverTests
 			("ClientName", "DESKTOP-Z")));
 		Assert.Null(PerEventIpResolver.Resolve(doc, "SomeOther", 9999));
 	}
+
+	// --- Stage 6: TS-RCM 261 pre-auth listener ----------------------------------------------
+
+	[Fact]
+	public void TsRcm_261_PrefersAddressField()
+	{
+		var doc = EventXmlParser.ParseSafe(UserData("261",
+			("Address", "203.0.113.61")));
+		Assert.Equal("203.0.113.61", PerEventIpResolver.Resolve(doc, TsRcmChannel, 261));
+	}
+
+	[Fact]
+	public void TsRcm_261_FallsBackToIpAddress()
+	{
+		var doc = EventXmlParser.ParseSafe(UserData("261",
+			("IpAddress", "198.51.100.61")));
+		Assert.Equal("198.51.100.61", PerEventIpResolver.Resolve(doc, TsRcmChannel, 261));
+	}
+
+	[Fact]
+	public void TsRcm_261_FallsBackToClientAddress()
+	{
+		var doc = EventXmlParser.ParseSafe(UserData("261",
+			("ClientAddress", "192.0.2.61")));
+		Assert.Equal("192.0.2.61", PerEventIpResolver.Resolve(doc, TsRcmChannel, 261));
+	}
+
+	[Fact]
+	public void TsRcm_261_RejectsHostnameOnly()
+	{
+		// The fallback for 261 must never consult hostname-only fields.
+		var doc = EventXmlParser.ParseSafe(UserData("261",
+			("ClientName", "DESKTOP-FOO"),
+			("Workstation", "DESKTOP-BAR")));
+		Assert.Null(PerEventIpResolver.Resolve(doc, TsRcmChannel, 261));
+	}
+
+	// --- Stage 6: TS-LSM 39/40 lifecycle ---------------------------------------------------
+
+	[Theory]
+	[InlineData(39)]
+	[InlineData(40)]
+	public void TsLsm_39_40_ReadAddressWhenPresent(int eventId)
+	{
+		var doc = EventXmlParser.ParseSafe(UserData(
+			eventId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+			("Address", "203.0.113.40"),
+			("SessionID", "7")));
+		Assert.Equal("203.0.113.40", PerEventIpResolver.Resolve(doc, TsLsmChannel, eventId));
+	}
+
+	[Theory]
+	[InlineData(39)]
+	[InlineData(40)]
+	public void TsLsm_39_40_NoAddress_ReturnsNull(int eventId)
+	{
+		var doc = EventXmlParser.ParseSafe(UserData(
+			eventId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+			("SessionID", "8")));
+		Assert.Null(PerEventIpResolver.Resolve(doc, TsLsmChannel, eventId));
+	}
+
+	// --- Stage 6: Security 4634/4647 may now read IpAddress if present ---------------------
+
+	[Fact]
+	public void Security_4634_WithIpAddress_ReturnsIt()
+	{
+		var doc = EventXmlParser.ParseSafe(EventData("4634",
+			("IpAddress", "203.0.113.34"),
+			("TargetUserName", "dave"),
+			("TargetLogonId", "0x42")));
+		Assert.Equal("203.0.113.34", PerEventIpResolver.Resolve(doc, SecurityChannel, 4634));
+	}
+
+	[Fact]
+	public void Security_4647_WithIpAddress_ReturnsIt()
+	{
+		var doc = EventXmlParser.ParseSafe(EventData("4647",
+			("IpAddress", "203.0.113.47"),
+			("TargetUserName", "dave")));
+		Assert.Equal("203.0.113.47", PerEventIpResolver.Resolve(doc, SecurityChannel, 4647));
+	}
 }

@@ -75,6 +75,7 @@ public sealed class EventNormalizer
 
 		string? resolvedIp = directIp;
 		bool derived = false;
+		bool unresolved = false;
 		if (resolvedIp is not null)
 		{
 			_correlation.Seed(logonId, sessionId, userName, resolvedIp, dto.TimeUtc);
@@ -92,6 +93,13 @@ public sealed class EventNormalizer
 				resolvedIp = cached;
 				derived = true;
 			}
+			else if (IsSecurity4625(dto.Channel, dto.EventId))
+			{
+				// Preserve failed-logon forensic evidence: do not invent a placeholder IP, but mark
+				// the row so the connection-fact / Address / alert layers know the source IP was
+				// expected and legitimately unknown rather than just absent.
+				unresolved = true;
+			}
 		}
 
 		RawEvent entity = new()
@@ -101,6 +109,7 @@ public sealed class EventNormalizer
 			TimeUtc = dto.TimeUtc,
 			SourceIp = resolvedIp,
 			SourceIpDerived = derived && resolvedIp is not null,
+			SourceIpUnresolved = unresolved,
 			UserName = userName,
 			Domain = domain,
 			LogonId = logonId,
@@ -199,6 +208,12 @@ public sealed class EventNormalizer
 	{
 		return eventId == 1149
 			&& string.Equals(channel, TsRcmChannel, StringComparison.OrdinalIgnoreCase);
+	}
+
+	private static bool IsSecurity4625(string channel, int eventId)
+	{
+		return eventId == 4625
+			&& string.Equals(channel, "Security", StringComparison.OrdinalIgnoreCase);
 	}
 
 	private static Dictionary<string, string?> ExtractAllEventData(XmlDocument? doc)
