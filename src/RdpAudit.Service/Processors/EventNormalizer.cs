@@ -48,6 +48,17 @@ public sealed class EventNormalizer
 			?? EventXmlParser.GetData(doc, "SubjectDomainName")
 			?? EventXmlParser.GetData(doc, "Domain");
 
+		// Cameyo rdpmon compatibility fallback (RdpMon/RdpMon.cs Addrs.Aggregate): when a Security
+		// 4625 / 4648 event payload omits the named TargetUserName attribute — observed on older
+		// Windows builds, stripped channels, and certain auditing-policy combinations — the user
+		// can still be recovered from Data[5]. Stay strictly fallback-only: named-field probes
+		// above are authoritative whenever they succeed.
+		if (string.IsNullOrEmpty(userName) && IsSecurityChannel(dto.Channel)
+			&& (dto.EventId == 4625 || dto.EventId == 4648))
+		{
+			userName = EventXmlParser.GetDataAt(doc, 5);
+		}
+
 		// Stage IP-D: TS-RCM 1149 carries its identity in UserData/EventXML/Param1..Param3 — there is
 		// no TargetUserName / TargetDomainName, so without this fallback the connection-fact and
 		// correlation layers see a userless event and lose the brute-force attribution. Param3 is the
@@ -214,6 +225,11 @@ public sealed class EventNormalizer
 	{
 		return eventId == 4625
 			&& string.Equals(channel, "Security", StringComparison.OrdinalIgnoreCase);
+	}
+
+	private static bool IsSecurityChannel(string channel)
+	{
+		return string.Equals(channel, "Security", StringComparison.OrdinalIgnoreCase);
 	}
 
 	private static Dictionary<string, string?> ExtractAllEventData(XmlDocument? doc)

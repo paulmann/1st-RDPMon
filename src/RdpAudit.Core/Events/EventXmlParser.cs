@@ -79,4 +79,33 @@ public static class EventXmlParser
 
 		return int.TryParse(raw, out int v) ? v : null;
 	}
+
+	/// <summary>
+	/// Reads the Nth child of <c>EventData</c> by ordinal position (zero-based), matching cameyo
+	/// rdpmon's <c>EventRecord.Properties[N]</c> compatibility semantics. Used only as a defensive
+	/// fallback when an event payload omits the standard <c>@Name</c> attributes on its Data
+	/// elements (older Windows builds and stripped event sources) — Windows still emits the values
+	/// in a stable positional order. Returns <c>null</c> when the index is out of range, the value
+	/// is blank, or one of the Windows sentinels (<c>"-"</c> / <c>"N/A"</c>).
+	/// </summary>
+	public static string? GetDataAt(XmlDocument? doc, int index)
+	{
+		if (doc is null || index < 0)
+		{
+			return null;
+		}
+
+		XmlNodeList? nodes = doc.SelectNodes("//*[local-name()='EventData']/*[local-name()='Data']");
+		if (nodes is null || index >= nodes.Count)
+		{
+			return null;
+		}
+
+		string? value = nodes[index]?.InnerText?.Trim();
+		return value switch
+		{
+			null or "" or "-" or "N/A" => null,
+			_ => value,
+		};
+	}
 }

@@ -40,6 +40,7 @@ public sealed class EventProcessorWorker : BackgroundService
 	private readonly EventNormalizer _normalizer;
 	private readonly SessionIpCorrelationUpserter _correlationUpserter;
 	private readonly RdpConnectionFactUpserter _connectionFactUpserter;
+	private readonly SecurityCorrelationWatchdog _securityWatchdog;
 	private readonly ILogger<EventProcessorWorker> _logger;
 	private readonly IOptionsMonitor<RdpAuditOptions> _options;
 	private int _consecutiveFailures;
@@ -50,6 +51,7 @@ public sealed class EventProcessorWorker : BackgroundService
 		EventNormalizer normalizer,
 		SessionIpCorrelationUpserter correlationUpserter,
 		RdpConnectionFactUpserter connectionFactUpserter,
+		SecurityCorrelationWatchdog securityWatchdog,
 		ILogger<EventProcessorWorker> logger,
 		IOptionsMonitor<RdpAuditOptions> options)
 	{
@@ -58,6 +60,7 @@ public sealed class EventProcessorWorker : BackgroundService
 		_normalizer = normalizer;
 		_correlationUpserter = correlationUpserter;
 		_connectionFactUpserter = connectionFactUpserter;
+		_securityWatchdog = securityWatchdog;
 		_logger = logger;
 		_options = options;
 	}
@@ -233,8 +236,13 @@ public sealed class EventProcessorWorker : BackgroundService
 				{
 					addr.FailCount++;
 				}
-				else if (entity.EventId == 4624 || entity.EventId == 4768 || entity.EventId == 4769)
+				else if (entity.EventId == 4624 || entity.EventId == 4768 || entity.EventId == 4769 || entity.EventId == 4648)
 				{
+					// Cameyo rdpmon (RdpMon/RdpMon.cs Addrs.Aggregate) counts 4648 — explicit-credentials
+					// use such as RunAs / "Connect as a different user" / scheduled-task launch — as a
+					// successful authentication on the per-IP reputation row. The connection-fact layer
+					// still classifies 4648 as ExplicitCreds (not a session-establishing logon), so this
+					// only affects the IP-keyed Attack Statistics view.
 					addr.SuccessCount++;
 				}
 				else if (IsTsLsm21(entity) || IsTsRcm1149(entity))
@@ -281,6 +289,11 @@ public sealed class EventProcessorWorker : BackgroundService
 			await tx.RollbackAsync(ct).ConfigureAwait(false);
 			throw;
 		}
+
+		// Feed the security-correlation watchdog after the transaction commits so the diagnostic
+		// is anchored to events that actually landed in the audit DB. The watchdog updates
+		// ServiceMetrics in place — no DB writes here.
+		_securityWatchdog.Apply(entities);
 	}
 
 	/// <summary>

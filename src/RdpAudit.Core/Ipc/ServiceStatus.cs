@@ -27,4 +27,27 @@ public sealed class ServiceStatus
 	public int ActiveSessions { get; set; }
 
 	public Dictionary<string, string> ChannelStatus { get; set; } = new();
+
+	/// <summary>Cumulative count of Security 4625 (failed logon) events since service start.</summary>
+	public long Security4625Count { get; set; }
+
+	/// <summary>Cumulative count of Security 4624 (successful logon) events since service start.</summary>
+	public long Security4624Count { get; set; }
+
+	/// <summary>Cumulative count of Security 4648 (explicit credentials) events since service start.</summary>
+	public long Security4648Count { get; set; }
+
+	/// <summary>Cumulative count of RDP pre-authentication observations (TS-RCM 261, RdpCoreTS 131)
+	/// that did not have a matching Security 4624/4625/4648 inside the correlation window.</summary>
+	public long RdpCorePreAuthOrphans { get; set; }
+
+	/// <summary>UTC timestamp of the most recent Security 4624/4625/4648 received, or null when none.</summary>
+	public DateTime? LastSecurityEventUtc { get; set; }
+
+	/// <summary>UTC timestamp of the most recent TS-RCM 261 / RdpCoreTS 131 received, or null when none.</summary>
+	public DateTime? LastRdpCorePreAuthUtc { get; set; }
+
+	/// <summary>Human-readable diagnostic emitted when pre-auth events accumulate without matching
+	/// Security events. Null until the watchdog fires. Configurator surfaces this on the dashboard.</summary>
+	public string? SecurityCorrelationDiagnostic { get; set; }
 }
