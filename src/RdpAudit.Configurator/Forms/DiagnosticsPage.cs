@@ -29,6 +29,7 @@ public sealed class DiagnosticsPage : TabPage
 	private readonly Button _refresh;
 	private readonly Button _copy;
 	private readonly Button _export;
+	private readonly Button _probe;
 	private readonly Label _status;
 
 	public DiagnosticsPage(IpcClient ipc)
@@ -48,11 +49,13 @@ public sealed class DiagnosticsPage : TabPage
 		_refresh = new Button { Text = "Refresh", Width = 110 };
 		_copy = new Button { Text = "Copy to clipboard", Width = 150 };
 		_export = new Button { Text = "Export to file…", Width = 150 };
+		_probe = new Button { Text = "Run Security Auth Probe", Width = 200 };
 		_refresh.Click += async (_, _) => await RefreshAsync().ConfigureAwait(true);
 		_copy.Click += OnCopy;
 		_export.Click += OnExport;
+		_probe.Click += async (_, _) => await RunProbeAsync().ConfigureAwait(true);
 
-		toolbar.Controls.AddRange(new Control[] { _refresh, _copy, _export });
+		toolbar.Controls.AddRange(new Control[] { _refresh, _copy, _export, _probe });
 
 		_status = new Label
 		{
@@ -107,6 +110,40 @@ public sealed class DiagnosticsPage : TabPage
 		{
 			_status.Text = "Service: error — " + ex.GetType().Name;
 			_report.Text = ex.Message;
+		}
+	}
+
+	private async Task RunProbeAsync()
+	{
+		_status.Text = "Running Security auth probe…";
+		_probe.Enabled = false;
+		try
+		{
+			SecurityAuthProbeDto? probe = await _ipc.SendAsync<SecurityAuthProbeDto>(IpcCommand.RunSecurityAuthProbe).ConfigureAwait(true);
+			if (probe is null)
+			{
+				_status.Text = "Service: probe returned nothing — is the service running?";
+				_report.Text = "No probe result. Start the service and retry.";
+				return;
+			}
+
+			_report.Text = SecurityAuthProbeReportFormatter.Format(probe);
+			_status.Text = string.Format(
+				CultureInfo.InvariantCulture,
+				"Probe at {0:yyyy-MM-dd HH:mm:ss}Z  |  Outcome={1}  |  Count={2}  |  Elapsed={3} ms",
+				probe.GeneratedUtc,
+				probe.Outcome,
+				probe.Count,
+				probe.ElapsedMilliseconds);
+		}
+		catch (Exception ex)
+		{
+			_status.Text = "Probe: error — " + ex.GetType().Name;
+			_report.Text = ex.Message;
+		}
+		finally
+		{
+			_probe.Enabled = true;
 		}
 	}
 
@@ -331,6 +368,69 @@ public static class DiagnosticsReportFormatter
 			{
 				sb.AppendFormat(CultureInfo.InvariantCulture, "  - {0}", err).AppendLine();
 			}
+		}
+
+		return sb.ToString();
+	}
+}
+
+/// <summary>Pure formatter that turns a <see cref="SecurityAuthProbeDto"/> into a flat,
+/// monospace-friendly report. Pulled out of the TabPage so it can be unit-tested without
+/// WinForms and so the same string can be piped to the clipboard or an exported .txt.</summary>
+public static class SecurityAuthProbeReportFormatter
+{
+	/// <summary>Format the probe outcome for the Diagnostic tab. Always English; never throws.</summary>
+	public static string Format(SecurityAuthProbeDto dto)
+	{
+		ArgumentNullException.ThrowIfNull(dto);
+		StringBuilder sb = new();
+		sb.AppendLine("RdpAudit Security auth probe");
+		sb.AppendLine("============================");
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Generated (UTC):       {0:O}", dto.GeneratedUtc).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Result status:         {0}", dto.Status).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Outcome:               {0}", dto.Outcome).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Identity:              {0}", dto.Identity ?? "(unknown)").AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Lookback (hours):      {0}", dto.LookbackHours).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Elapsed (ms):          {0}", dto.ElapsedMilliseconds).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Count returned:        {0}", dto.Count).AppendLine();
+		if (!string.IsNullOrWhiteSpace(dto.Message))
+		{
+			sb.AppendFormat(CultureInfo.InvariantCulture, "Message:               {0}", dto.Message).AppendLine();
+		}
+		if (!string.IsNullOrWhiteSpace(dto.Query))
+		{
+			sb.AppendLine();
+			sb.AppendLine("XPath issued");
+			sb.AppendLine("------------");
+			sb.AppendLine(dto.Query);
+		}
+
+		if (!string.IsNullOrEmpty(dto.ExceptionType))
+		{
+			sb.AppendLine();
+			sb.AppendLine("Exception detail");
+			sb.AppendLine("----------------");
+			sb.AppendFormat(CultureInfo.InvariantCulture, "Type:                  {0}", dto.ExceptionType).AppendLine();
+			sb.AppendFormat(CultureInfo.InvariantCulture, "HResult:               {0}", dto.ExceptionHResult ?? "(none)").AppendLine();
+			sb.AppendFormat(CultureInfo.InvariantCulture, "Message:               {0}", dto.ExceptionMessage ?? "(none)").AppendLine();
+		}
+
+		if (dto.FirstEvent is SecurityAuthProbeEvent first)
+		{
+			sb.AppendLine();
+			sb.AppendLine("First parsed event");
+			sb.AppendLine("------------------");
+			sb.AppendFormat(CultureInfo.InvariantCulture, "EventId:               {0}", first.EventId).AppendLine();
+			sb.AppendFormat(CultureInfo.InvariantCulture, "Time (UTC):            {0}", first.TimeUtc?.ToString("O", CultureInfo.InvariantCulture) ?? "(unknown)").AppendLine();
+			sb.AppendFormat(CultureInfo.InvariantCulture, "User:                  {0}", first.User ?? "(none)").AppendLine();
+			sb.AppendFormat(CultureInfo.InvariantCulture, "Domain:                {0}", first.Domain ?? "(none)").AppendLine();
+			sb.AppendFormat(CultureInfo.InvariantCulture, "Source IP:             {0}", first.Ip ?? "(none)").AppendLine();
+			sb.AppendFormat(CultureInfo.InvariantCulture, "LogonType:             {0}", first.LogonType?.ToString(CultureInfo.InvariantCulture) ?? "(none)").AppendLine();
+			sb.AppendFormat(CultureInfo.InvariantCulture, "Status:                {0}", first.Status ?? "(none)").AppendLine();
+			sb.AppendFormat(CultureInfo.InvariantCulture, "SubStatus:             {0}", first.SubStatus ?? "(none)").AppendLine();
+			sb.AppendFormat(CultureInfo.InvariantCulture, "SubStatus meaning:     {0}", first.SubStatusMeaning ?? "(none)").AppendLine();
+			sb.AppendFormat(CultureInfo.InvariantCulture, "AuthPackage:           {0}", first.AuthPackage ?? "(none)").AppendLine();
+			sb.AppendFormat(CultureInfo.InvariantCulture, "Workstation:           {0}", first.WorkstationName ?? "(none)").AppendLine();
 		}
 
 		return sb.ToString();

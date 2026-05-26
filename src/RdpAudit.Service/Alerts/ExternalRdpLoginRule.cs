@@ -38,8 +38,24 @@ public sealed class ExternalRdpLoginRule : AlertRuleBase
 			return Task.FromResult<Alert?>(null);
 		}
 
-		return Task.FromResult<Alert?>(CreateAlert(evt,
-			$"External RDP login from public IP {evt.SourceIp} as {evt.UserName}",
-			new { evt.SourceIp, Mitre = "T1133" }));
+		string message = BuildMessage(evt.SourceIp, evt.UserName);
+		return Task.FromResult<Alert?>(CreateAlert(evt, message, new { evt.SourceIp, Mitre = "T1133" }));
+	}
+
+	/// <summary>Render the alert message safely. When the username is blank/unknown we omit the
+	/// "as &lt;user&gt;" clause entirely rather than emit a trailing blank "as " — the v1.2.0
+	/// task brief required this fix because operators were seeing messages literally ending in
+	/// "as ".</summary>
+	internal static string BuildMessage(string? sourceIp, string? userName)
+	{
+		string ip = string.IsNullOrWhiteSpace(sourceIp) ? "(unknown IP)" : sourceIp;
+		string trimmedUser = userName?.Trim() ?? string.Empty;
+		bool hasUser = !string.IsNullOrEmpty(trimmedUser)
+			&& !string.Equals(trimmedUser, "-", StringComparison.Ordinal)
+			&& !string.Equals(trimmedUser, "N/A", StringComparison.OrdinalIgnoreCase);
+
+		return hasUser
+			? "External RDP login from public IP " + ip + " as " + trimmedUser
+			: "External RDP login from public IP " + ip;
 	}
 }

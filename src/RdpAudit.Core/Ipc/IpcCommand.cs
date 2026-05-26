@@ -87,4 +87,13 @@ public enum IpcCommand
 	/// AuthAttemptFact counts grouped by channel/event ID, monitoring-config repair report, service
 	/// version, install path, and recent pipeline errors. Used by the Configurator's Diagnostic tab.</summary>
 	GetDiagnostics = 43,
+
+	// --- Stage Diag2 additions (append-only). ---
+
+	/// <summary>Runs a one-shot bounded Security-channel auth read inside the service process
+	/// (under the service account) and returns AccessDenied vs Timeout vs NoEvents vs a parsed
+	/// first event. The Configurator's "Run Security Auth Probe" button invokes this; it is the
+	/// canonical way to disambiguate "Security Armed but zero events" symptoms from policy /
+	/// permission / bookmark / backlog failure modes on a real host.</summary>
+	RunSecurityAuthProbe = 44,
 }

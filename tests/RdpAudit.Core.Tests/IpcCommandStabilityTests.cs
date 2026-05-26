@@ -64,6 +64,9 @@ public class IpcCommandStabilityTests
 	[InlineData(IpcCommand.GetEventsForIp, 39)]
 	[InlineData(IpcCommand.ListConnectionFacts, 40)]
 	[InlineData(IpcCommand.GetConnectionFactsForIp, 41)]
+	[InlineData(IpcCommand.GetRdpConfiguration, 42)]
+	[InlineData(IpcCommand.GetDiagnostics, 43)]
+	[InlineData(IpcCommand.RunSecurityAuthProbe, 44)]
 	public void Ordinal_IsStable(IpcCommand command, int expected)
 	{
 		Assert.Equal(expected, (int)command);
