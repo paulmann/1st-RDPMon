@@ -119,6 +119,134 @@ public sealed class ServiceControlRunner
 		return await Task.Run(() => UninstallCore(ct), ct).ConfigureAwait(false);
 	}
 
+	/// <summary>Stage 2: safe stop-copy-start update of the installed binaries from a
+	/// distribution folder. If the service is running it is stopped first; any in-flight
+	/// file handles release before the copy. Files are copied with overwrite=true so the
+	/// existing installed directory tree is brought into sync with <paramref name="distributionDir"/>.
+	/// After the copy the service is started again (best-effort; failure is reported in
+	/// the returned <see cref="ServiceOperationResult"/>).</summary>
+	public async Task<ServiceOperationResult> UpdateInstalledFilesAsync(
+		string distributionDir,
+		string installDir,
+		CancellationToken ct = default)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(distributionDir);
+		ArgumentException.ThrowIfNullOrWhiteSpace(installDir);
+		return await Task.Run(() => UpdateInstalledFilesCore(distributionDir, installDir, ct), ct).ConfigureAwait(false);
+	}
+
+	private ServiceOperationResult UpdateInstalledFilesCore(string distributionDir, string installDir, CancellationToken ct)
+	{
+		List<ServiceOperationStep> steps = new();
+
+		if (!Directory.Exists(distributionDir))
+		{
+			steps.Add(new ServiceOperationStep(
+				$"Validate distribution at {distributionDir}", false, "distribution folder does not exist"));
+			return Finalize("Update installed files", steps);
+		}
+
+		bool wasRunning = false;
+		try
+		{
+			using ServiceController controller = new(_serviceName);
+			wasRunning = controller.Status == ServiceControllerStatus.Running
+				|| controller.Status == ServiceControllerStatus.StartPending;
+		}
+		catch (InvalidOperationException ex) when (IsServiceNotInstalled(ex))
+		{
+			steps.Add(new ServiceOperationStep("Probe SCM run state", false, "service is not installed"));
+			return Finalize("Update installed files", steps);
+		}
+		catch (Exception ex)
+		{
+			steps.Add(new ServiceOperationStep("Probe SCM run state", false, ex.Message));
+			return Finalize("Update installed files", steps);
+		}
+
+		if (wasRunning)
+		{
+			StepOutcome stopOutcome = TryControllerOperation("Stop service before update",
+				ServiceControllerStatus.Stopped,
+				controller =>
+				{
+					if (controller.Status != ServiceControllerStatus.Stopped && controller.CanStop)
+					{
+						controller.Stop();
+					}
+				}, allowAlreadyInTargetState: true, allowNotInstalled: false, ct);
+			steps.AddRange(stopOutcome.Steps);
+			if (stopOutcome.Fatal)
+			{
+				return Finalize("Update installed files", steps);
+			}
+		}
+		else
+		{
+			steps.Add(new ServiceOperationStep("Stop service before update", true, "service was not running"));
+		}
+
+		try
+		{
+			Directory.CreateDirectory(installDir);
+			int copied = 0;
+			foreach (string file in Directory.EnumerateFiles(distributionDir, "*", SearchOption.AllDirectories))
+			{
+				ct.ThrowIfCancellationRequested();
+				string relative = Path.GetRelativePath(distributionDir, file);
+				string target = Path.Combine(installDir, relative);
+				string? targetDir = Path.GetDirectoryName(target);
+				if (!string.IsNullOrEmpty(targetDir))
+				{
+					Directory.CreateDirectory(targetDir);
+				}
+
+				File.Copy(file, target, overwrite: true);
+				copied++;
+			}
+
+			steps.Add(new ServiceOperationStep("Copy distribution to installed", true,
+				$"copied {copied.ToString(CultureInfo.InvariantCulture)} files to {installDir}"));
+		}
+		catch (UnauthorizedAccessException ex)
+		{
+			steps.Add(new ServiceOperationStep("Copy distribution to installed", false,
+				"Access denied — run the Configurator as Administrator: " + ex.Message));
+			return Finalize("Update installed files", steps);
+		}
+		catch (IOException ex)
+		{
+			steps.Add(new ServiceOperationStep("Copy distribution to installed", false,
+				"I/O failure (file may still be in use by the service process): " + ex.Message));
+			return Finalize("Update installed files", steps);
+		}
+		catch (Exception ex)
+		{
+			steps.Add(new ServiceOperationStep("Copy distribution to installed", false, ex.Message));
+			return Finalize("Update installed files", steps);
+		}
+
+		if (wasRunning)
+		{
+			StepOutcome startOutcome = TryControllerOperation("Start service after update",
+				ServiceControllerStatus.Running,
+				controller =>
+				{
+					if (controller.Status != ServiceControllerStatus.Running)
+					{
+						controller.Start();
+					}
+				}, allowAlreadyInTargetState: true, allowNotInstalled: false, ct);
+			steps.AddRange(startOutcome.Steps);
+		}
+		else
+		{
+			steps.Add(new ServiceOperationStep("Start service after update", true, "service was not running before update; leaving stopped"));
+		}
+
+		return Finalize("Update installed files", steps);
+	}
+
 	private ServiceOperationResult RestartCore(CancellationToken ct)
 	{
 		List<ServiceOperationStep> steps = new();

@@ -180,7 +180,7 @@ public sealed class IpcDispatcher
 	private ServiceStatus BuildStatus()
 	{
 		using Process self = Process.GetCurrentProcess();
-		string version = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0";
+		string version = ResolveRuntimeVersion();
 		return new ServiceStatus
 		{
 			Version = version,
@@ -214,6 +214,48 @@ public sealed class IpcDispatcher
 			AuthAttemptFactFailed = _metrics.AuthAttemptFactFailed,
 			AuthAttemptFactSucceeded = _metrics.AuthAttemptFactSucceeded,
 		};
+	}
+
+	/// <summary>Resolves the runtime version surfaced in <see cref="ServiceStatus.Version"/>.
+	/// Prefers <see cref="AssemblyInformationalVersionAttribute"/> (the SemVer set via
+	/// <c>VersionPrefix</c> in Directory.Build.props or publish.ps1) so future service builds
+	/// have a non-ambiguous version surface. Falls back to FileVersionInfo and finally to the
+	/// assembly's own Version, which is the legacy 1.0.0.0 placeholder when no version
+	/// metadata is configured. Static, side-effect free, never throws.</summary>
+	private static string ResolveRuntimeVersion()
+	{
+		Assembly assembly = typeof(IpcDispatcher).Assembly;
+		string? informational = assembly
+			.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+		if (!string.IsNullOrWhiteSpace(informational))
+		{
+			int plus = informational.IndexOf('+', StringComparison.Ordinal);
+			return plus > 0 ? informational[..plus] : informational;
+		}
+
+		try
+		{
+			string? location = assembly.Location;
+			if (!string.IsNullOrWhiteSpace(location))
+			{
+				FileVersionInfo info = FileVersionInfo.GetVersionInfo(location);
+				if (!string.IsNullOrWhiteSpace(info.ProductVersion))
+				{
+					return info.ProductVersion;
+				}
+
+				if (!string.IsNullOrWhiteSpace(info.FileVersion))
+				{
+					return info.FileVersion;
+				}
+			}
+		}
+		catch (Exception)
+		{
+			// fall through to AssemblyName.Version
+		}
+
+		return assembly.GetName().Version?.ToString() ?? "0.0.0";
 	}
 
 	private async Task<object?> GetRecentEventsAsync(CancellationToken ct)
