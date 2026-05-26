@@ -41,6 +41,15 @@ public sealed class RdpConnectionFactUpserter
 	internal const string SecurityChannel = "Security";
 
 	/// <summary>
+	/// Sentinel IP used to preserve forensic evidence of a failed logon (Security 4625) when the
+	/// payload carried no parseable IP and session correlation could not supply one either. The
+	/// row is keyed by the attempted username and grouped under <c>"0.0.0.0"</c> in the
+	/// connection-facts table. Consumers must treat this as "unresolved attacker IP" — it is NOT
+	/// real traffic from 0.0.0.0. See <see cref="BuildCandidate"/> for the routing rule.
+	/// </summary>
+	internal const string UnresolvedIpSentinel = "0.0.0.0";
+
+	/// <summary>
 	/// Apply a batch of normalised <see cref="RawEvent"/> rows to <paramref name="db"/>. Reads only
 	/// the matching existing fact rows (single round-trip), then either updates them in place or
 	/// queues a new entity. Caller must commit the surrounding transaction.
@@ -174,6 +183,23 @@ public sealed class RdpConnectionFactUpserter
 		int? wts = e.SessionId;
 		string? user = string.IsNullOrWhiteSpace(e.UserName) ? null : e.UserName.Trim();
 
+		// Sentinel routing: a failed-logon (Security 4625) whose source IP was never parseable
+		// AND could not be supplied by session correlation must still be preserved as failed
+		// evidence. We route it to the username-keyed sentinel fact row (Ip="0.0.0.0") so the
+		// Attack Statistics aggregations see the failure without falsely attributing it to a
+		// real address. This treatment is invoked only when SourceIpUnresolved is set by the
+		// normalizer and there is an attempted username to anchor the row.
+		bool unresolvedSentinel = false;
+		string? resolvedIp = hasValidIp ? e.SourceIp!.Trim() : null;
+		if (kind == EventKind.FailedLogon
+			&& !hasValidIp
+			&& e.SourceIpUnresolved
+			&& !string.IsNullOrWhiteSpace(user))
+		{
+			resolvedIp = UnresolvedIpSentinel;
+			unresolvedSentinel = true;
+		}
+
 		string? key = BuildKey(logonId, wts, user);
 		if (key is null)
 		{
@@ -190,8 +216,9 @@ public sealed class RdpConnectionFactUpserter
 			WtsSessionId: wts,
 			UserName: user,
 			Domain: string.IsNullOrWhiteSpace(e.Domain) ? null : e.Domain!.Trim(),
-			Ip: hasValidIp ? e.SourceIp!.Trim() : null,
+			Ip: resolvedIp,
 			IpIsDerived: e.SourceIpDerived,
+			IsUnresolvedSentinel: unresolvedSentinel,
 			TimeUtc: e.TimeUtc,
 			EventId: e.EventId,
 			Kind: kind);
@@ -217,6 +244,7 @@ public sealed class RdpConnectionFactUpserter
 			return eventId switch
 			{
 				1149 => EventKind.AuthenticatedConnection, // RD Gateway / NLA auth
+				261 => EventKind.PreAuthListener,         // TS-RCM listener accepted a TCP connection pre-auth
 				_ => EventKind.Unrelated,
 			};
 		}
@@ -240,6 +268,8 @@ public sealed class RdpConnectionFactUpserter
 				case 4634:
 				case 4647:
 					return EventKind.LogOff;
+				case 4648:
+					return EventKind.ExplicitCreds;
 				case 4778:
 					return EventKind.Reconnect;
 				case 4779:
@@ -258,8 +288,11 @@ public sealed class RdpConnectionFactUpserter
 		{
 			// Direct IP observations may create new facts. Derived-IP and no-IP events should NOT
 			// create new rows on their own — otherwise a stale cache could mislead the historical
-			// view. They can still update existing facts when one materialises.
-			if (c.Ip is null || c.IpIsDerived)
+			// view. They can still update existing facts when one materialises. The unresolved-IP
+			// sentinel is an explicit exception: a failed logon with no resolvable IP must still
+			// produce a fact row (under "0.0.0.0", keyed by username) so the failure count is
+			// preserved for forensic review.
+			if (c.Ip is null || (c.IpIsDerived && !c.IsUnresolvedSentinel))
 			{
 				return null;
 			}
@@ -276,7 +309,7 @@ public sealed class RdpConnectionFactUpserter
 				ObservedEventIds = AppendEventId(null, c.EventId),
 				UserNamesAttempted = AppendUserName(null, c.UserName),
 				FailedLogons = c.Kind == EventKind.FailedLogon ? 1 : 0,
-				SuccessfulLogons = c.Kind == EventKind.SuccessfulLogon ? 1 : 0,
+				SuccessfulLogons = IsSuccessKind(c.Kind) ? 1 : 0,
 				IsActive = IsConnectingKind(c.Kind),
 			};
 
@@ -296,8 +329,9 @@ public sealed class RdpConnectionFactUpserter
 			existing.FirstSeenUtc = c.TimeUtc;
 		}
 
-		// Update IP only for direct observations.
-		if (c.Ip is not null && !c.IpIsDerived)
+		// Update IP only for direct, non-sentinel observations. Never let an unresolved-IP
+		// sentinel overwrite a real IP that was already recorded.
+		if (c.Ip is not null && !c.IpIsDerived && !c.IsUnresolvedSentinel)
 		{
 			existing.Ip = c.Ip;
 		}
@@ -332,6 +366,12 @@ public sealed class RdpConnectionFactUpserter
 				existing.FailedLogons++;
 				break;
 			case EventKind.SuccessfulLogon:
+			case EventKind.AuthenticatedConnection:
+			case EventKind.SessionLogon:
+				// NLA hosts almost never emit Security 4624 for the RDP logon flow, so TS-RCM 1149
+				// (AuthenticatedConnection) and TS-LSM 21 (SessionLogon) are the only authoritative
+				// proof of a successful RDP session. Count them as successes so the "Attack
+				// Statistics" / "RDP Clients" facts stop reporting zero on real workloads.
 				existing.SuccessfulLogons++;
 				break;
 		}
@@ -340,6 +380,14 @@ public sealed class RdpConnectionFactUpserter
 		existing.IsActive = ComputeIsActive(existing);
 		return existing;
 	}
+
+	private static bool IsSuccessKind(EventKind kind) => kind switch
+	{
+		EventKind.SuccessfulLogon => true,
+		EventKind.AuthenticatedConnection => true,
+		EventKind.SessionLogon => true,
+		_ => false,
+	};
 
 	private static void ApplyLifecycle(RdpConnectionFact row, Candidate c)
 	{
@@ -591,6 +639,16 @@ public sealed class RdpConnectionFactUpserter
 		Disconnect,
 		Reconnect,
 		LogOff,
+		/// <summary>
+		/// Pre-authentication listener observation (TS-RCM 261). Updates LastSeen/ObservedEventIds
+		/// only — does not move any lifecycle timestamp or increment success/failure counters.
+		/// </summary>
+		PreAuthListener,
+		/// <summary>
+		/// Explicit-credentials use (Security 4648). Appends the attempted username and updates
+		/// LastSeen/ObservedEventIds. NOT counted as a successful logon by itself.
+		/// </summary>
+		ExplicitCreds,
 	}
 
 	/// <summary>Per-event candidate the upserter consumes. Carries only the fields needed to
@@ -603,6 +661,7 @@ public sealed class RdpConnectionFactUpserter
 		string? Domain,
 		string? Ip,
 		bool IpIsDerived,
+		bool IsUnresolvedSentinel,
 		DateTime TimeUtc,
 		int EventId,
 		EventKind Kind);

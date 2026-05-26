@@ -29,6 +29,15 @@ public sealed class RawEvent
 	/// </summary>
 	public bool SourceIpDerived { get; set; }
 
+	/// <summary>
+	/// True when the event semantically carried a source IP slot (typically Security 4625) but the
+	/// payload value was missing, blank, "-", or otherwise unparseable, AND no in-memory session
+	/// correlation could supply one either. The row is still persisted so failed-logon evidence is
+	/// preserved, but downstream consumers must treat <see cref="SourceIp"/> as legitimately
+	/// unknown rather than substituting a placeholder.
+	/// </summary>
+	public bool SourceIpUnresolved { get; set; }
+
 	public string? UserName { get; set; }
 
 	public string? Domain { get; set; }

@@ -525,4 +525,59 @@ public class AlertRuleTests
 		var ctx = new MockAlertContext();
 		Assert.Null(await new NewAccountRule().EvaluateAsync(Logon(4625), ctx, default));
 	}
+
+	// --- Stage 6 ----------------------------------------------------------------------------
+
+	private static RawEvent UnresolvedFail(string user) =>
+		new()
+		{
+			Id = 100,
+			EventId = 4625,
+			Channel = "Security",
+			TimeUtc = DateTime.UtcNow,
+			SourceIp = null,
+			SourceIpUnresolved = true,
+			UserName = user,
+		};
+
+	[Fact]
+	public async Task Stage6_BruteForce_UnresolvedIp_PerUserThreshold_Fires()
+	{
+		var opts = new RdpAuditOptions { Alerts = new AlertOptions { BruteForceThreshold = 5 } };
+		var ctx = new MockAlertContext(
+			opts,
+			byUser: Enumerable.Range(0, 5).Select(_ => UnresolvedFail("attacker")));
+		Alert? alert = await new BruteForceRule().EvaluateAsync(UnresolvedFail("attacker"), ctx, default);
+		Assert.NotNull(alert);
+		Assert.Equal("BRUTE_FORCE_01", alert!.RuleId);
+		Assert.Contains("(unresolved)", alert.Message);
+		Assert.Contains("attacker", alert.Message);
+	}
+
+	[Fact]
+	public async Task Stage6_BruteForce_UnresolvedIp_BelowThreshold_NoAlert()
+	{
+		var opts = new RdpAuditOptions { Alerts = new AlertOptions { BruteForceThreshold = 10 } };
+		var ctx = new MockAlertContext(
+			opts,
+			byUser: Enumerable.Range(0, 5).Select(_ => UnresolvedFail("attacker")));
+		Assert.Null(await new BruteForceRule().EvaluateAsync(UnresolvedFail("attacker"), ctx, default));
+	}
+
+	[Fact]
+	public async Task Stage6_BruteForce_UnresolvedIp_OnlyCountsUnresolvedFailures()
+	{
+		// Resolved failures should NOT be folded into the unresolved per-user counter — they
+		// have their own IP-based stream.
+		var opts = new RdpAuditOptions { Alerts = new AlertOptions { BruteForceThreshold = 5 } };
+		List<RawEvent> mixed = new()
+		{
+			Logon(4625, ip: "1.2.3.4", user: "attacker"),
+			Logon(4625, ip: "1.2.3.4", user: "attacker"),
+			UnresolvedFail("attacker"),
+			UnresolvedFail("attacker"),
+		};
+		var ctx = new MockAlertContext(opts, byUser: mixed);
+		Assert.Null(await new BruteForceRule().EvaluateAsync(UnresolvedFail("attacker"), ctx, default));
+	}
 }

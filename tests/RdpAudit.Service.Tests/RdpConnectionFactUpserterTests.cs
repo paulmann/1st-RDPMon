@@ -49,7 +49,8 @@ public class RdpConnectionFactUpserterTests
 		int? wts = null,
 		int? logonType = null,
 		bool derived = false,
-		string? domain = null)
+		string? domain = null,
+		bool unresolved = false)
 	{
 		return new RawEvent
 		{
@@ -58,6 +59,7 @@ public class RdpConnectionFactUpserterTests
 			TimeUtc = t,
 			SourceIp = ip,
 			SourceIpDerived = derived,
+			SourceIpUnresolved = unresolved,
 			UserName = userName,
 			Domain = domain,
 			LogonId = logonId,
@@ -367,5 +369,176 @@ public class RdpConnectionFactUpserterTests
 		current = RdpConnectionFactUpserter.AppendUserName(current, "bob");
 
 		Assert.Equal("ALICE,bob", current);
+	}
+
+	// --- Stage 6 ----------------------------------------------------------------------------
+
+	[Fact]
+	public async Task Stage6_UnresolvedSentinel4625_CreatesFactUnderZeroIpKeyedByUser()
+	{
+		(DbContextOptions<AuditDbContext> options, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			RdpConnectionFactUpserter upserter = new();
+			DateTime t = new(2026, 5, 26, 10, 0, 0, DateTimeKind.Utc);
+			RawEvent fail = Event(Security, 4625, t, ip: null, userName: "victim",
+				logonType: 3, unresolved: true);
+
+			await using AuditDbContext db = new(options);
+			await upserter.ApplyAsync(db, new[] { fail }, CancellationToken.None);
+			await db.SaveChangesAsync();
+
+			RdpConnectionFact row = await db.RdpConnectionFacts.SingleAsync();
+			Assert.Equal(RdpConnectionFactUpserter.UnresolvedIpSentinel, row.Ip);
+			Assert.Equal("victim", row.UserName);
+			Assert.Equal(1, row.FailedLogons);
+			Assert.Equal(0, row.SuccessfulLogons);
+			Assert.False(row.IsActive);
+			Assert.Contains("victim", row.UserNamesAttempted!);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task Stage6_UnresolvedSentinel_DoesNotOverwriteRealIpOnExistingFact()
+	{
+		(DbContextOptions<AuditDbContext> options, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			RdpConnectionFactUpserter upserter = new();
+			DateTime t = new(2026, 5, 26, 10, 0, 0, DateTimeKind.Utc);
+			// Real-IP failure first creates the fact.
+			RawEvent realFail = Event(Security, 4625, t, ip: "203.0.113.5", userName: "victim", logonType: 3);
+			// Unresolved sentinel follows for the same username — must increment counter but
+			// must NOT overwrite the real IP with "0.0.0.0".
+			RawEvent unresolvedFail = Event(Security, 4625, t.AddSeconds(5), ip: null,
+				userName: "victim", logonType: 3, unresolved: true);
+
+			await using AuditDbContext db = new(options);
+			await upserter.ApplyAsync(db, new[] { realFail, unresolvedFail }, CancellationToken.None);
+			await db.SaveChangesAsync();
+
+			RdpConnectionFact row = await db.RdpConnectionFacts.SingleAsync();
+			Assert.Equal("203.0.113.5", row.Ip);
+			Assert.Equal(2, row.FailedLogons);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task Stage6_TsRcm261_ObservationOnly_NoCounters()
+	{
+		(DbContextOptions<AuditDbContext> options, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			RdpConnectionFactUpserter upserter = new();
+			DateTime t0 = new(2026, 5, 26, 10, 0, 0, DateTimeKind.Utc);
+			// First create a fact via 1149.
+			RawEvent auth = Event(TsRcm, 1149, t0, "203.0.113.5", "alice", logonId: "0x42", wts: 3);
+			// Then a 261 pre-auth observation arrives — must update LastSeen and ObservedEventIds
+			// only, no fail/success counter movement.
+			RawEvent preauth = Event(TsRcm, 261, t0.AddSeconds(30), "203.0.113.5", "alice",
+				logonId: "0x42", wts: 3);
+
+			await using AuditDbContext db = new(options);
+			await upserter.ApplyAsync(db, new[] { auth, preauth }, CancellationToken.None);
+			await db.SaveChangesAsync();
+
+			RdpConnectionFact row = await db.RdpConnectionFacts.SingleAsync();
+			Assert.Contains("261", row.ObservedEventIds);
+			Assert.Equal(t0.AddSeconds(30), row.LastSeenUtc);
+			Assert.Equal(0, row.FailedLogons);
+			// 1149 counted as success (Stage 6). The 261 must not add another.
+			Assert.Equal(1, row.SuccessfulLogons);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task Stage6_Security4648_ExplicitCreds_DoesNotCountAsSuccess()
+	{
+		(DbContextOptions<AuditDbContext> options, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			RdpConnectionFactUpserter upserter = new();
+			DateTime t0 = new(2026, 5, 26, 10, 0, 0, DateTimeKind.Utc);
+			// Seed with a real connection.
+			RawEvent auth = Event(TsRcm, 1149, t0, "203.0.113.5", "alice", logonId: "0x42", wts: 3);
+			// Then a 4648 explicit-creds event for the same key.
+			RawEvent explicitCreds = Event(Security, 4648, t0.AddSeconds(10), "203.0.113.5",
+				"alice2", logonId: "0x42", wts: 3);
+
+			await using AuditDbContext db = new(options);
+			await upserter.ApplyAsync(db, new[] { auth, explicitCreds }, CancellationToken.None);
+			await db.SaveChangesAsync();
+
+			RdpConnectionFact row = await db.RdpConnectionFacts.SingleAsync();
+			Assert.Equal(1, row.SuccessfulLogons); // unchanged: 4648 alone is not a success
+			Assert.Contains("4648", row.ObservedEventIds);
+			Assert.Contains("alice2", row.UserNamesAttempted!);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task Stage6_TsRcm1149_IncrementsSuccessCounter()
+	{
+		(DbContextOptions<AuditDbContext> options, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			RdpConnectionFactUpserter upserter = new();
+			DateTime t0 = new(2026, 5, 26, 10, 0, 0, DateTimeKind.Utc);
+			RawEvent auth1 = Event(TsRcm, 1149, t0, "203.0.113.5", "alice", logonId: "0x42", wts: 3);
+			RawEvent auth2 = Event(TsRcm, 1149, t0.AddSeconds(60), "203.0.113.5", "alice",
+				logonId: "0x42", wts: 3);
+
+			await using AuditDbContext db = new(options);
+			await upserter.ApplyAsync(db, new[] { auth1, auth2 }, CancellationToken.None);
+			await db.SaveChangesAsync();
+
+			RdpConnectionFact row = await db.RdpConnectionFacts.SingleAsync();
+			Assert.Equal(2, row.SuccessfulLogons);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task Stage6_TsLsm21_IncrementsSuccessCounter()
+	{
+		(DbContextOptions<AuditDbContext> options, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			RdpConnectionFactUpserter upserter = new();
+			DateTime t0 = new(2026, 5, 26, 10, 0, 0, DateTimeKind.Utc);
+			RawEvent logon1 = Event(TsLsm, 21, t0, "203.0.113.6", "bob", logonId: "0x55", wts: 4);
+			RawEvent logon2 = Event(TsLsm, 21, t0.AddMinutes(5), "203.0.113.6", "bob",
+				logonId: "0x55", wts: 4);
+
+			await using AuditDbContext db = new(options);
+			await upserter.ApplyAsync(db, new[] { logon1, logon2 }, CancellationToken.None);
+			await db.SaveChangesAsync();
+
+			RdpConnectionFact row = await db.RdpConnectionFacts.SingleAsync();
+			Assert.Equal(2, row.SuccessfulLogons);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
 	}
 }

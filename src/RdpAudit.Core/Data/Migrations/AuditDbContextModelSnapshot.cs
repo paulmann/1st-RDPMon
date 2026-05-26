@@ -445,6 +445,11 @@ namespace RdpAudit.Core.Data.Migrations
 						.HasColumnType("INTEGER")
 						.HasDefaultValue(false);
 
+					b.Property<bool>("SourceIpUnresolved")
+						.ValueGeneratedOnAdd()
+						.HasColumnType("INTEGER")
+						.HasDefaultValue(false);
+
 					b.Property<string>("Status")
 						.HasMaxLength(64)
 						.HasColumnType("TEXT");

@@ -160,6 +160,16 @@ public sealed class EventProcessorWorker : BackgroundService
 			HashSet<string> ips = new(StringComparer.OrdinalIgnoreCase);
 			foreach (RawEvent entity in entities)
 			{
+				// Stage 6: do NOT materialise an Address row for an event whose IP slot was
+				// legitimately unresolvable (Security 4625 without parseable IpAddress). The
+				// failure is preserved in RdpConnectionFacts via the sentinel route; creating
+				// an Address row for it here would either fail (no IP value) or pollute the
+				// table with bogus "0.0.0.0" reputation entries.
+				if (entity.SourceIpUnresolved)
+				{
+					continue;
+				}
+
 				if (!string.IsNullOrEmpty(entity.SourceIp))
 				{
 					ips.Add(entity.SourceIp);
@@ -204,7 +214,10 @@ public sealed class EventProcessorWorker : BackgroundService
 
 			foreach (RawEvent entity in entities)
 			{
-				if (string.IsNullOrEmpty(entity.SourceIp))
+				// Stage 6: unresolved-IP failures must not produce or update Address rows. They are
+				// already preserved as failed-logon evidence under the sentinel "0.0.0.0" connection
+				// fact.
+				if (entity.SourceIpUnresolved || string.IsNullOrEmpty(entity.SourceIp))
 				{
 					continue;
 				}
@@ -224,6 +237,16 @@ public sealed class EventProcessorWorker : BackgroundService
 				{
 					addr.SuccessCount++;
 				}
+				else if (IsTsLsm21(entity) || IsTsRcm1149(entity))
+				{
+					// Stage 6: NLA hosts rarely emit Security 4624 for an RDP logon; the TS-RCM 1149
+					// (NLA authenticated) and TS-LSM 21 (session logon) events are the authoritative
+					// success evidence and must increment the per-IP success counter so the Attack
+					// Statistics view stops reporting zero successes on real workloads.
+					addr.SuccessCount++;
+				}
+
+				addr.UserNames = AppendAddressUserName(addr.UserNames, entity.UserName);
 			}
 
 			db.RawEvents.AddRange(entities);
@@ -258,6 +281,65 @@ public sealed class EventProcessorWorker : BackgroundService
 			await tx.RollbackAsync(ct).ConfigureAwait(false);
 			throw;
 		}
+	}
+
+	/// <summary>
+	/// Maximum width of <see cref="Address.UserNames"/>. Mirrors the
+	/// <see cref="RdpConnectionFactUpserter.UserNamesAttemptedMaxLength"/> contract so attempted
+	/// usernames are capped consistently across both tables.
+	/// </summary>
+	internal const int AddressUserNamesMaxLength = 1024;
+
+	private const string TsLsmChannelName = "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational";
+	private const string TsRcmChannelName = "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational";
+
+	private static bool IsTsLsm21(RawEvent e)
+		=> e.EventId == 21
+			&& string.Equals(e.Channel, TsLsmChannelName, StringComparison.OrdinalIgnoreCase);
+
+	private static bool IsTsRcm1149(RawEvent e)
+		=> e.EventId == 1149
+			&& string.Equals(e.Channel, TsRcmChannelName, StringComparison.OrdinalIgnoreCase);
+
+	/// <summary>
+	/// Append <paramref name="userName"/> to a comma-separated <see cref="Address.UserNames"/>
+	/// list, de-duplicating case-insensitively and honouring the column width cap. Returns the
+	/// original list when the username is null/blank.
+	/// </summary>
+	internal static string? AppendAddressUserName(string? current, string? userName)
+	{
+		if (string.IsNullOrWhiteSpace(userName))
+		{
+			return current;
+		}
+
+		string token = userName.Trim();
+		if (string.IsNullOrEmpty(current))
+		{
+			return token.Length <= AddressUserNamesMaxLength ? token : token[..AddressUserNamesMaxLength];
+		}
+
+		string[] parts = current.Split(',', StringSplitOptions.RemoveEmptyEntries);
+		List<string> kept = new(parts.Length + 1);
+		foreach (string part in parts)
+		{
+			if (!string.Equals(part, token, StringComparison.OrdinalIgnoreCase))
+			{
+				kept.Add(part);
+			}
+		}
+
+		kept.Add(token);
+		string joined = string.Join(',', kept);
+		while (joined.Length > AddressUserNamesMaxLength && kept.Count > 1)
+		{
+			kept.RemoveAt(0);
+			joined = string.Join(',', kept);
+		}
+
+		return joined.Length <= AddressUserNamesMaxLength
+			? joined
+			: joined[..AddressUserNamesMaxLength];
 	}
 
 	private async Task WithRetryAsync(Func<CancellationToken, Task> action, CancellationToken ct)
