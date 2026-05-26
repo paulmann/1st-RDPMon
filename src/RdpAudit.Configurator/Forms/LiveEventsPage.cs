@@ -358,6 +358,21 @@ public sealed class LiveEventsPage : TabPage
 		}
 
 		LiveEventRow row = _binding[e.RowIndex];
+
+		// Stage 2: a row Stage-1 marked as SourceIpUnresolved persists failed-logon evidence
+		// without a parseable attacker address. Render "(unresolved)" so operators can spot
+		// brute-force pressure without misattributing it to an arbitrary placeholder.
+		if (row.SourceIpUnresolved && string.IsNullOrWhiteSpace(row.SourceIp))
+		{
+			e.Value = "(unresolved)";
+			e.FormattingApplied = true;
+			DataGridViewCell cell = _grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
+			cell.ToolTipText =
+				"Windows event semantically carried a source IP slot but the value was missing, blank, "
+				+ "\"-\" or unparseable. No in-memory session correlation supplied one either.";
+			return;
+		}
+
 		if (row.SourceIpDerived && !string.IsNullOrWhiteSpace(row.SourceIp))
 		{
 			e.Value = "• " + row.SourceIp;
@@ -808,6 +823,7 @@ public sealed class LiveEventsPage : TabPage
 		[JsonPropertyName("timeUtc")] public DateTime TimeUtc { get; set; }
 		[JsonPropertyName("sourceIp")] public string? SourceIp { get; set; }
 		[JsonPropertyName("sourceIpDerived")] public bool SourceIpDerived { get; set; }
+		[JsonPropertyName("sourceIpUnresolved")] public bool SourceIpUnresolved { get; set; }
 		[JsonPropertyName("userName")] public string? UserName { get; set; }
 		[JsonPropertyName("domain")] public string? Domain { get; set; }
 		[JsonPropertyName("logonId")] public string? LogonId { get; set; }

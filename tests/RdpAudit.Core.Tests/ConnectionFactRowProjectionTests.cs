@@ -131,6 +131,130 @@ public class ConnectionFactRowProjectionTests
 		Assert.Equal(string.Empty, display.HistoricalUserNamesAttemptedText);
 	}
 
+	// ---------------------------------------------------------------------------------------------
+	// Stage 2 — RdpSessionDto -> RdpSessionHistoricalByIpDisplay
+	// ---------------------------------------------------------------------------------------------
+
+	[Fact]
+	public void FromRdpSessionByIp_Null_Throws()
+	{
+		Assert.Throws<ArgumentNullException>(() => ConnectionFactRowProjection.FromRdpSessionByIp(null!));
+	}
+
+	[Fact]
+	public void FromRdpSessionByIp_PopulatedFields_MapDeterministically()
+	{
+		RdpSessionDto dto = new()
+		{
+			SessionId = 2,
+			UserName = "alice",
+			ClientAddress = "198.51.100.10",
+			HistoricalFailedLogonsByIp = 42,
+			HistoricalSuccessfulLogonsByIp = 3,
+			HistoricalUsersAttemptedFromIp = "alice, bob",
+			HistoricalFirstSeenByIpUtc = new DateTime(2026, 4, 1, 0, 0, 0, DateTimeKind.Utc),
+			HistoricalLastSeenByIpUtc = new DateTime(2026, 5, 25, 18, 30, 0, DateTimeKind.Utc),
+		};
+
+		RdpSessionHistoricalByIpDisplay display = ConnectionFactRowProjection.FromRdpSessionByIp(dto);
+
+		Assert.Equal("42", display.HistoricalFailedLogonsByIpText);
+		Assert.Equal("3", display.HistoricalSuccessfulLogonsByIpText);
+		Assert.Equal("alice, bob", display.HistoricalUsersAttemptedFromIpText);
+		Assert.Equal("2026-04-01 00:00:00", display.HistoricalFirstSeenByIpUtcText);
+		Assert.Equal("2026-05-25 18:30:00", display.HistoricalLastSeenByIpUtcText);
+	}
+
+	[Fact]
+	public void FromRdpSessionByIp_NullCounters_RenderBlank_NotZero()
+	{
+		// Stage 2 contract: when the session has no resolved IP, the *ByIp counters are null and
+		// should render as blank so operators can distinguish "unknown IP" from "real zero".
+		RdpSessionDto dto = new()
+		{
+			SessionId = 3,
+			UserName = "noip",
+			ClientAddress = null,
+			HistoricalFailedLogonsByIp = null,
+			HistoricalSuccessfulLogonsByIp = null,
+			HistoricalUsersAttemptedFromIp = null,
+			HistoricalFirstSeenByIpUtc = null,
+			HistoricalLastSeenByIpUtc = null,
+		};
+
+		RdpSessionHistoricalByIpDisplay display = ConnectionFactRowProjection.FromRdpSessionByIp(dto);
+
+		Assert.Equal(string.Empty, display.HistoricalFailedLogonsByIpText);
+		Assert.Equal(string.Empty, display.HistoricalSuccessfulLogonsByIpText);
+		Assert.Equal(string.Empty, display.HistoricalUsersAttemptedFromIpText);
+		Assert.Equal(string.Empty, display.HistoricalFirstSeenByIpUtcText);
+		Assert.Equal(string.Empty, display.HistoricalLastSeenByIpUtcText);
+	}
+
+	[Fact]
+	public void FromRdpSessionByIp_ZeroCounters_RenderAsZero_NotBlank()
+	{
+		// Stage 2 contract: when the IP is known but no facts exist yet, the counters are 0 and
+		// must render as "0" — not blank — so the row visibly distinguishes "no history" from
+		// "unknown IP".
+		RdpSessionDto dto = new()
+		{
+			SessionId = 5,
+			UserName = "fresh",
+			ClientAddress = "10.0.0.10",
+			HistoricalFailedLogonsByIp = 0,
+			HistoricalSuccessfulLogonsByIp = 0,
+			HistoricalUsersAttemptedFromIp = null,
+			HistoricalFirstSeenByIpUtc = null,
+			HistoricalLastSeenByIpUtc = null,
+		};
+
+		RdpSessionHistoricalByIpDisplay display = ConnectionFactRowProjection.FromRdpSessionByIp(dto);
+
+		Assert.Equal("0", display.HistoricalFailedLogonsByIpText);
+		Assert.Equal("0", display.HistoricalSuccessfulLogonsByIpText);
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Stage 2 — RdpSessionDto MessagePack append-only roundtrip
+	// ---------------------------------------------------------------------------------------------
+
+	[Fact]
+	public void RdpSessionDto_MessagePackRoundtrip_PreservesAllStage2Fields()
+	{
+		RdpSessionDto src = new()
+		{
+			SessionId = 10,
+			UserName = "alice",
+			ClientAddress = "203.0.113.99",
+			State = "Active",
+			IsActive = true,
+			HistoricalFirstSeenUtc = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+			HistoricalLastSeenUtc = new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc),
+			HistoricalFailedLogons = 4,
+			HistoricalSuccessfulLogons = 2,
+			HistoricalUserNamesAttempted = "alice",
+			HistoricalFailedLogonsByIp = 22,
+			HistoricalSuccessfulLogonsByIp = 1,
+			HistoricalUsersAttemptedFromIp = "alice, root, admin",
+			HistoricalFirstSeenByIpUtc = new DateTime(2025, 12, 1, 0, 0, 0, DateTimeKind.Utc),
+			HistoricalLastSeenByIpUtc = new DateTime(2026, 5, 26, 12, 0, 0, DateTimeKind.Utc),
+		};
+
+		byte[] bytes = MessagePack.MessagePackSerializer.Serialize(src);
+		RdpSessionDto roundtrip = MessagePack.MessagePackSerializer.Deserialize<RdpSessionDto>(bytes);
+
+		Assert.Equal(src.HistoricalFailedLogonsByIp, roundtrip.HistoricalFailedLogonsByIp);
+		Assert.Equal(src.HistoricalSuccessfulLogonsByIp, roundtrip.HistoricalSuccessfulLogonsByIp);
+		Assert.Equal(src.HistoricalUsersAttemptedFromIp, roundtrip.HistoricalUsersAttemptedFromIp);
+		Assert.Equal(src.HistoricalFirstSeenByIpUtc, roundtrip.HistoricalFirstSeenByIpUtc);
+		Assert.Equal(src.HistoricalLastSeenByIpUtc, roundtrip.HistoricalLastSeenByIpUtc);
+		// Pre-existing Stage IP-D fields must still roundtrip — append-only contract.
+		Assert.Equal(src.HistoricalFailedLogons, roundtrip.HistoricalFailedLogons);
+		Assert.Equal(src.HistoricalSuccessfulLogons, roundtrip.HistoricalSuccessfulLogons);
+		Assert.Equal(src.HistoricalUserNamesAttempted, roundtrip.HistoricalUserNamesAttempted);
+	}
+
 	[Fact]
 	public void FromRdpSession_LiveClientAddress_IsNotShadowedByHistorical()
 	{

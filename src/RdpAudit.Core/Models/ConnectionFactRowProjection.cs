@@ -30,6 +30,16 @@ public readonly record struct RdpSessionHistoricalDisplay(
 	long HistoricalSuccessfulLogons,
 	string HistoricalUserNamesAttemptedText);
 
+/// <summary>Display projection of the Stage 2 per-IP Historical*ByIp fields on <see cref="RdpSessionDto"/>.
+/// All text fields render an empty string when the underlying value is null so the grid can distinguish
+/// "unknown" (blank) from a real zero (which renders as "0").</summary>
+public readonly record struct RdpSessionHistoricalByIpDisplay(
+	string HistoricalFailedLogonsByIpText,
+	string HistoricalSuccessfulLogonsByIpText,
+	string HistoricalUsersAttemptedFromIpText,
+	string HistoricalFirstSeenByIpUtcText,
+	string HistoricalLastSeenByIpUtcText);
+
 /// <summary>Pure mapping helpers used by the Configurator row view-models. No WinForms dependency.</summary>
 public static class ConnectionFactRowProjection
 {
@@ -61,6 +71,23 @@ public static class ConnectionFactRowProjection
 			HistoricalUserNamesAttemptedText: dto.HistoricalUserNamesAttempted ?? string.Empty);
 	}
 
+	/// <summary>Derives the Stage 2 per-IP display fields from an <see cref="RdpSessionDto"/>. Renders
+	/// nullable counters as blank when the underlying value is null so operators can distinguish
+	/// "unknown IP / no fact data" from a real zero (which renders as "0").</summary>
+	public static RdpSessionHistoricalByIpDisplay FromRdpSessionByIp(RdpSessionDto dto)
+	{
+		ArgumentNullException.ThrowIfNull(dto);
+		return new RdpSessionHistoricalByIpDisplay(
+			HistoricalFailedLogonsByIpText: FormatNullableLong(dto.HistoricalFailedLogonsByIp),
+			HistoricalSuccessfulLogonsByIpText: FormatNullableLong(dto.HistoricalSuccessfulLogonsByIp),
+			HistoricalUsersAttemptedFromIpText: dto.HistoricalUsersAttemptedFromIp ?? string.Empty,
+			HistoricalFirstSeenByIpUtcText: FormatNullableUtc(dto.HistoricalFirstSeenByIpUtc),
+			HistoricalLastSeenByIpUtcText: FormatNullableUtc(dto.HistoricalLastSeenByIpUtc));
+	}
+
 	private static string FormatNullableUtc(DateTime? value) =>
 		value?.ToString(TimeFormat, CultureInfo.InvariantCulture) ?? string.Empty;
+
+	private static string FormatNullableLong(long? value) =>
+		value?.ToString(CultureInfo.InvariantCulture) ?? string.Empty;
 }

@@ -76,6 +76,36 @@ public sealed class RdpSessionDto
 	/// <summary>Comma-separated, deduplicated list of usernames attempted from this IP across matching facts. Bounded width.</summary>
 	[Key(16)]
 	public string? HistoricalUserNamesAttempted { get; set; }
+
+	// --- Stage 2 additions (append-only). Per-IP historical aggregation from RdpConnectionFacts
+	// keyed on the resolved session ClientAddress / SourceIp. These never overwrite the user-keyed
+	// fields above; they exist so operators can see brute-force pressure originating from the
+	// session's source IP regardless of which login each attempt targeted.
+
+	/// <summary>Sum of failed logons across all RdpConnectionFacts that share this session's source IP.
+	/// Null when the session has no resolved IP (distinguishes unknown from a real zero).</summary>
+	[Key(17)]
+	public long? HistoricalFailedLogonsByIp { get; set; }
+
+	/// <summary>Sum of successful logons across all RdpConnectionFacts that share this session's source IP.
+	/// Null when the session has no resolved IP.</summary>
+	[Key(18)]
+	public long? HistoricalSuccessfulLogonsByIp { get; set; }
+
+	/// <summary>Comma-separated, deduplicated list of distinct usernames attempted from this IP across
+	/// all matching facts. Bounded width. Null when the session has no resolved IP.</summary>
+	[Key(19)]
+	public string? HistoricalUsersAttemptedFromIp { get; set; }
+
+	/// <summary>Earliest <c>FirstSeenUtc</c> across all RdpConnectionFacts that share this session's source IP;
+	/// null when the session has no resolved IP or no matching facts exist.</summary>
+	[Key(20)]
+	public DateTime? HistoricalFirstSeenByIpUtc { get; set; }
+
+	/// <summary>Latest <c>LastSeenUtc</c> across all RdpConnectionFacts that share this session's source IP;
+	/// null when the session has no resolved IP or no matching facts exist.</summary>
+	[Key(21)]
+	public DateTime? HistoricalLastSeenByIpUtc { get; set; }
 }
 
 /// <summary>List wrapper for <c>ListRdpSessions</c> so the response carries an operation status.</summary>

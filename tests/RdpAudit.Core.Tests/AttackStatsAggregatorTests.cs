@@ -212,6 +212,64 @@ public class AttackStatsAggregatorTests
 	}
 
 	[Fact]
+	public void SentinelUnresolvedIp_IsReservedConstantAndDetected()
+	{
+		// Stage 2 contract: the unresolved-IP sentinel is "0.0.0.0" and the helper recognises it.
+		Assert.Equal("0.0.0.0", AttackStatsAggregator.SentinelUnresolvedIp);
+		Assert.True(AttackStatsAggregator.IsSentinelUnresolvedIp("0.0.0.0"));
+		Assert.False(AttackStatsAggregator.IsSentinelUnresolvedIp("203.0.113.10"));
+		Assert.False(AttackStatsAggregator.IsSentinelUnresolvedIp(null));
+		Assert.False(AttackStatsAggregator.IsSentinelUnresolvedIp(string.Empty));
+	}
+
+	[Fact]
+	public void SentinelUnresolvedIp_AggregatesUnderItsOwnRow()
+	{
+		// Stage 2: when the caller substitutes the sentinel IP for unresolved 4625 rows, the
+		// aggregator treats it as just another distinct IP — counters land on a single row,
+		// successful Security 4624 with a real IP stays on its own row.
+		AttackEventSample[] samples =
+		{
+			new(AttackStatsAggregator.SentinelUnresolvedIp,
+				AttackStatsAggregator.EventIdLogonFailure, Now.AddSeconds(-30), "administrator", null, "Security"),
+			new(AttackStatsAggregator.SentinelUnresolvedIp,
+				AttackStatsAggregator.EventIdLogonFailure, Now.AddSeconds(-10), "guest", null, "Security"),
+			new("203.0.113.50",
+				AttackStatsAggregator.EventIdLogonSuccess, Now, "alice", 10, "Security"),
+		};
+		IReadOnlyList<AttackStat> rows = AttackStatsAggregator.Aggregate(
+			samples,
+			new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+			Now);
+
+		AttackStat sentinel = Assert.Single(rows, r => r.Ip == AttackStatsAggregator.SentinelUnresolvedIp);
+		Assert.Equal(2, sentinel.Failed);
+		Assert.Equal(0, sentinel.Successful);
+		Assert.Equal(2, sentinel.TotalAttempts);
+
+		AttackStat real = Assert.Single(rows, r => r.Ip == "203.0.113.50");
+		Assert.Equal(1, real.Successful);
+		Assert.Equal(0, real.Failed);
+	}
+
+	[Fact]
+	public void TsRcm261_RemainsUnrelated_ObservationOnly()
+	{
+		// Stage 6 / Stage 2 cross-check: TS-RCM 261 (listener received a connection) is observation-
+		// only and must never count toward Successful or Failed. The classifier returns Unrelated.
+		AttackEventSample[] samples =
+		{
+			new("198.51.100.250", 261, Now, null, null,
+				"Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational"),
+		};
+		IReadOnlyList<AttackStat> rows = AttackStatsAggregator.Aggregate(
+			samples,
+			new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+			Now);
+		Assert.Empty(rows);
+	}
+
+	[Fact]
 	public void Result_IsOrderedByThreatScoreThenIpDeterministically()
 	{
 		AttackEventSample[] samples =
