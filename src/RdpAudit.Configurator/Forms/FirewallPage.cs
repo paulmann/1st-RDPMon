@@ -298,6 +298,7 @@ public sealed class FirewallPage : TabPage
 
 		_blocklistGrid = MakeAddressGrid();
 		_blocklistGrid.DataSource = _blocklistRows;
+		AttachReputationMenu(_blocklistGrid, () => SelectedRow(_blocklistGrid, _blocklistRows)?.Address);
 		_blocklistFilter = MakeFilterBox("Filter IP / reason / source…", () => ApplyBlocklistFilter());
 		_blocklistInput = MakeInputBox("IP to add to blocklist (e.g. 203.0.113.10)");
 		Button blocklistAdd = MakeButton("Add IP", async (_, _) => await OnAddBlocklistAsync().ConfigureAwait(true));
@@ -306,6 +307,7 @@ public sealed class FirewallPage : TabPage
 
 		_whitelistGrid = MakeAddressGrid();
 		_whitelistGrid.DataSource = _whitelistRows;
+		AttachReputationMenu(_whitelistGrid, () => SelectedRow(_whitelistGrid, _whitelistRows)?.Address);
 		_whitelistFilter = MakeFilterBox("Filter IP / note / source…", () => ApplyWhitelistFilter());
 		_whitelistInput = MakeInputBox("IP to add to whitelist (e.g. 198.51.100.5)");
 		Button whitelistAdd = MakeButton("Add IP", async (_, _) => await OnAddWhitelistAsync().ConfigureAwait(true));
@@ -323,6 +325,7 @@ public sealed class FirewallPage : TabPage
 
 		_activeBlocksGrid = MakeActiveBlocksGrid();
 		_activeBlocksGrid.DataSource = _activeBlockRows;
+		AttachReputationMenu(_activeBlocksGrid, () => SelectedRow(_activeBlocksGrid, _activeBlockRows)?.Ip);
 		_activeBlocksFilter = MakeFilterBox("Filter IP / reason / provider / status…", () => ApplyActiveBlockFilter());
 		Button activeUnblock = MakeButton("Unblock selected", async (_, _) => await OnUnblockActiveAsync().ConfigureAwait(true));
 		_innerTabs.TabPages.Add(BuildGridTab("Active blocks", _activeBlocksGrid, _activeBlocksFilter, null, activeUnblock));
@@ -1250,6 +1253,44 @@ public sealed class FirewallPage : TabPage
 		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Expires (UTC)", DataPropertyName = nameof(ActiveBlockRow.ExpiresUtcText), Width = 170 });
 		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Reason / error", DataPropertyName = nameof(ActiveBlockRow.ReasonOrError), AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
 		return g;
+	}
+
+	private void AttachReputationMenu(DataGridView grid, Func<string?> getIp)
+	{
+		ContextMenuStrip menu = new();
+		ToolStripMenuItem ripeStat = new(IpReputationBrowser.RipeStatMenuLabel, null, (_, _) =>
+		{
+			IpReputationBrowser.LaunchOutcome outcome = IpReputationBrowser.OpenRipeStat(getIp());
+			SetStatus(outcome.Format());
+		});
+		ToolStripMenuItem abuseIpDb = new(IpReputationBrowser.AbuseIpDbMenuLabel, null, (_, _) =>
+		{
+			IpReputationBrowser.LaunchOutcome outcome = IpReputationBrowser.OpenAbuseIpDb(getIp());
+			SetStatus(outcome.Format());
+		});
+		menu.Items.Add(ripeStat);
+		menu.Items.Add(abuseIpDb);
+		menu.Opening += (_, e) =>
+		{
+			bool eligible = IpReputationBrowser.IsLookupEligible(getIp());
+			ripeStat.Enabled = eligible;
+			abuseIpDb.Enabled = eligible;
+			if (getIp() is null)
+			{
+				e.Cancel = true;
+			}
+		};
+		grid.ContextMenuStrip = menu;
+		grid.CellMouseDown += (_, e) =>
+		{
+			if (e.Button != MouseButtons.Right || e.RowIndex < 0 || e.RowIndex >= grid.RowCount)
+			{
+				return;
+			}
+
+			grid.ClearSelection();
+			grid.Rows[e.RowIndex].Selected = true;
+		};
 	}
 
 	private static T? SelectedRow<T>(DataGridView grid, BindingList<T> binding) where T : class
