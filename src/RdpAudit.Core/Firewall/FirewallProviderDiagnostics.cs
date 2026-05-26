@@ -92,11 +92,34 @@ public sealed class FirewallProviderDiagnostics
 	/// <c>null</c> = unknown (no policy data collected).</summary>
 	public bool? LocalRuleManagementAllowed { get; init; }
 
+	/// <summary>Parsed per-profile <c>LocalFirewallRules</c> rows from
+	/// <c>netsh advfirewall show allprofiles</c>. Empty when the probe did not collect them.
+	/// One entry per profile recognised; <see cref="LocalRulePolicyHint.GpoStoreOnly"/> means
+	/// local rule writes are blocked by Group Policy (<c>N/A (GPO-store only)</c>).</summary>
+	public IReadOnlyList<LocalRulePolicyRow> LocalRulePolicyRows { get; init; } = Array.Empty<LocalRulePolicyRow>();
+
 	/// <summary>Configured RDP TCP port observed on the host. <c>null</c> when not resolved.</summary>
 	public int? ConfiguredRdpPort { get; init; }
 
 	/// <summary>Optional free-form notes appended by the probe (errors, fallback explanations).</summary>
 	public IReadOnlyList<string> Notes { get; init; } = Array.Empty<string>();
+
+	/// <summary>True when at least one profile reports the GPO-store-only marker — direct local
+	/// firewall writes (`netsh ... add rule`) are expected to be rejected by policy.</summary>
+	public bool LocalRulesAreGpoStoreOnly
+	{
+		get
+		{
+			foreach (LocalRulePolicyRow row in LocalRulePolicyRows)
+			{
+				if (row.Hint == LocalRulePolicyHint.GpoStoreOnly)
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+	}
 
 	/// <summary>Builds a single, copy-paste-friendly diagnostics text block summarising every
 	/// captured field. Stable English output; never localised.</summary>
@@ -116,6 +139,26 @@ public sealed class FirewallProviderDiagnostics
 		{
 			sb.Append("Local Windows Firewall rule management allowed: ")
 				.Append(allowed ? "yes" : "no").Append('\n');
+		}
+
+		if (LocalRulePolicyRows.Count > 0)
+		{
+			sb.Append("LocalFirewallRules policy (per profile):").Append('\n');
+			foreach (LocalRulePolicyRow row in LocalRulePolicyRows)
+			{
+				sb.Append("  - ")
+					.Append(string.IsNullOrEmpty(row.ProfileLabel) ? "(profile)" : row.ProfileLabel)
+					.Append(": ").Append(row.Hint);
+				if (!string.IsNullOrEmpty(row.RawValue))
+				{
+					sb.Append(" [").Append(row.RawValue).Append(']');
+				}
+				sb.Append('\n');
+			}
+			if (LocalRulesAreGpoStoreOnly)
+			{
+				sb.Append("Note: at least one profile reports LocalFirewallRules N/A (GPO-store only) — direct local netsh writes are blocked by Group Policy.\n");
+			}
 		}
 
 		if (ProviderServices.Count > 0)

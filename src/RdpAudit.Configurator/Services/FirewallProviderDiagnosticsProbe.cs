@@ -55,6 +55,7 @@ public sealed class FirewallProviderDiagnosticsProbe
 		"kescli.exe",
 		"kavshell.exe",
 		"avp.exe",
+		"avp.com",
 	};
 
 	/// <summary>Run all probes and return the resulting diagnostic snapshot. Never throws —
@@ -80,15 +81,48 @@ public sealed class FirewallProviderDiagnosticsProbe
 
 		int? configuredPort = TryReadConfiguredRdpPort(notes);
 
+		// SecurityCenter2 is additional, best-effort evidence. The probe never depends on it —
+		// Windows Server SKUs hide SecurityCenter2 and we still classify correctly via services /
+		// CLI presence. When it is available we surface the AntiVirus / Firewall product names as
+		// supplemental notes so the diagnostics text matches what AV vendors call themselves.
+		IReadOnlyList<SecurityCenter2ProductReading> securityCenterReadings = ProbeSecurityCenter2(notes);
+		foreach (SecurityCenter2ProductReading reading in securityCenterReadings)
+		{
+			notes.Add("SecurityCenter2 " + reading.ProductType + ": " + reading.DisplayName);
+		}
+
 		bool kasperskyManagesFirewall = AnyServiceRunning(services, "kavfs", "kavfsgt", "kavfsmui", "kavfsrcn", "kavfswh");
 
 		(FirewallProviderDetectedKind kind, string name) = FirewallProviderClassifier.Classify(
 			services, cliTools, kasperskyManagesWindowsFirewall: kasperskyManagesFirewall);
 
+		// SecurityCenter2 evidence: if Kaspersky is registered as the firewall product, promote
+		// the unknown classification (no service / CLI signals reached us) to KasperskyDetected
+		// so the operator still sees the right provider name on workstation SKUs.
+		if (kind == FirewallProviderDetectedKind.WindowsDefenderFirewall
+			&& securityCenterReadings.Any(r => ProductMentionsKaspersky(r.DisplayName)))
+		{
+			kind = FirewallProviderDetectedKind.KasperskyDetected;
+			name = securityCenterReadings.First(r => ProductMentionsKaspersky(r.DisplayName)).DisplayName;
+		}
+
+		IReadOnlyList<LocalRulePolicyRow> policyRows = ProbeLocalRulePolicy(notes);
+		bool gpoStoreOnly = false;
+		foreach (LocalRulePolicyRow row in policyRows)
+		{
+			if (row.Hint == LocalRulePolicyHint.GpoStoreOnly)
+			{
+				gpoStoreOnly = true;
+				break;
+			}
+		}
+
 		bool? localRulesAllowed = kind switch
 		{
 			FirewallProviderDetectedKind.KasperskyManagedWindowsFirewall => false,
+			FirewallProviderDetectedKind.WindowsDefenderFirewall when gpoStoreOnly => false,
 			FirewallProviderDetectedKind.WindowsDefenderFirewall => true,
+			_ when gpoStoreOnly => false,
 			_ => null,
 		};
 
@@ -100,9 +134,122 @@ public sealed class FirewallProviderDiagnosticsProbe
 			DetectedCliTools = cliTools,
 			WindowsFirewallProfiles = Array.Empty<FirewallProfileState>(),
 			LocalRuleManagementAllowed = localRulesAllowed,
+			LocalRulePolicyRows = policyRows,
 			ConfiguredRdpPort = configuredPort,
 			Notes = notes,
 		};
+	}
+
+	/// <summary>One reading from the SecurityCenter2 WMI provider. <see cref="ProductType"/>
+	/// is the human label (`AntiVirusProduct` / `FirewallProduct`); <see cref="DisplayName"/>
+	/// is the product's reported name. Both are safe to surface verbatim in diagnostics.</summary>
+	internal sealed record SecurityCenter2ProductReading(string ProductType, string DisplayName);
+
+	/// <summary>Best-effort probe of the SecurityCenter2 WMI namespace. Returns an empty list on
+	/// hosts where SecurityCenter2 is unavailable (Windows Server SKUs, locked-down hosts) — and
+	/// records a single Note when WMI threw, so operators can correlate against partial data.</summary>
+	private static List<SecurityCenter2ProductReading> ProbeSecurityCenter2(List<string> notes)
+	{
+		List<SecurityCenter2ProductReading> readings = new();
+		try
+		{
+			readings.AddRange(QuerySecurityCenter2Class("AntiVirusProduct"));
+			readings.AddRange(QuerySecurityCenter2Class("FirewallProduct"));
+		}
+		catch (System.Management.ManagementException ex)
+		{
+			notes.Add("SecurityCenter2 probe failed: " + ex.GetType().Name + " — " + ex.Message);
+		}
+		catch (System.Runtime.InteropServices.COMException ex)
+		{
+			notes.Add("SecurityCenter2 probe failed: " + ex.GetType().Name + " — " + ex.Message);
+		}
+		catch (UnauthorizedAccessException ex)
+		{
+			notes.Add("SecurityCenter2 probe failed: " + ex.GetType().Name + " — " + ex.Message);
+		}
+		return readings;
+	}
+
+	private static IEnumerable<SecurityCenter2ProductReading> QuerySecurityCenter2Class(string className)
+	{
+		using System.Management.ManagementObjectSearcher searcher = new(
+			@"root\SecurityCenter2",
+			"SELECT displayName FROM " + className);
+		foreach (System.Management.ManagementBaseObject mo in searcher.Get())
+		{
+			string? display = mo["displayName"] as string;
+			mo.Dispose();
+			if (!string.IsNullOrWhiteSpace(display))
+			{
+				yield return new SecurityCenter2ProductReading(className, display.Trim());
+			}
+		}
+	}
+
+	private static bool ProductMentionsKaspersky(string displayName)
+		=> !string.IsNullOrEmpty(displayName)
+			&& displayName.Contains("kaspersky", StringComparison.OrdinalIgnoreCase);
+
+	/// <summary>Runs <c>netsh advfirewall show allprofiles</c> through the parse-stable English
+	/// console and parses every <c>LocalFirewallRules</c> row. On hosts where group policy forces
+	/// rules into the GPO store, this surfaces <see cref="LocalRulePolicyHint.GpoStoreOnly"/>.
+	/// Returns an empty list when the spawn or parse fails — a Note is appended instead.</summary>
+	private static IReadOnlyList<LocalRulePolicyRow> ProbeLocalRulePolicy(List<string> notes)
+	{
+		try
+		{
+			EnglishConsoleSpawn spawn = EnglishConsoleCommandFactory.Build(TrustedEnglishConsoleTool.NetshShowAllProfilesState);
+			System.Text.Encoding encoding = QwinstaConsoleEncoding.Resolve();
+			System.Diagnostics.ProcessStartInfo psi = new(spawn.Executable)
+			{
+				Arguments = spawn.Arguments,
+				UseShellExecute = false,
+				CreateNoWindow = true,
+				RedirectStandardOutput = true,
+				RedirectStandardError = true,
+				StandardOutputEncoding = encoding,
+				StandardErrorEncoding = encoding,
+			};
+
+			using System.Diagnostics.Process? proc = System.Diagnostics.Process.Start(psi);
+			if (proc is null)
+			{
+				notes.Add("netsh advfirewall show allprofiles: Process.Start returned null");
+				return Array.Empty<LocalRulePolicyRow>();
+			}
+
+			string stdout = proc.StandardOutput.ReadToEnd();
+			string stderr = proc.StandardError.ReadToEnd();
+			bool exited = proc.WaitForExit(15_000);
+			if (!exited)
+			{
+				try
+				{
+					proc.Kill(entireProcessTree: true);
+				}
+				catch (InvalidOperationException)
+				{
+				}
+				notes.Add("netsh advfirewall show allprofiles: timed out after 15s");
+				return Array.Empty<LocalRulePolicyRow>();
+			}
+
+			if (proc.ExitCode != 0)
+			{
+				notes.Add(
+					"netsh advfirewall show allprofiles exited " + proc.ExitCode.ToString(CultureInfo.InvariantCulture)
+					+ (string.IsNullOrEmpty(stderr) ? string.Empty : "; stderr=" + stderr.Trim()));
+				return Array.Empty<LocalRulePolicyRow>();
+			}
+
+			return LocalRulePolicyParser.ParseAllProfiles(stdout);
+		}
+		catch (Exception ex)
+		{
+			notes.Add("netsh advfirewall show allprofiles failed: " + ex.GetType().Name + " — " + ex.Message);
+			return Array.Empty<LocalRulePolicyRow>();
+		}
 	}
 
 	private static FirewallServiceState? ProbeService(string serviceName, List<string> notes)
