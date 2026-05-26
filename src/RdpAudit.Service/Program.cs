@@ -140,8 +140,10 @@ public static class Program
 		services.AddSingleton<EventChannel>();
 		services.AddSingleton<ServiceMetrics>();
 		services.AddSingleton<SessionCorrelationCache>();
+		services.AddSingleton<RdpTransportIpCache>();
 		services.AddSingleton<SessionIpCorrelationUpserter>();
 		services.AddSingleton<RdpConnectionFactUpserter>();
+		services.AddSingleton<AuthAttemptFactUpserter>();
 		services.AddSingleton<SecurityCorrelationWatchdog>();
 		services.AddSingleton<EventNormalizer>();
 		services.AddSingleton<DbAlertContext>();

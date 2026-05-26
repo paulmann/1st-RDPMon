@@ -45,6 +45,8 @@ public sealed class AuditDbContext : DbContext
 
 	public DbSet<RdpConnectionFact> RdpConnectionFacts => Set<RdpConnectionFact>();
 
+	public DbSet<AuthAttemptFact> AuthAttemptFacts => Set<AuthAttemptFact>();
+
 	protected override void OnModelCreating(ModelBuilder modelBuilder)
 	{
 		base.OnModelCreating(modelBuilder);

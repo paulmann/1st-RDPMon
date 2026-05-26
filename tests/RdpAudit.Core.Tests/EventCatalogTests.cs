@@ -37,4 +37,18 @@ public class EventCatalogTests
 		Assert.Contains(21, ids);
 		Assert.DoesNotContain(4624, ids);
 	}
+
+	[Fact]
+	public void All_CoversV3SecuritySet()
+	{
+		// Detect_Attack_Strategy_v3.md §5.2 — every Security id must be live-watched so the
+		// pipeline never relies on backfill alone for visibility. Pin the v3 set here.
+		int[] required = { 4624, 4625, 4634, 4647, 4648, 4672, 4719, 4720, 4724, 4732, 4740,
+			4768, 4769, 4771, 4776, 4778, 4779, 4825, 1102 };
+		IEnumerable<int> securityIds = EventCatalog.EventIdsForChannel(EventCatalog.ChannelSecurity);
+		foreach (int id in required)
+		{
+			Assert.Contains(id, securityIds);
+		}
+	}
 }

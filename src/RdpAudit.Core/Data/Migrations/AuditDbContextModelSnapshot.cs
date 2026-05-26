@@ -105,6 +105,110 @@ namespace RdpAudit.Core.Data.Migrations
 					b.ToTable("ActiveBlocks", (string)null);
 				});
 
+			modelBuilder.Entity("RdpAudit.Core.Models.AuthAttemptFact", b =>
+				{
+					b.Property<long>("Id")
+						.ValueGeneratedOnAdd()
+						.HasColumnType("INTEGER");
+
+					b.Property<string>("AuthPackage")
+						.HasMaxLength(64)
+						.HasColumnType("TEXT");
+
+					b.Property<string>("EnrichmentConfidence")
+						.HasMaxLength(16)
+						.HasColumnType("TEXT");
+
+					b.Property<string>("EnrichmentSource")
+						.HasMaxLength(64)
+						.HasColumnType("TEXT");
+
+					b.Property<string>("EvidenceChannel")
+						.HasMaxLength(256)
+						.HasColumnType("TEXT");
+
+					b.Property<int>("EvidenceEventId")
+						.HasColumnType("INTEGER");
+
+					b.Property<long>("EvidenceRawEventId")
+						.HasColumnType("INTEGER");
+
+					b.Property<DateTime>("IngestedUtc")
+						.HasColumnType("TEXT");
+
+					b.Property<bool>("IpFromCorrelation")
+						.ValueGeneratedOnAdd()
+						.HasColumnType("INTEGER")
+						.HasDefaultValue(false);
+
+					b.Property<string>("LogonId")
+						.HasMaxLength(32)
+						.HasColumnType("TEXT");
+
+					b.Property<int?>("LogonType")
+						.HasColumnType("INTEGER");
+
+					b.Property<bool>("NeedsCorrelation")
+						.ValueGeneratedOnAdd()
+						.HasColumnType("INTEGER")
+						.HasDefaultValue(false);
+
+					b.Property<string>("NormalizedUserName")
+						.HasMaxLength(256)
+						.HasColumnType("TEXT");
+
+					b.Property<int>("Outcome")
+						.HasColumnType("INTEGER");
+
+					b.Property<string>("SourceIp")
+						.HasMaxLength(45)
+						.HasColumnType("TEXT");
+
+					b.Property<int?>("SourcePort")
+						.HasColumnType("INTEGER");
+
+					b.Property<string>("Status")
+						.HasMaxLength(64)
+						.HasColumnType("TEXT");
+
+					b.Property<string>("SubStatus")
+						.HasMaxLength(64)
+						.HasColumnType("TEXT");
+
+					b.Property<string>("SubStatusMeaning")
+						.HasMaxLength(128)
+						.HasColumnType("TEXT");
+
+					b.Property<string>("TargetDomain")
+						.HasMaxLength(256)
+						.HasColumnType("TEXT");
+
+					b.Property<string>("TargetUser")
+						.HasMaxLength(256)
+						.HasColumnType("TEXT");
+
+					b.Property<DateTime>("TimeUtc")
+						.HasColumnType("TEXT");
+
+					b.Property<string>("WorkstationName")
+						.HasMaxLength(256)
+						.HasColumnType("TEXT");
+
+					b.HasKey("Id");
+
+					b.HasIndex("EvidenceRawEventId");
+
+					b.HasIndex("NeedsCorrelation", "TimeUtc");
+
+					b.HasIndex("NormalizedUserName", "TimeUtc");
+
+					b.HasIndex("Outcome", "TimeUtc");
+
+					b.HasIndex("SourceIp", "TimeUtc");
+
+					b.ToTable("AuthAttemptFacts", (string)null);
+				});
+
 			modelBuilder.Entity("RdpAudit.Core.Models.Address", b =>
 				{
 					b.Property<long>("Id")

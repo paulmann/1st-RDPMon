@@ -24,6 +24,23 @@ public sealed class ServiceMetrics
 	private string? _securityCorrelationDiagnostic;
 	private readonly object _diagGate = new();
 
+	// --- v3 telemetry (Detect_Attack_Strategy_v3.md acceptance criteria §17) ---
+	private long _securityEventsRead;
+	private long _securityEventsNormalized;
+	private long _securityEventsRejected;
+	private long _securityBackfillRecordsRead;
+	private long _securityBackfillRecordsForwarded;
+	private long _securityBackfillRecordsDeduped;
+	private DateTime? _securityBackfillLastRunUtc;
+	private string? _lastSecurityChannelError;
+	private string? _lastSecurityRejectReason;
+	private long _securityRejectReasonCount;
+	private bool _securityWatcherEnabled;
+	private long _authAttemptFactCreated;
+	private long _authAttemptFactFailed;
+	private long _authAttemptFactSucceeded;
+	private DateTime? _lastAuthAttemptFactCreatedUtc;
+
 	public long EventsCaptured => Interlocked.Read(ref _captured);
 
 	public long EventsDropped => Interlocked.Read(ref _dropped);
@@ -66,6 +83,70 @@ public sealed class ServiceMetrics
 	}
 
 	public Dictionary<string, string> ChannelStatus { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+	// --- v3 telemetry surface (acceptance criterion §17.13: pipeline observability). ---
+
+	/// <summary>True once the live Security EventLogWatcher has armed at least once.</summary>
+	public bool SecurityWatcherEnabled
+	{
+		get { lock (_diagGate) { return _securityWatcherEnabled; } }
+	}
+
+	/// <summary>Cumulative count of Security events received by the live watcher path.</summary>
+	public long SecurityEventsRead => Interlocked.Read(ref _securityEventsRead);
+
+	/// <summary>Cumulative count of Security events that completed normalization without error.</summary>
+	public long SecurityEventsNormalized => Interlocked.Read(ref _securityEventsNormalized);
+
+	/// <summary>Cumulative count of Security events rejected with an explicit reason (XML parse,
+	/// access denied, channel disabled, etc.). Never includes routine "no IP" cases.</summary>
+	public long SecurityEventsRejected => Interlocked.Read(ref _securityEventsRejected);
+
+	/// <summary>UTC of the most recent Security backfill poll completion.</summary>
+	public DateTime? SecurityBackfillLastRunUtc
+	{
+		get { lock (_diagGate) { return _securityBackfillLastRunUtc; } }
+	}
+
+	/// <summary>Cumulative count of Security records read during backfill polls.</summary>
+	public long SecurityBackfillRecordsRead => Interlocked.Read(ref _securityBackfillRecordsRead);
+
+	/// <summary>Cumulative count of Security records the backfill forwarded to the live channel.</summary>
+	public long SecurityBackfillRecordsForwarded => Interlocked.Read(ref _securityBackfillRecordsForwarded);
+
+	/// <summary>Cumulative count of Security records the backfill dropped as duplicates.</summary>
+	public long SecurityBackfillRecordsDeduped => Interlocked.Read(ref _securityBackfillRecordsDeduped);
+
+	/// <summary>Most recent error message from the Security channel (live or backfill). Null when
+	/// nothing has failed yet.</summary>
+	public string? LastSecurityChannelError
+	{
+		get { lock (_diagGate) { return _lastSecurityChannelError; } }
+	}
+
+	/// <summary>Most recent rejection reason for a normalized Security event.</summary>
+	public string? LastSecurityRejectReason
+	{
+		get { lock (_diagGate) { return _lastSecurityRejectReason; } }
+	}
+
+	/// <summary>Cumulative count of Security events rejected, paired with <see cref="LastSecurityRejectReason"/>.</summary>
+	public long SecurityRejectReasonCount => Interlocked.Read(ref _securityRejectReasonCount);
+
+	/// <summary>Cumulative count of <c>AuthAttemptFact</c> rows created since service start.</summary>
+	public long AuthAttemptFactCreated => Interlocked.Read(ref _authAttemptFactCreated);
+
+	/// <summary>Cumulative count of <c>AuthAttemptFact</c> rows with Outcome=Failed.</summary>
+	public long AuthAttemptFactFailed => Interlocked.Read(ref _authAttemptFactFailed);
+
+	/// <summary>Cumulative count of <c>AuthAttemptFact</c> rows with Outcome=Succeeded.</summary>
+	public long AuthAttemptFactSucceeded => Interlocked.Read(ref _authAttemptFactSucceeded);
+
+	/// <summary>UTC of the most recent <c>AuthAttemptFact</c> row created.</summary>
+	public DateTime? LastAuthAttemptFactCreatedUtc
+	{
+		get { lock (_diagGate) { return _lastAuthAttemptFactCreatedUtc; } }
+	}
 
 	public void IncrementCaptured() => Interlocked.Increment(ref _captured);
 
@@ -132,6 +213,94 @@ public sealed class ServiceMetrics
 			if (_lastSecurityEventUtc is null || utc > _lastSecurityEventUtc)
 			{
 				_lastSecurityEventUtc = utc;
+			}
+		}
+	}
+
+	/// <summary>Mark the live Security watcher as armed/active.</summary>
+	public void SetSecurityWatcherEnabled(bool enabled)
+	{
+		lock (_diagGate)
+		{
+			_securityWatcherEnabled = enabled;
+		}
+	}
+
+	/// <summary>Tally a Security event that the live watcher path successfully read.</summary>
+	public void IncrementSecurityEventRead() => Interlocked.Increment(ref _securityEventsRead);
+
+	/// <summary>Tally a Security event that completed normalization.</summary>
+	public void IncrementSecurityEventNormalized() => Interlocked.Increment(ref _securityEventsNormalized);
+
+	/// <summary>Tally a Security event the normalizer or downstream pipeline rejected.</summary>
+	public void IncrementSecurityEventRejected(string reason)
+	{
+		Interlocked.Increment(ref _securityEventsRejected);
+		Interlocked.Increment(ref _securityRejectReasonCount);
+		lock (_diagGate)
+		{
+			_lastSecurityRejectReason = reason;
+		}
+	}
+
+	/// <summary>Record completion of a Security backfill poll cycle.</summary>
+	public void RecordSecurityBackfillRun(DateTime utcNow, int recordsRead, int recordsForwarded, int recordsDeduped)
+	{
+		if (recordsRead > 0)
+		{
+			Interlocked.Add(ref _securityBackfillRecordsRead, recordsRead);
+		}
+		if (recordsForwarded > 0)
+		{
+			Interlocked.Add(ref _securityBackfillRecordsForwarded, recordsForwarded);
+		}
+		if (recordsDeduped > 0)
+		{
+			Interlocked.Add(ref _securityBackfillRecordsDeduped, recordsDeduped);
+		}
+
+		lock (_diagGate)
+		{
+			if (_securityBackfillLastRunUtc is null || utcNow > _securityBackfillLastRunUtc)
+			{
+				_securityBackfillLastRunUtc = utcNow;
+			}
+		}
+	}
+
+	/// <summary>Record the most recent error from the Security channel — live or backfill.</summary>
+	public void SetLastSecurityChannelError(string? message)
+	{
+		lock (_diagGate)
+		{
+			_lastSecurityChannelError = message;
+		}
+	}
+
+	/// <summary>Record creation of one or more <c>AuthAttemptFact</c> rows.</summary>
+	public void RecordAuthAttemptFacts(int failedDelta, int succeededDelta, DateTime lastUtc)
+	{
+		int total = failedDelta + succeededDelta;
+		if (total <= 0)
+		{
+			return;
+		}
+
+		Interlocked.Add(ref _authAttemptFactCreated, total);
+		if (failedDelta > 0)
+		{
+			Interlocked.Add(ref _authAttemptFactFailed, failedDelta);
+		}
+		if (succeededDelta > 0)
+		{
+			Interlocked.Add(ref _authAttemptFactSucceeded, succeededDelta);
+		}
+
+		lock (_diagGate)
+		{
+			if (_lastAuthAttemptFactCreatedUtc is null || lastUtc > _lastAuthAttemptFactCreatedUtc)
+			{
+				_lastAuthAttemptFactCreatedUtc = lastUtc;
 			}
 		}
 	}

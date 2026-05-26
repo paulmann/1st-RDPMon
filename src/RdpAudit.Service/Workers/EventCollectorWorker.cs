@@ -204,6 +204,10 @@ public sealed class EventCollectorWorker : BackgroundService
 
 			_health.ReportSuccess(channel);
 			_metrics.SetChannelStatus(channel, "Armed");
+			if (string.Equals(channel, EventCatalog.ChannelSecurity, StringComparison.OrdinalIgnoreCase))
+			{
+				_metrics.SetSecurityWatcherEnabled(true);
+			}
 			_logger.LogInformation("Watcher armed for channel {Channel}", channel);
 		}
 		catch (Exception ex)
@@ -389,6 +393,11 @@ public sealed class EventCollectorWorker : BackgroundService
 
 			case ChannelDecision.DisablePermanently:
 				_metrics.SetChannelStatus(channel, "DisabledAfterFailures");
+				if (string.Equals(channel, EventCatalog.ChannelSecurity, StringComparison.OrdinalIgnoreCase))
+				{
+					_metrics.SetSecurityWatcherEnabled(false);
+					_metrics.SetLastSecurityChannelError("DisabledAfterFailures: " + outcome.Reason);
+				}
 				ChannelImportance importance = _health.ClassifyChannel(channel);
 				if (importance == ChannelImportance.Optional)
 				{
