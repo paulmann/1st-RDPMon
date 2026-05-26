@@ -191,6 +191,13 @@ public sealed class IpcDispatcher
 			EventsDropped = _metrics.EventsDropped,
 			AlertsRaised = _metrics.AlertsRaised,
 			ChannelStatus = _metrics.SnapshotChannels(),
+			Security4625Count = _metrics.Security4625Count,
+			Security4624Count = _metrics.Security4624Count,
+			Security4648Count = _metrics.Security4648Count,
+			RdpCorePreAuthOrphans = _metrics.RdpCorePreAuthOrphans,
+			LastSecurityEventUtc = _metrics.LastSecurityEventUtc,
+			LastRdpCorePreAuthUtc = _metrics.LastRdpCorePreAuthUtc,
+			SecurityCorrelationDiagnostic = _metrics.SecurityCorrelationDiagnostic,
 		};
 	}
 

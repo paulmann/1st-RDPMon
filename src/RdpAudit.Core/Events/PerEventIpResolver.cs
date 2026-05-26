@@ -88,7 +88,14 @@ public static class PerEventIpResolver
 			return eventId switch
 			{
 				4778 or 4779 => EventXmlParser.GetData(doc, "ClientAddress"),
-				4624 or 4625 or 4648 or 4768 or 4769 or 4770 or 4771 => EventXmlParser.GetData(doc, "IpAddress"),
+				// Cameyo rdpmon (RdpMon/RdpMon.cs Addrs.Aggregate) uses positional Properties[19] for
+				// 4625 and Properties[12] for 4648 when the named IpAddress field is missing on older
+				// or stripped event payloads. The Windows EventLog renderer emits Data children in a
+				// stable order, so the positional probe is a safe last-resort fallback after the
+				// named-field probe — never the primary parser.
+				4625 => EventXmlParser.GetData(doc, "IpAddress") ?? EventXmlParser.GetDataAt(doc, 19),
+				4648 => EventXmlParser.GetData(doc, "IpAddress") ?? EventXmlParser.GetDataAt(doc, 12),
+				4624 or 4768 or 4769 or 4770 or 4771 => EventXmlParser.GetData(doc, "IpAddress"),
 				// 4634 (logoff) and 4647 (user-initiated logoff) rarely carry an IP, but when they do
 				// the field is IpAddress (same shape as 4624 family). Probe only that field — no
 				// hostname-only sources.

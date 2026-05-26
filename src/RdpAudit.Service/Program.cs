@@ -142,6 +142,7 @@ public static class Program
 		services.AddSingleton<SessionCorrelationCache>();
 		services.AddSingleton<SessionIpCorrelationUpserter>();
 		services.AddSingleton<RdpConnectionFactUpserter>();
+		services.AddSingleton<SecurityCorrelationWatchdog>();
 		services.AddSingleton<EventNormalizer>();
 		services.AddSingleton<DbAlertContext>();
 		services.AddSingleton<IAlertContext>(sp => sp.GetRequiredService<DbAlertContext>());
@@ -175,6 +176,7 @@ public static class Program
 		AlertRuleRegistration.Register(services);
 
 		services.AddHostedService<EventCollectorWorker>();
+		services.AddHostedService<SecurityBackfillWorker>();
 		services.AddHostedService<EventProcessorWorker>();
 		services.AddHostedService<SessionCorrelationHydrationWorker>();
 		services.AddHostedService<AlertWorker>();
