@@ -44,10 +44,21 @@ public sealed record ServiceInstallationInfo(
 	public bool IsStopped => StateCode == 1
 		|| string.Equals(StateName, "Stopped", StringComparison.OrdinalIgnoreCase);
 
+	/// <summary>Known Windows executable extensions, in priority order. <c>.exe</c> is by far
+	/// the common case but the SCM accepts any of these as a service binary path. Lookup is
+	/// case-insensitive on Windows so we keep the literal lowercase form and compare with
+	/// <see cref="StringComparison.OrdinalIgnoreCase"/>.</summary>
+	private static readonly string[] ExecutableExtensions = { ".exe", ".cmd", ".bat", ".com", ".scr" };
+
 	/// <summary>Returns the absolute path to the service executable parsed from
-	/// <see cref="ImagePath"/>. Win32_Service.PathName follows the same conventions as
-	/// <c>sc.exe</c>: the executable token may be quoted, and arguments may follow.
-	/// Returns null when no parseable path is present.</summary>
+	/// <see cref="ImagePath"/>. <c>Win32_Service.PathName</c> follows the same conventions as
+	/// <c>sc.exe</c>: the executable token may be quoted, and arguments may follow. When the
+	/// path is unquoted (Windows stores most ImagePath entries verbatim, including those that
+	/// contain spaces like <c>C:\Program Files\RdpAudit\Service\RdpAudit.Service.exe</c>), we
+	/// greedily search for a known executable extension followed by end-of-string or a space —
+	/// the bare first-space heuristic used previously truncated <c>C:\Program Files\...</c> at
+	/// the first space and reported the executable as <c>C:\Program</c>. Returns null when no
+	/// parseable path is present.</summary>
 	public string? ResolveExecutablePath()
 	{
 		if (string.IsNullOrWhiteSpace(ImagePath))
@@ -72,11 +83,43 @@ public sealed record ServiceInstallationInfo(
 			return raw[1..];
 		}
 
-		// Unquoted path: take everything up to the first space (sc.exe convention is to
-		// quote any path that contains spaces; if the publisher didn't, we still get the
-		// best practical match — Program Files paths always have spaces and so will be
-		// quoted in practice).
+		// Unquoted path: search for a known executable extension whose boundary is end-of-string,
+		// a space, or a tab. Without this Program Files paths get truncated at the first space.
+		string? viaExtension = TryFindExecutableExtensionBoundary(raw);
+		if (viaExtension is not null)
+		{
+			return viaExtension;
+		}
+
+		// Last-resort fallback: original behaviour for ImagePath entries that contain no extension
+		// hint at all (unusual; covers DLL-hosted service stubs or legacy registrations).
 		int firstSpace = raw.IndexOf(' ', StringComparison.Ordinal);
 		return firstSpace > 0 ? raw[..firstSpace] : raw;
+	}
+
+	private static string? TryFindExecutableExtensionBoundary(string raw)
+	{
+		foreach (string ext in ExecutableExtensions)
+		{
+			int searchFrom = 0;
+			while (searchFrom < raw.Length)
+			{
+				int hit = raw.IndexOf(ext, searchFrom, StringComparison.OrdinalIgnoreCase);
+				if (hit < 0)
+				{
+					break;
+				}
+
+				int afterExt = hit + ext.Length;
+				if (afterExt == raw.Length || raw[afterExt] == ' ' || raw[afterExt] == '\t')
+				{
+					return raw[..afterExt];
+				}
+
+				searchFrom = hit + 1;
+			}
+		}
+
+		return null;
 	}
 }

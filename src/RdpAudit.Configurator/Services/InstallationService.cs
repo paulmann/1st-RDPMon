@@ -240,9 +240,15 @@ public sealed class InstallationService
 
 		bool exists = ServiceExists(ServiceName);
 
+		// Use the *Quoted variants so the registry ImagePath token is wrapped in literal double
+		// quotes. Without quoting, tools that read Win32_Service.PathName verbatim (the Service
+		// tab's old ResolveExecutablePath, third-party SCM inspectors) split the path at the
+		// first space and report the binary as C:\Program when the install root is C:\Program
+		// Files. The quoting is independent of the new extension-aware path resolver — both fixes
+		// are required because not every consumer of ImagePath is under our control.
 		IReadOnlyList<string> args = exists
-			? ScCommandBuilder.BuildConfig(ServiceName, targetExe)
-			: ScCommandBuilder.BuildCreate(ServiceName, targetExe, ServiceDisplayName);
+			? ScCommandBuilder.BuildConfigQuoted(ServiceName, targetExe)
+			: ScCommandBuilder.BuildCreateQuoted(ServiceName, targetExe, ServiceDisplayName);
 
 		ScResult result = await RunScAsync(args, ct).ConfigureAwait(false);
 		if (result.ExitCode != 0)

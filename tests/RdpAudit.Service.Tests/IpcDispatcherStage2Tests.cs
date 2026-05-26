@@ -118,14 +118,21 @@ public class IpcDispatcherStage2Tests
 	}
 
 	[Fact]
-	public async Task GetAttackStats_WindowSummary_UsesClassifierForTsRcm1149()
+	public async Task GetAttackStats_WindowSummary_DerivesFromAuthAttemptFacts()
 	{
+		// Stage 4 (telemetry restoration): the IPC window summary MUST derive its Failed /
+		// Successful / DistinctSourceIps counters from AuthAttemptFacts only. RDP/Operational,
+		// RdpCoreTS and TerminalServices events are context/enrichment, not outcome carriers —
+		// Detect_Attack_Strategy_v3.md §8.1, §6.3 rule 3. This test pins the new contract: the
+		// same fixture that used to score TS-RCM 1149 + TS-LSM 21 as 2 successes now scores 0
+		// because no AuthAttemptFact rows back them; only the AuthAttemptFact rows we seed for
+		// 4624 / 4625 move the counters.
 		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
 		try
 		{
 			await using (AuditDbContext db = factory.CreateDbContext())
 			{
-				// TS-RCM 1149 — authenticated connection (success) on a real IP.
+				// Context-only RawEvents — must NOT shift counters.
 				db.RawEvents.Add(new RawEvent
 				{
 					EventId = 1149,
@@ -134,7 +141,6 @@ public class IpcDispatcherStage2Tests
 					SourceIp = "203.0.113.20",
 					UserName = "alice",
 				});
-				// TS-LSM 21 — session logon (success) on a real IP.
 				db.RawEvents.Add(new RawEvent
 				{
 					EventId = 21,
@@ -144,15 +150,25 @@ public class IpcDispatcherStage2Tests
 					UserName = "bob",
 					LogonType = 10,
 				});
-				// Security 4625 — failure on an unresolved IP.
-				db.RawEvents.Add(new RawEvent
+
+				// Authoritative facts — the only thing the counters now see.
+				db.AuthAttemptFacts.Add(new AuthAttemptFact
 				{
-					EventId = AttackStatsAggregator.EventIdLogonFailure,
-					Channel = "Security",
+					TimeUtc = Now.AddSeconds(-25),
+					Outcome = AuthAttemptOutcome.Succeeded,
+					EvidenceEventId = 4624,
+					EvidenceChannel = "Security",
+					SourceIp = "203.0.113.30",
+					TargetUser = "diana",
+				});
+				db.AuthAttemptFacts.Add(new AuthAttemptFact
+				{
 					TimeUtc = Now.AddSeconds(-10),
-					SourceIp = null,
-					SourceIpUnresolved = true,
-					UserName = "carol",
+					Outcome = AuthAttemptOutcome.Failed,
+					EvidenceEventId = 4625,
+					EvidenceChannel = "Security",
+					SourceIp = null, // NLA-stripped — should still land in the unresolved sentinel bucket
+					TargetUser = "carol",
 				});
 
 				await db.SaveChangesAsync();
@@ -168,10 +184,10 @@ public class IpcDispatcherStage2Tests
 			Assert.True(response.Success, response.Error);
 			AttackStatsDto dto = JsonSerializer.Deserialize<AttackStatsDto>(response.Payload!, JsonOptions.Default)!;
 
-			Assert.Equal(2, dto.SuccessfulLogons);
+			Assert.Equal(1, dto.SuccessfulLogons);
 			Assert.Equal(1, dto.FailedLogons);
-			// Sentinel + 2 real IPs.
-			Assert.Equal(3, dto.DistinctSourceIps);
+			// Real IP from the success fact + unresolved sentinel from the IP-stripped failure.
+			Assert.Equal(2, dto.DistinctSourceIps);
 		}
 		finally
 		{

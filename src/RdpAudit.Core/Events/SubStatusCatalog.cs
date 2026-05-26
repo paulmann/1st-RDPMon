@@ -31,8 +31,12 @@ public static class SubStatusCatalog
 		["0xC0000371"] = "Local Account Not Allowed Over Net",
 	};
 
-	/// <summary>Translate a raw SubStatus string (with or without the 0x prefix) into a human-readable
-	/// meaning. Returns null when the code is unknown or empty.</summary>
+	/// <summary>Translate a raw SubStatus string (with or without the 0x prefix, or as signed /
+	/// unsigned decimal NTSTATUS) into a human-readable meaning. Returns null when the code is
+	/// empty. Unknown values come back annotated with the canonicalized form so the UI never
+	/// shows an empty cell. Windows writes NTSTATUS in several textual variants (signed-decimal
+	/// int32 like <c>-1073741715</c>, unsigned-decimal like <c>3221225578</c>, and hex with the
+	/// <c>0x</c> prefix); they all canonicalize to the same key.</summary>
 	public static string? Translate(string? subStatus)
 	{
 		if (string.IsNullOrWhiteSpace(subStatus))
@@ -40,30 +44,22 @@ public static class SubStatusCatalog
 			return null;
 		}
 
-		string normalized = subStatus.Trim();
-		if (Map.TryGetValue(normalized, out string? meaning))
+		string canonical = NtStatusFormatter.Canonicalize(subStatus) ?? subStatus.Trim();
+		if (Map.TryGetValue(canonical, out string? meaning))
 		{
 			return meaning;
 		}
 
-		// Try with / without 0x prefix to be tolerant of source variation.
-		string withPrefix = normalized.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
-			? normalized
-			: "0x" + normalized;
+		// Tolerate legacy callers that passed the bare hex (no 0x) or non-canonical case.
+		string withPrefix = canonical.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
+			? canonical
+			: "0x" + canonical;
 		if (Map.TryGetValue(withPrefix, out meaning))
 		{
 			return meaning;
 		}
 
-		string withoutPrefix = normalized.StartsWith("0x", StringComparison.OrdinalIgnoreCase)
-			? normalized[2..]
-			: normalized;
-		if (Map.TryGetValue(withoutPrefix, out meaning))
-		{
-			return meaning;
-		}
-
 		// Format unknown codes consistently so the UI never shows an empty cell.
-		return string.Format(CultureInfo.InvariantCulture, "Unknown SubStatus ({0})", normalized);
+		return string.Format(CultureInfo.InvariantCulture, "Unknown SubStatus ({0})", canonical);
 	}
 }

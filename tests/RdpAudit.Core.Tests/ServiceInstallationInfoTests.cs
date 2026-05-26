@@ -36,6 +36,13 @@ public class ServiceInstallationInfoTests
 	[InlineData(@"""C:\Program Files\RdpAudit\Service\RdpAudit.Service.exe"" --verbose", @"C:\Program Files\RdpAudit\Service\RdpAudit.Service.exe")]
 	[InlineData(@"C:\RdpAudit\Service\RdpAudit.Service.exe", @"C:\RdpAudit\Service\RdpAudit.Service.exe")]
 	[InlineData(@"C:\RdpAudit\Service\RdpAudit.Service.exe --flag", @"C:\RdpAudit\Service\RdpAudit.Service.exe")]
+	// Stage 5 regression: an unquoted Win32_Service.PathName that contains spaces (the canonical
+	// "C:\Program Files\..." case) must NOT be split at the first space. The pre-fix resolver
+	// returned "C:\Program" which then failed the binary-fingerprint exists check on the
+	// Service tab even though the service was running fine from the real path.
+	[InlineData(@"C:\Program Files\RdpAudit\Service\RdpAudit.Service.exe", @"C:\Program Files\RdpAudit\Service\RdpAudit.Service.exe")]
+	[InlineData(@"C:\Program Files\RdpAudit\Service\RdpAudit.Service.exe --console", @"C:\Program Files\RdpAudit\Service\RdpAudit.Service.exe")]
+	[InlineData(@"C:\Program Files (x86)\Vendor\My Service.exe", @"C:\Program Files (x86)\Vendor\My Service.exe")]
 	public void ResolveExecutablePath_Parses(string imagePath, string expected)
 	{
 		ServiceInstallationInfo info = Build(imagePath);

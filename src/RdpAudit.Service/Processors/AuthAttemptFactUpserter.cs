@@ -261,22 +261,22 @@ public sealed class AuthAttemptFactUpserter
 
 	private static bool IsZeroStatus(string? status)
 	{
-		if (string.IsNullOrWhiteSpace(status))
-		{
-			return true;
-		}
-
-		string trimmed = status.Trim();
-		return trimmed.Equals("0x0", StringComparison.OrdinalIgnoreCase)
-			|| trimmed.Equals("0x00000000", StringComparison.OrdinalIgnoreCase)
-			|| trimmed.Equals("0", StringComparison.Ordinal);
+		// NtStatusFormatter handles hex (0x0 / 0x00000000), signed decimal (0 / -0), and unsigned
+		// decimal (0). Blank / null is treated as "no failure indicator" — equivalent to a zero
+		// status — so 4776 events without an explicit Status field are classified as Succeeded
+		// (matches Windows semantics: present-but-zero == success).
+		return NtStatusFormatter.IsZero(status);
 	}
 
 	/// <summary>Extract the SubStatus field from the normalized Details JSON if EventNormalizer
-	/// captured it there. EventNormalizer surfaces every EventData/Data child into the JSON map.</summary>
+	/// captured it there. EventNormalizer surfaces every EventData/Data child into the JSON map
+	/// and canonicalizes NTSTATUS-bearing fields to <c>0xXXXXXXXX</c>; we re-canonicalize here as
+	/// a defensive belt-and-braces against pre-Stage-3 rows whose Details still carry the raw
+	/// signed-decimal form Windows wrote.</summary>
 	private static string? ExtractSubStatus(RawEvent e)
 	{
-		return ExtractDetailsField(e.Details, "SubStatus");
+		string? raw = ExtractDetailsField(e.Details, "SubStatus");
+		return raw is null ? null : NtStatusFormatter.Canonicalize(raw);
 	}
 
 	private static int? ExtractSourcePort(RawEvent e)

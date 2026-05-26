@@ -82,6 +82,7 @@ public sealed class EventNormalizer
 		int? sessionId = EventXmlParser.GetInt(doc, "SessionID") ?? EventXmlParser.GetInt(doc, "SessionId");
 
 		Dictionary<string, string?> extraDetails = ExtractAllEventData(doc);
+		CanonicalizeNtStatusFields(extraDetails);
 		string detailsJson = SerializeAndCap(extraDetails);
 
 		string? resolvedIp = directIp;
@@ -131,7 +132,8 @@ public sealed class EventNormalizer
 				?? EventXmlParser.GetData(doc, "Package")
 				?? EventXmlParser.GetData(doc, "PackageName"),
 			SessionId = sessionId,
-			Status = EventXmlParser.GetData(doc, "Status") ?? EventXmlParser.GetData(doc, "FailureReason"),
+			Status = CanonicalizeStatus(
+				EventXmlParser.GetData(doc, "Status") ?? EventXmlParser.GetData(doc, "FailureReason")),
 			// FIX-2: Broaden Process extraction so 4688 (NewProcessName), 4624/4625/4634
 			// (ProcessName) and the rarer SubjectProcessName / CallerProcessName variants all
 			// surface in the LiveEvents grid. Prior to this list the Process column was empty
@@ -151,6 +153,43 @@ public sealed class EventNormalizer
 
 		return entity;
 	}
+
+	/// <summary>Canonicalize the Status / SubStatus NTSTATUS string into <c>0xXXXXXXXX</c> form.
+	/// Returns null when the input is null/blank. Garbage input is preserved verbatim so forensic
+	/// evidence survives even when Windows wrote something unexpected.</summary>
+	internal static string? CanonicalizeStatus(string? raw)
+	{
+		return string.IsNullOrWhiteSpace(raw) ? null : NtStatusFormatter.Canonicalize(raw);
+	}
+
+	/// <summary>Rewrite NTSTATUS-bearing fields inside the extracted details map to their canonical
+	/// <c>0xXXXXXXXX</c> form. Windows writes these values as signed-decimal int32, unsigned-decimal
+	/// uint32, or hex depending on producer; we normalize to a single form so SQL/EF predicates and
+	/// the SubStatus catalog dictionary lookups remain stable across producers and OS builds.</summary>
+	internal static void CanonicalizeNtStatusFields(Dictionary<string, string?> map)
+	{
+		ArgumentNullException.ThrowIfNull(map);
+		foreach (string key in NtStatusKeys)
+		{
+			if (!map.TryGetValue(key, out string? raw) || string.IsNullOrWhiteSpace(raw))
+			{
+				continue;
+			}
+
+			string? canonical = NtStatusFormatter.Canonicalize(raw);
+			if (canonical is not null && !string.Equals(canonical, raw, StringComparison.Ordinal))
+			{
+				map[key] = canonical;
+			}
+		}
+	}
+
+	private static readonly string[] NtStatusKeys =
+	{
+		"Status",
+		"SubStatus",
+		"FailureReason",
+	};
 
 	/// <summary>Serialises the extracted EventData and applies a JSON-aware cap.</summary>
 	internal static string SerializeAndCap(Dictionary<string, string?> map)

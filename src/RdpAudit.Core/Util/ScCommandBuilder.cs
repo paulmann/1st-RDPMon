@@ -56,6 +56,63 @@ public static class ScCommandBuilder
 		};
 	}
 
+	/// <summary>Builds the argv for <c>sc.exe create</c> with the binary path wrapped in literal
+	/// double quotes so the registry <c>ImagePath</c> is stored quoted. This is the recommended
+	/// shape when the executable path contains spaces (e.g. <c>C:\Program Files\...</c>): without
+	/// the literal quotes some tools that read the raw <c>ImagePath</c> token split it at the
+	/// first space and report the executable as <c>C:\Program</c>. .NET's argument escaper turns
+	/// the leading/trailing quotes into <c>\"</c> when it serialises argv, so sc.exe receives the
+	/// quoted token verbatim and writes it that way to the registry.</summary>
+	public static IReadOnlyList<string> BuildCreateQuoted(string serviceName, string binaryPath, string displayName, string startType = "auto", string objAccount = "LocalSystem")
+	{
+		ArgumentException.ThrowIfNullOrEmpty(serviceName);
+		ArgumentException.ThrowIfNullOrEmpty(binaryPath);
+		ArgumentException.ThrowIfNullOrEmpty(displayName);
+		ArgumentException.ThrowIfNullOrEmpty(startType);
+		ArgumentException.ThrowIfNullOrEmpty(objAccount);
+
+		return new[]
+		{
+			"create",
+			serviceName,
+			"binPath=", WrapInLiteralQuotes(binaryPath),
+			"start=", startType,
+			"obj=", objAccount,
+			"DisplayName=", displayName,
+		};
+	}
+
+	/// <summary>Builds the argv for <c>sc.exe config</c> with the binary path wrapped in literal
+	/// double quotes. See <see cref="BuildCreateQuoted"/> for the rationale.</summary>
+	public static IReadOnlyList<string> BuildConfigQuoted(string serviceName, string binaryPath, string startType = "auto")
+	{
+		ArgumentException.ThrowIfNullOrEmpty(serviceName);
+		ArgumentException.ThrowIfNullOrEmpty(binaryPath);
+		ArgumentException.ThrowIfNullOrEmpty(startType);
+
+		return new[]
+		{
+			"config",
+			serviceName,
+			"binPath=", WrapInLiteralQuotes(binaryPath),
+			"start=", startType,
+		};
+	}
+
+	/// <summary>Wrap <paramref name="value"/> in literal ASCII double-quote characters. If the
+	/// value already begins with a quote it is returned unchanged so callers cannot accidentally
+	/// double-quote a path that was already quoted at the call site.</summary>
+	internal static string WrapInLiteralQuotes(string value)
+	{
+		ArgumentException.ThrowIfNullOrEmpty(value);
+		if (value.Length >= 2 && value[0] == '"' && value[^1] == '"')
+		{
+			return value;
+		}
+
+		return "\"" + value + "\"";
+	}
+
 	/// <summary>Builds the argv for <c>sc.exe failure</c>. <paramref name="resetSeconds"/>
 	/// is how long the failure counter is preserved; <paramref name="actions"/> follows
 	/// the documented <c>action/delay</c> syntax (e.g. <c>restart/60000/restart/60000/restart/60000</c>).</summary>
