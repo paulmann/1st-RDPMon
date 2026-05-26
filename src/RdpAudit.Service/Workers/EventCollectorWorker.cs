@@ -14,10 +14,12 @@
 using System.Collections.Concurrent;
 using System.Diagnostics.Eventing.Reader;
 using System.Runtime.Versioning;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RdpAudit.Core.Config;
+using RdpAudit.Core.Data;
 using RdpAudit.Core.Events;
 using RdpAudit.Service.Collectors;
 
@@ -39,6 +41,7 @@ public sealed class EventCollectorWorker : BackgroundService
 	private readonly ILogger<EventCollectorWorker> _logger;
 	private readonly IOptionsMonitor<RdpAuditOptions> _options;
 	private readonly ChannelHealthPolicy _health;
+	private readonly IDbContextFactory<AuditDbContext>? _factory;
 
 	private readonly ConcurrentDictionary<string, EventLogWatcher> _watchers = new(StringComparer.OrdinalIgnoreCase);
 	private readonly object _watcherLock = new();
@@ -58,8 +61,9 @@ public sealed class EventCollectorWorker : BackgroundService
 		BookmarkStore bookmarks,
 		ServiceMetrics metrics,
 		ILogger<EventCollectorWorker> logger,
-		IOptionsMonitor<RdpAuditOptions> options)
-		: this(channel, bookmarks, metrics, logger, options, new ChannelHealthPolicy())
+		IOptionsMonitor<RdpAuditOptions> options,
+		IDbContextFactory<AuditDbContext> factory)
+		: this(channel, bookmarks, metrics, logger, options, new ChannelHealthPolicy(), factory)
 	{
 	}
 
@@ -69,7 +73,8 @@ public sealed class EventCollectorWorker : BackgroundService
 		ServiceMetrics metrics,
 		ILogger<EventCollectorWorker> logger,
 		IOptionsMonitor<RdpAuditOptions> options,
-		ChannelHealthPolicy health)
+		ChannelHealthPolicy health,
+		IDbContextFactory<AuditDbContext>? factory = null)
 	{
 		_channel = channel;
 		_bookmarks = bookmarks;
@@ -77,6 +82,7 @@ public sealed class EventCollectorWorker : BackgroundService
 		_logger = logger;
 		_options = options;
 		_health = health;
+		_factory = factory;
 	}
 
 	protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -94,6 +100,7 @@ public sealed class EventCollectorWorker : BackgroundService
 
 		try
 		{
+			await DropStaleSecurityBookmarkIfNoFactsAsync().ConfigureAwait(false);
 			StartWatchers();
 			_bookmarkTimer = new Timer(
 				_ => _ = FlushPendingBookmarksAsync(),
@@ -141,6 +148,49 @@ public sealed class EventCollectorWorker : BackgroundService
 		_shuttingDown = true;
 		_shutdownCts?.Cancel();
 		await base.StopAsync(cancellationToken).ConfigureAwait(false);
+	}
+
+	/// <summary>v1.2.0 stale-bookmark guard. If the service has never persisted a single
+	/// AuthAttemptFact, an existing Security bookmark pointing past the most recent auth event
+	/// will freeze the live watcher at zero events forever. Drop it before the watcher arms so
+	/// the new arm starts from the channel's actual tail.</summary>
+	private async Task DropStaleSecurityBookmarkIfNoFactsAsync()
+	{
+		if (_factory is null)
+		{
+			return;
+		}
+
+		try
+		{
+			bool anyFact;
+			await using (AuditDbContext db = await _factory.CreateDbContextAsync(_stoppingToken).ConfigureAwait(false))
+			{
+				anyFact = await db.AuthAttemptFacts.AsNoTracking().AnyAsync(_stoppingToken).ConfigureAwait(false);
+			}
+
+			if (anyFact)
+			{
+				return;
+			}
+
+			string? existing = _bookmarks.GetBookmarkXml(EventCatalog.ChannelSecurity);
+			if (existing is null)
+			{
+				return;
+			}
+
+			await _bookmarks.DeleteBookmarkAsync(EventCatalog.ChannelSecurity, _stoppingToken).ConfigureAwait(false);
+			_logger.LogInformation(
+				"Dropped stale Security bookmark before arming watcher — no AuthAttemptFacts persisted yet, so the next arm rebuilds the bookmark from the channel tail.");
+		}
+		catch (OperationCanceledException) when (_stoppingToken.IsCancellationRequested)
+		{
+		}
+		catch (Exception ex)
+		{
+			_logger.LogDebug(ex, "Stale-bookmark guard probe failed; continuing with existing bookmark");
+		}
 	}
 
 	[SupportedOSPlatform("windows")]
@@ -216,17 +266,46 @@ public sealed class EventCollectorWorker : BackgroundService
 		}
 	}
 
+	/// <summary>Build the XPath the channel watcher will use. Pure logic — extracted so tests can
+	/// pin the v1.2.0 contract that Security MUST always use the narrow auth XPath regardless of
+	/// whether the global EnabledEventIds filter is empty.</summary>
+	internal static (string Xpath, IReadOnlyList<int> Ids) BuildWatcherQuery(
+		string channel,
+		IReadOnlyCollection<int> globalFilter)
+	{
+		bool isSecurity = string.Equals(channel, EventCatalog.ChannelSecurity, StringComparison.OrdinalIgnoreCase);
+		IEnumerable<int> catalogIds = EventCatalog.EventIdsForChannel(channel);
+		List<int> ids = globalFilter.Count > 0
+			? catalogIds.Where(globalFilter.Contains).ToList()
+			: catalogIds.ToList();
+
+		if (isSecurity)
+		{
+			HashSet<int> auth = new(SecurityAuthQuery.AuthEventIds);
+			List<int> securityAuth = globalFilter.Count > 0
+				? ids.Where(auth.Contains).ToList()
+				: SecurityAuthQuery.AuthEventIds.ToList();
+
+			if (securityAuth.Count == 0)
+			{
+				securityAuth = SecurityAuthQuery.AuthEventIds.ToList();
+			}
+
+			return (SecurityAuthQuery.BuildXPath(securityAuth), securityAuth);
+		}
+
+		string nonSecurityXpath = ids.Count == 0
+			? "*"
+			: "*[System[(" + string.Join(" or ", ids.Select(id => "EventID=" + id)) + ")]]";
+		return (nonSecurityXpath, ids);
+	}
+
 	[SupportedOSPlatform("windows")]
 	private EventLogWatcher CreateWatcher(string channel)
 	{
-		IEnumerable<int> catalogIds = EventCatalog.EventIdsForChannel(channel);
 		IReadOnlyCollection<int> filterSet = _options.CurrentValue.Monitoring.EnabledEventIds;
-		List<int> ids = filterSet.Count > 0
-			? catalogIds.Where(filterSet.Contains).ToList()
-			: catalogIds.ToList();
-		string xpath = ids.Count == 0
-			? "*"
-			: "*[System[(" + string.Join(" or ", ids.Select(id => $"EventID={id}")) + ")]]";
+		(string xpath, IReadOnlyList<int> ids) = BuildWatcherQuery(channel, filterSet);
+		_ = ids;
 
 		EventLogQuery query = new(channel, PathType.LogName, xpath)
 		{

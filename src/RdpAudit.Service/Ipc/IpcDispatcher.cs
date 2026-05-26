@@ -46,6 +46,7 @@ public sealed class IpcDispatcher
 	private readonly ISecretProtector? _protector;
 	private readonly IMikroTikClient? _mikroTikClient;
 	private readonly ConfigRepairReporter? _configRepair;
+	private readonly SecurityAuthProbeService? _securityAuthProbe;
 
 	public IpcDispatcher(
 		IDbContextFactory<AuditDbContext> factory,
@@ -61,7 +62,8 @@ public sealed class IpcDispatcher
 		ISecretProtector? protector = null,
 		IMikroTikClient? mikroTikClient = null,
 		RdpConfigurationReader? rdpConfigReader = null,
-		ConfigRepairReporter? configRepair = null)
+		ConfigRepairReporter? configRepair = null,
+		SecurityAuthProbeService? securityAuthProbe = null)
 	{
 		_factory = factory;
 		_metrics = metrics;
@@ -77,6 +79,7 @@ public sealed class IpcDispatcher
 		_mikroTikClient = mikroTikClient;
 		_rdpConfigReader = rdpConfigReader;
 		_configRepair = configRepair;
+		_securityAuthProbe = securityAuthProbe;
 	}
 
 	public async Task<IpcResponse> DispatchAsync(IpcRequest request, CancellationToken ct)
@@ -149,6 +152,10 @@ public sealed class IpcDispatcher
 
 				// --- Stage Diag handler (Diagnostic tab). ---
 				IpcCommand.GetDiagnostics => await GetDiagnosticsAsync(ct).ConfigureAwait(false),
+
+				// --- Stage Diag2: Security auth probe ---
+				IpcCommand.RunSecurityAuthProbe => RunSecurityAuthProbeHandler(),
+
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
 
@@ -2883,5 +2890,28 @@ public sealed class IpcDispatcher
 			dto.MonitoringConfigRepairChanged);
 
 		return dto;
+	}
+
+	// ----------------------------------------------------------------------------------------------
+	// Stage Diag2: RunSecurityAuthProbe
+	// ----------------------------------------------------------------------------------------------
+
+	/// <summary>Run a one-shot bounded Security-channel auth read inside the service process and
+	/// return AccessDenied vs Timeout vs NoEvents vs a parsed first event. This is the canonical
+	/// way to disambiguate "Security Armed but zero events" symptoms on a real host.</summary>
+	private SecurityAuthProbeDto RunSecurityAuthProbeHandler()
+	{
+		if (_securityAuthProbe is null)
+		{
+			return new SecurityAuthProbeDto
+			{
+				Status = IpcResultStatus.Unavailable,
+				Outcome = "Unavailable",
+				Message = "Security auth probe service is not registered in this build.",
+				GeneratedUtc = DateTime.UtcNow,
+			};
+		}
+
+		return _securityAuthProbe.Run();
 	}
 }

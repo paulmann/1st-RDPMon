@@ -17,9 +17,11 @@
 		<!-- Central version surface. publish.ps1 -p:VersionPrefix overrides this for releases;
 		     the default below ensures the assembly version embedded in the binary is something
 		     other than the implicit 1.0.0.0 placeholder so the Service tab can distinguish
-		     runtime / installed / distribution binaries by version. Pinned to 1.1.0 for the
-		     current release stream — see RdpAuditVersionMetadataTests for the gate. -->
-		<VersionPrefix Condition="'$(VersionPrefix)' == ''">1.1.0</VersionPrefix>
+		     runtime / installed / distribution binaries by version. Pinned to 1.2.0 for the
+		     current release stream — see RdpAuditVersionMetadataTests for the gate. The 1.2.0
+		     bump corresponds to the dedicated Security auth ingestion path and the new
+		     RunSecurityAuthProbe diagnostic IPC command. -->
+		<VersionPrefix Condition="'$(VersionPrefix)' == ''">1.2.0</VersionPrefix>
 		<FileVersion>$(VersionPrefix).0</FileVersion>
 		<AssemblyVersion>$(VersionPrefix).0</AssemblyVersion>
 		<InformationalVersion>$(VersionPrefix)</InformationalVersion>

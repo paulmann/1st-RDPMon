@@ -161,6 +161,7 @@ public static class Program
 		services.AddSingleton<IAlertContext>(sp => sp.GetRequiredService<DbAlertContext>());
 		services.AddSingleton<AlertCooldownTracker>();
 		services.AddSingleton<SettingsManager>();
+		services.AddSingleton<SecurityAuthProbeService>();
 		services.AddSingleton<FirewallManager>();
 		services.AddSingleton<ISecretProtector>(_ => CreateSecretProtector());
 		services.AddSingleton<WindowsFirewallProvider>();
@@ -188,8 +189,20 @@ public static class Program
 
 		AlertRuleRegistration.Register(services);
 
-		services.AddHostedService<EventCollectorWorker>();
-		services.AddHostedService<SecurityBackfillWorker>();
+		services.AddHostedService(sp => new EventCollectorWorker(
+			sp.GetRequiredService<EventChannel>(),
+			sp.GetRequiredService<BookmarkStore>(),
+			sp.GetRequiredService<ServiceMetrics>(),
+			sp.GetRequiredService<ILogger<EventCollectorWorker>>(),
+			sp.GetRequiredService<IOptionsMonitor<RdpAuditOptions>>(),
+			sp.GetRequiredService<IDbContextFactory<AuditDbContext>>()));
+		services.AddHostedService(sp => new SecurityBackfillWorker(
+			sp.GetRequiredService<EventChannel>(),
+			sp.GetRequiredService<ServiceMetrics>(),
+			sp.GetRequiredService<ILogger<SecurityBackfillWorker>>(),
+			sp.GetRequiredService<IOptionsMonitor<RdpAuditOptions>>(),
+			sp.GetRequiredService<BookmarkStore>(),
+			sp.GetRequiredService<IDbContextFactory<AuditDbContext>>()));
 		services.AddHostedService<EventProcessorWorker>();
 		services.AddHostedService<SessionCorrelationHydrationWorker>();
 		services.AddHostedService<AlertWorker>();
