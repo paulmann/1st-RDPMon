@@ -79,6 +79,8 @@ public sealed class AttackStatisticsPage : TabPage
 	private readonly ToolStripMenuItem _menuWhitelistIp;
 	private readonly ToolStripMenuItem _menuExportEvents;
 	private readonly ToolStripMenuItem _menuExportFacts;
+	private readonly ToolStripMenuItem _menuOpenRipeStat;
+	private readonly ToolStripMenuItem _menuOpenAbuseIpDb;
 
 	private AttackStatRow? _menuRow;
 
@@ -199,12 +201,17 @@ public sealed class AttackStatisticsPage : TabPage
 		_menuWhitelistIp = new ToolStripMenuItem("Whitelist IP…", null, async (_, _) => await OnWhitelistIpAsync().ConfigureAwait(true));
 		_menuExportEvents = BuildExportSubmenu();
 		_menuExportFacts = BuildExportFactsSubmenu();
+		_menuOpenRipeStat = new ToolStripMenuItem(IpReputationBrowser.RipeStatMenuLabel, null, (_, _) => OnOpenRipeStat());
+		_menuOpenAbuseIpDb = new ToolStripMenuItem(IpReputationBrowser.AbuseIpDbMenuLabel, null, (_, _) => OnOpenAbuseIpDb());
 		_menu = new ContextMenuStrip();
 		_menu.Items.Add(_menuCopyDetails);
 		_menu.Items.Add(_menuCopyIp);
 		_menu.Items.Add(new ToolStripSeparator());
 		_menu.Items.Add(_menuBlockIp);
 		_menu.Items.Add(_menuWhitelistIp);
+		_menu.Items.Add(new ToolStripSeparator());
+		_menu.Items.Add(_menuOpenRipeStat);
+		_menu.Items.Add(_menuOpenAbuseIpDb);
 		_menu.Items.Add(new ToolStripSeparator());
 		_menu.Items.Add(_menuExportEvents);
 		_menu.Items.Add(_menuExportFacts);
@@ -606,12 +613,15 @@ public sealed class AttackStatisticsPage : TabPage
 		bool hasRow = _menuRow is not null;
 		bool isSentinel = hasRow && _menuRow!.IsUnresolvedSentinel;
 		bool hasValidIp = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip) && AddressListFilter.IsValidIp(_menuRow.Ip) && !isSentinel;
+		bool reputationEligible = hasRow && !isSentinel && IpReputationBrowser.IsLookupEligible(_menuRow!.Ip);
 		_menuCopyDetails.Enabled = hasRow;
 		_menuCopyIp.Enabled = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip) && !isSentinel;
 		_menuBlockIp.Enabled = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip) && !_menuRow!.IsBlocked && !isSentinel;
 		_menuWhitelistIp.Enabled = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip) && !isSentinel;
 		_menuExportEvents.Enabled = hasValidIp;
 		_menuExportFacts.Enabled = hasValidIp;
+		_menuOpenRipeStat.Enabled = reputationEligible;
+		_menuOpenAbuseIpDb.Enabled = reputationEligible;
 	}
 
 	private void OnCopyDetails()
@@ -633,6 +643,28 @@ public sealed class AttackStatisticsPage : TabPage
 		}
 
 		TrySetClipboard(_menuRow.Ip, "Copy IP");
+	}
+
+	private void OnOpenRipeStat()
+	{
+		if (_menuRow is null)
+		{
+			return;
+		}
+
+		IpReputationBrowser.LaunchOutcome outcome = IpReputationBrowser.OpenRipeStat(_menuRow.Ip);
+		SetStatus(outcome.Format());
+	}
+
+	private void OnOpenAbuseIpDb()
+	{
+		if (_menuRow is null)
+		{
+			return;
+		}
+
+		IpReputationBrowser.LaunchOutcome outcome = IpReputationBrowser.OpenAbuseIpDb(_menuRow.Ip);
+		SetStatus(outcome.Format());
 	}
 
 	private async Task OnBlockIpAsync()

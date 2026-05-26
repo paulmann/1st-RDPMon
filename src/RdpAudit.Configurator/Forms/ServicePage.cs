@@ -47,6 +47,11 @@ public sealed class ServicePage : TabPage
 	private readonly Button _btnStop;
 	private readonly Button _btnRestart;
 
+	private readonly ContextMenuStrip _alertsMenu;
+	private readonly ToolStripMenuItem _alertsMenuOpenRipeStat;
+	private readonly ToolStripMenuItem _alertsMenuOpenAbuseIpDb;
+	private Alert? _alertsMenuRow;
+
 	public ServicePage(IpcClient ipc)
 	{
 		_ipc = ipc;
@@ -109,6 +114,15 @@ public sealed class ServicePage : TabPage
 		_alertsGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Message", DataPropertyName = nameof(Alert.Message), AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
 
 		_alertsGrid.CellFormatting += SeverityColoring;
+
+		_alertsMenuOpenRipeStat = new ToolStripMenuItem(IpReputationBrowser.RipeStatMenuLabel, null, (_, _) => OnAlertsOpenRipeStat());
+		_alertsMenuOpenAbuseIpDb = new ToolStripMenuItem(IpReputationBrowser.AbuseIpDbMenuLabel, null, (_, _) => OnAlertsOpenAbuseIpDb());
+		_alertsMenu = new ContextMenuStrip();
+		_alertsMenu.Items.Add(_alertsMenuOpenRipeStat);
+		_alertsMenu.Items.Add(_alertsMenuOpenAbuseIpDb);
+		_alertsMenu.Opening += OnAlertsMenuOpening;
+		_alertsGrid.ContextMenuStrip = _alertsMenu;
+		_alertsGrid.CellMouseDown += OnAlertsCellMouseDown;
 
 		Controls.Add(_alertsGrid);
 		Controls.Add(_layoutPanel);
@@ -424,11 +438,57 @@ public sealed class ServicePage : TabPage
 			outcome.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
 	}
 
+	private void OnAlertsCellMouseDown(object? sender, DataGridViewCellMouseEventArgs e)
+	{
+		if (e.Button != MouseButtons.Right || e.RowIndex < 0 || e.RowIndex >= _alertsGrid.RowCount)
+		{
+			_alertsMenuRow = null;
+			return;
+		}
+
+		_alertsGrid.ClearSelection();
+		_alertsGrid.Rows[e.RowIndex].Selected = true;
+		_alertsMenuRow = _alertsGrid.Rows[e.RowIndex].DataBoundItem as Alert;
+	}
+
+	private void OnAlertsMenuOpening(object? sender, CancelEventArgs e)
+	{
+		bool eligible = _alertsMenuRow is not null
+			&& IpReputationBrowser.IsLookupEligible(_alertsMenuRow.SourceIp);
+		_alertsMenuOpenRipeStat.Enabled = eligible;
+		_alertsMenuOpenAbuseIpDb.Enabled = eligible;
+		if (_alertsMenuRow is null)
+		{
+			e.Cancel = true;
+		}
+	}
+
+	private void OnAlertsOpenRipeStat()
+	{
+		if (_alertsMenuRow is null)
+		{
+			return;
+		}
+
+		IpReputationBrowser.OpenRipeStat(_alertsMenuRow.SourceIp);
+	}
+
+	private void OnAlertsOpenAbuseIpDb()
+	{
+		if (_alertsMenuRow is null)
+		{
+			return;
+		}
+
+		IpReputationBrowser.OpenAbuseIpDb(_alertsMenuRow.SourceIp);
+	}
+
 	protected override void Dispose(bool disposing)
 	{
 		if (disposing)
 		{
 			_timer.Dispose();
+			_alertsMenu.Dispose();
 		}
 
 		base.Dispose(disposing);

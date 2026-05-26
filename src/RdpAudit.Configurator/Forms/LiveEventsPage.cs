@@ -73,6 +73,8 @@ public sealed class LiveEventsPage : TabPage
 	private readonly ToolStripMenuItem _menuBlockLogin;
 	private readonly ToolStripMenuItem _menuExportEvents;
 	private readonly ToolStripMenuItem _menuExportFacts;
+	private readonly ToolStripMenuItem _menuOpenRipeStat;
+	private readonly ToolStripMenuItem _menuOpenAbuseIpDb;
 
 	private bool _paused;
 	private long _lastSeenId;
@@ -181,6 +183,8 @@ public sealed class LiveEventsPage : TabPage
 		_menuBlockLogin = new ToolStripMenuItem("Add Login to Blocklist and Block IP", null, async (_, _) => await OnBlockLoginAsync().ConfigureAwait(true));
 		_menuExportEvents = BuildExportSubmenu();
 		_menuExportFacts = BuildExportFactsSubmenu();
+		_menuOpenRipeStat = new ToolStripMenuItem(IpReputationBrowser.RipeStatMenuLabel, null, (_, _) => OnOpenRipeStat());
+		_menuOpenAbuseIpDb = new ToolStripMenuItem(IpReputationBrowser.AbuseIpDbMenuLabel, null, (_, _) => OnOpenAbuseIpDb());
 		_menu.Items.Add(_menuCopyDetails);
 		_menu.Items.Add(_menuCopyCell);
 		_menu.Items.Add(_menuFilterBy);
@@ -188,6 +192,9 @@ public sealed class LiveEventsPage : TabPage
 		_menu.Items.Add(_menuBlockIp);
 		_menu.Items.Add(_menuWhitelistIp);
 		_menu.Items.Add(_menuBlockLogin);
+		_menu.Items.Add(new ToolStripSeparator());
+		_menu.Items.Add(_menuOpenRipeStat);
+		_menu.Items.Add(_menuOpenAbuseIpDb);
 		_menu.Items.Add(new ToolStripSeparator());
 		_menu.Items.Add(_menuExportEvents);
 		_menu.Items.Add(_menuExportFacts);
@@ -406,6 +413,7 @@ public sealed class LiveEventsPage : TabPage
 		bool hasLogin = hasRow && !string.IsNullOrWhiteSpace(_menuRow!.UserName);
 		bool hasCellValue = !string.IsNullOrWhiteSpace(_menuCellValue);
 
+		bool reputationEligible = hasRow && IpReputationBrowser.IsLookupEligible(_menuRow!.SourceIp);
 		_menuCopyDetails.Enabled = hasRow;
 		_menuCopyCell.Enabled = hasCellValue;
 		_menuFilterBy.Enabled = hasCellValue && _menuColumn is not null;
@@ -414,6 +422,8 @@ public sealed class LiveEventsPage : TabPage
 		_menuBlockLogin.Enabled = hasLogin;
 		_menuExportEvents.Enabled = hasIp;
 		_menuExportFacts.Enabled = hasIp;
+		_menuOpenRipeStat.Enabled = reputationEligible;
+		_menuOpenAbuseIpDb.Enabled = reputationEligible;
 
 		if (!hasRow)
 		{
@@ -465,6 +475,28 @@ public sealed class LiveEventsPage : TabPage
 		{
 			SetStatus("Copy failed: " + ex.GetType().Name);
 		}
+	}
+
+	private void OnOpenRipeStat()
+	{
+		if (_menuRow is null)
+		{
+			return;
+		}
+
+		IpReputationBrowser.LaunchOutcome outcome = IpReputationBrowser.OpenRipeStat(_menuRow.SourceIp);
+		SetStatus(outcome.Format());
+	}
+
+	private void OnOpenAbuseIpDb()
+	{
+		if (_menuRow is null)
+		{
+			return;
+		}
+
+		IpReputationBrowser.LaunchOutcome outcome = IpReputationBrowser.OpenAbuseIpDb(_menuRow.SourceIp);
+		SetStatus(outcome.Format());
 	}
 
 	private void OnFilterByCell()

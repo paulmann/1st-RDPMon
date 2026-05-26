@@ -64,6 +64,8 @@ public sealed class RemoteRdpClientsPage : TabPage
 	private readonly ToolStripMenuItem _menuShadowControl;
 	private readonly ToolStripMenuItem _menuShadowControlNoConsent;
 	private readonly ToolStripMenuItem _menuExportFacts;
+	private readonly ToolStripMenuItem _menuOpenRipeStat;
+	private readonly ToolStripMenuItem _menuOpenAbuseIpDb;
 
 	// Shadow policy panel controls.
 	private readonly Label _shadowSummaryLabel;
@@ -156,6 +158,8 @@ public sealed class RemoteRdpClientsPage : TabPage
 		_menuShadowControl = new ToolStripMenuItem("Shadow — view + control…", null, async (_, _) => await OnShadowAsync(SessionCommandBuilder.ShadowMode.Control).ConfigureAwait(true));
 		_menuShadowControlNoConsent = new ToolStripMenuItem("Shadow — view + control (NO CONSENT)…", null, async (_, _) => await OnShadowAsync(SessionCommandBuilder.ShadowMode.ControlNoConsent).ConfigureAwait(true));
 		_menuExportFacts = BuildExportFactsSubmenu();
+		_menuOpenRipeStat = new ToolStripMenuItem(IpReputationBrowser.RipeStatMenuLabel, null, (_, _) => OnOpenRipeStat());
+		_menuOpenAbuseIpDb = new ToolStripMenuItem(IpReputationBrowser.AbuseIpDbMenuLabel, null, (_, _) => OnOpenAbuseIpDb());
 		_menu = new ContextMenuStrip();
 		_menu.Items.Add(_menuDisconnect);
 		_menu.Items.Add(_menuLogoff);
@@ -163,6 +167,9 @@ public sealed class RemoteRdpClientsPage : TabPage
 		_menu.Items.Add(_menuShadowView);
 		_menu.Items.Add(_menuShadowControl);
 		_menu.Items.Add(_menuShadowControlNoConsent);
+		_menu.Items.Add(new ToolStripSeparator());
+		_menu.Items.Add(_menuOpenRipeStat);
+		_menu.Items.Add(_menuOpenAbuseIpDb);
 		_menu.Items.Add(new ToolStripSeparator());
 		_menu.Items.Add(_menuExportFacts);
 		_menu.Opening += OnMenuOpening;
@@ -737,12 +744,37 @@ public sealed class RemoteRdpClientsPage : TabPage
 	{
 		bool hasRow = _menuRow is not null;
 		bool hasValidIp = hasRow && !string.IsNullOrWhiteSpace(_menuRow!.ClientAddress) && AddressListFilter.IsValidIp(_menuRow.ClientAddress);
+		bool reputationEligible = hasRow && IpReputationBrowser.IsLookupEligible(_menuRow!.ClientAddress);
 		_menuDisconnect.Enabled = hasRow;
 		_menuLogoff.Enabled = hasRow;
 		_menuShadowView.Enabled = hasRow;
 		_menuShadowControl.Enabled = hasRow;
 		_menuShadowControlNoConsent.Enabled = hasRow;
 		_menuExportFacts.Enabled = hasValidIp;
+		_menuOpenRipeStat.Enabled = reputationEligible;
+		_menuOpenAbuseIpDb.Enabled = reputationEligible;
+	}
+
+	private void OnOpenRipeStat()
+	{
+		if (_menuRow is null)
+		{
+			return;
+		}
+
+		IpReputationBrowser.LaunchOutcome outcome = IpReputationBrowser.OpenRipeStat(_menuRow.ClientAddress);
+		SetStatus(outcome.Format());
+	}
+
+	private void OnOpenAbuseIpDb()
+	{
+		if (_menuRow is null)
+		{
+			return;
+		}
+
+		IpReputationBrowser.LaunchOutcome outcome = IpReputationBrowser.OpenAbuseIpDb(_menuRow.ClientAddress);
+		SetStatus(outcome.Format());
 	}
 
 	private async Task OnDisconnectAsync()
