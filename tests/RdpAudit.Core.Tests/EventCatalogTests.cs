@@ -51,4 +51,48 @@ public class EventCatalogTests
 			Assert.Contains(id, securityIds);
 		}
 	}
+
+	[Fact]
+	public void All_CoversV3LocalSessionManagerSet()
+	{
+		int[] required = { 21, 22, 23, 24, 25, 39, 40 };
+		IEnumerable<int> ids = EventCatalog.EventIdsForChannel(EventCatalog.ChannelTsLocal);
+		foreach (int id in required)
+		{
+			Assert.Contains(id, ids);
+		}
+	}
+
+	[Fact]
+	public void All_CoversV3RemoteConnectionManagerSet()
+	{
+		int[] required = { 1148, 1149, 261 };
+		IEnumerable<int> ids = EventCatalog.EventIdsForChannel(EventCatalog.ChannelTsRemote);
+		foreach (int id in required)
+		{
+			Assert.Contains(id, ids);
+		}
+	}
+
+	[Fact]
+	public void All_CoversV3RdpCoreTsSet()
+	{
+		int[] required = { 65, 82, 131, 140, 141 };
+		IEnumerable<int> ids = EventCatalog.EventIdsForChannel(EventCatalog.ChannelRdpCore);
+		foreach (int id in required)
+		{
+			Assert.Contains(id, ids);
+		}
+	}
+
+	[Fact]
+	public void All_CoversV3GatewaySet()
+	{
+		int[] required = { 302, 303, 304, 305 };
+		IEnumerable<int> ids = EventCatalog.EventIdsForChannel(EventCatalog.ChannelTsGateway);
+		foreach (int id in required)
+		{
+			Assert.Contains(id, ids);
+		}
+	}
 }

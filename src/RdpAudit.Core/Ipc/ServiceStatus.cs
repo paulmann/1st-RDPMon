@@ -97,4 +97,32 @@ public sealed class ServiceStatus
 
 	/// <summary>Cumulative count of succeeded <c>AuthAttemptFact</c> rows since service start.</summary>
 	public long AuthAttemptFactSucceeded { get; set; }
+
+	// --- Security-missing diagnostic flags (Detect_Attack_Strategy_v3.md §10 + Service tab Copy
+	// diagnostics requirement D.3). Each flag names a single, actionable cause for "RDP touched
+	// the box but no Security 4624/4625/4771/4776 was correlated to it". The flags are derived
+	// from the existing metrics + channel status map so they never disagree with the
+	// SecurityCorrelationDiagnostic free-text string. ---
+
+	/// <summary>True when the most recent backfill or live-watcher attempt against the Security
+	/// channel reported ChannelNotFound / channel-unavailable.</summary>
+	public bool SecurityLogMissing { get; set; }
+
+	/// <summary>True when pre-auth events have arrived without any matching Security
+	/// 4624/4625/4648 since service start — the canonical "audit-logon-success/failure policy
+	/// is disabled" symptom.</summary>
+	public bool AuditPolicyMissingLogon { get; set; }
+
+	/// <summary>True when the most recent Security read attempt failed with AccessDenied —
+	/// the service account is missing SeSecurityPrivilege / Event Log Readers membership.</summary>
+	public bool SecurityReadDenied { get; set; }
+
+	/// <summary>True when the live Security EventLogWatcher has never armed since the service
+	/// started — typically because the channel is disabled or the manifest is unavailable.</summary>
+	public bool ChannelDisabled { get; set; }
+
+	/// <summary>True when the persisted bookmark for the Security channel is outside the
+	/// channel's retention window — backfill cannot resume from where the service left off and
+	/// recent events have already aged out. Operator should delete the bookmark and restart.</summary>
+	public bool BookmarkStaleOrLogRetentionGap { get; set; }
 }

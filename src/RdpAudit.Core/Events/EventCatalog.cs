@@ -51,12 +51,16 @@ public static class EventCatalog
 		new(40, ChannelTsLocal, "Session disconnected with reason code", "Session"),
 
 		// Network / pre-auth
+		new(1148, ChannelTsRemote, "RDP listener authentication failure", "Network"),
 		new(1149, ChannelTsRemote, "RDP network connection (pre-auth)", "Network"),
 		new(261, ChannelTsRemote, "RDP listener received connection", "Network"),
 
-		// RDP core
+		// RDP core (Detect_Attack_Strategy_v3.md §5.2 — full RdpCoreTS set)
+		new(65, ChannelRdpCore, "RDP TLS handshake completed", "RdpCore"),
+		new(82, ChannelRdpCore, "RDP listener bound on transport", "RdpCore"),
 		new(131, ChannelRdpCore, "RDP connection attempt", "RdpCore"),
 		new(140, ChannelRdpCore, "RDP authentication failure", "RdpCore"),
+		new(141, ChannelRdpCore, "RDP credential validation failed", "RdpCore"),
 
 		// Privilege & process
 		new(4688, ChannelSecurity, "Process created", "Process"),
@@ -98,9 +102,11 @@ public static class EventCatalog
 		new(4800, ChannelSecurity, "Workstation locked", "Logoff"),
 		new(4801, ChannelSecurity, "Workstation unlocked", "Logoff"),
 
-		// Gateway / client
+		// Gateway / client (Detect_Attack_Strategy_v3.md §5.2 — full TS-Gateway set)
 		new(302, ChannelTsGateway, "RD Gateway connect", "Gateway"),
 		new(303, ChannelTsGateway, "RD Gateway disconnect", "Gateway"),
+		new(304, ChannelTsGateway, "RD Gateway tunnel created", "Gateway"),
+		new(305, ChannelTsGateway, "RD Gateway tunnel closed", "Gateway"),
 		new(1024, ChannelTsClient, "RDP client connection", "Client"),
 		new(1102, ChannelSecurity, "Audit log cleared", "Tampering"),
 
