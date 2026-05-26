@@ -20,10 +20,15 @@ using RdpAudit.Core.Util;
 
 namespace RdpAudit.Configurator.Services;
 
-/// <summary>Snapshot of the running service process exposed in the Service tab UI.</summary>
+/// <summary>Snapshot of the running service process exposed in the Service tab UI.
+/// <para><see cref="FinalStateCode"/> carries the numeric SCM state code (1=STOPPED, 2=START_PENDING,
+/// 3=STOP_PENDING, 4=RUNNING, 5=CONTINUE_PENDING, 6=PAUSE_PENDING, 7=PAUSED). This value is stable
+/// across operator UI cultures, while <see cref="FinalState"/> may be a localized name on non-English
+/// Windows. Lifecycle decisions (button enablement) MUST be made from the numeric code.</para></summary>
 public sealed record ServiceProcessInfo(
 	bool Installed,
 	string FinalState,
+	int? FinalStateCode,
 	int? ProcessId,
 	string? ExecutablePath,
 	DateTime? StartTimeUtc,
@@ -59,19 +64,22 @@ public sealed class ServiceControlRunner
 		ServiceQueryResult query = RunQueryEx(CancellationToken.None);
 		if (!query.Installed)
 		{
-			return new ServiceProcessInfo(Installed: false, FinalState: "Not installed", ProcessId: null,
+			return new ServiceProcessInfo(Installed: false, FinalState: "Not installed",
+				FinalStateCode: null, ProcessId: null,
 				ExecutablePath: null, StartTimeUtc: null, Detail: null);
 		}
 
 		string state = query.StateName ?? StateNameFromCode(query.StateCode) ?? "Unknown";
 		if (query.ProcessId is null)
 		{
-			return new ServiceProcessInfo(Installed: true, FinalState: state, ProcessId: null,
+			return new ServiceProcessInfo(Installed: true, FinalState: state,
+				FinalStateCode: query.StateCode, ProcessId: null,
 				ExecutablePath: null, StartTimeUtc: null, Detail: null);
 		}
 
 		(string? exe, DateTime? startUtc, string? detail) = ReadProcessDetails(query.ProcessId.Value);
-		return new ServiceProcessInfo(Installed: true, FinalState: state, ProcessId: query.ProcessId,
+		return new ServiceProcessInfo(Installed: true, FinalState: state,
+			FinalStateCode: query.StateCode, ProcessId: query.ProcessId,
 			ExecutablePath: exe, StartTimeUtc: startUtc, Detail: detail);
 	}
 
@@ -162,14 +170,21 @@ public sealed class ServiceControlRunner
 		ScRun deleteRun = RunSc(args, ct);
 		if (deleteRun.ExitCode == 0)
 		{
-			steps.Add(new ServiceOperationStep("sc delete", true, deleteRun.CombinedOutput.Length == 0 ? null : deleteRun.CombinedOutput));
+			// Stage 4: even with OEM decoding wired in, sc.exe occasionally surfaces empty
+			// or non-printable output on success. Always include a clean English summary
+			// alongside the captured native message so the operator sees something readable.
+			string? captured = deleteRun.CombinedOutput.Length == 0 ? null : deleteRun.CombinedOutput;
+			string detail = ScDeleteOutputFormatter.ComposeSuccess(captured);
+			steps.Add(new ServiceOperationStep("sc delete", true, detail));
 		}
 		else
 		{
 			// Treat exit 1060 (service does not exist) as a benign no-op.
 			bool benign = deleteRun.CombinedOutput.Contains("1060", StringComparison.Ordinal);
+			string nativeDetail = FormatScDetail(deleteRun.ExitCode, deleteRun.CombinedOutput, args);
+			string englishDetail = ScDeleteOutputFormatter.ComposeFailure(deleteRun.ExitCode, deleteRun.CombinedOutput);
 			steps.Add(new ServiceOperationStep("sc delete", benign,
-				FormatScDetail(deleteRun.ExitCode, deleteRun.CombinedOutput, args)));
+				englishDetail + " [" + nativeDetail + "]"));
 		}
 
 		return Finalize("Uninstall service", steps);
@@ -361,11 +376,22 @@ public sealed class ServiceControlRunner
 
 	private static ScRun RunSc(IReadOnlyList<string> args, CancellationToken ct)
 	{
+		// Stage 4: decode sc.exe stdout/stderr using the active Windows OEM code page so
+		// localized messages (Russian, French, Chinese, ...) render as readable text instead
+		// of mojibake. .NET 5+ defaults Console.OutputEncoding to UTF-8 on Windows, but
+		// sc.exe still emits its status lines in the active OEM code page when its output
+		// is captured through a redirected pipe. Pinning StandardOutputEncoding /
+		// StandardErrorEncoding to that code page makes "[SC] DeleteService success"
+		// readable on every supported Windows locale without going through cmd /c chcp 437
+		// (which would alter exit code semantics).
+		Encoding oem = OemConsoleEncoding.Resolve();
 		ProcessStartInfo psi = new("sc.exe")
 		{
 			UseShellExecute = false,
 			RedirectStandardError = true,
 			RedirectStandardOutput = true,
+			StandardOutputEncoding = oem,
+			StandardErrorEncoding = oem,
 			CreateNoWindow = true,
 		};
 		foreach (string a in args)
