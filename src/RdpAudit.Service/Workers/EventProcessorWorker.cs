@@ -40,7 +40,9 @@ public sealed class EventProcessorWorker : BackgroundService
 	private readonly EventNormalizer _normalizer;
 	private readonly SessionIpCorrelationUpserter _correlationUpserter;
 	private readonly RdpConnectionFactUpserter _connectionFactUpserter;
+	private readonly AuthAttemptFactUpserter _authAttemptFactUpserter;
 	private readonly SecurityCorrelationWatchdog _securityWatchdog;
+	private readonly ServiceMetrics _metrics;
 	private readonly ILogger<EventProcessorWorker> _logger;
 	private readonly IOptionsMonitor<RdpAuditOptions> _options;
 	private int _consecutiveFailures;
@@ -51,7 +53,9 @@ public sealed class EventProcessorWorker : BackgroundService
 		EventNormalizer normalizer,
 		SessionIpCorrelationUpserter correlationUpserter,
 		RdpConnectionFactUpserter connectionFactUpserter,
+		AuthAttemptFactUpserter authAttemptFactUpserter,
 		SecurityCorrelationWatchdog securityWatchdog,
+		ServiceMetrics metrics,
 		ILogger<EventProcessorWorker> logger,
 		IOptionsMonitor<RdpAuditOptions> options)
 	{
@@ -60,7 +64,9 @@ public sealed class EventProcessorWorker : BackgroundService
 		_normalizer = normalizer;
 		_correlationUpserter = correlationUpserter;
 		_connectionFactUpserter = connectionFactUpserter;
+		_authAttemptFactUpserter = authAttemptFactUpserter;
 		_securityWatchdog = securityWatchdog;
+		_metrics = metrics;
 		_logger = logger;
 		_options = options;
 	}
@@ -152,7 +158,29 @@ public sealed class EventProcessorWorker : BackgroundService
 
 	private async Task PersistBatchAsync(List<RawEventDto> dtos, CancellationToken ct)
 	{
-		List<RawEvent> entities = dtos.Select(_normalizer.Normalize).ToList();
+		List<RawEvent> entities = new(dtos.Count);
+		foreach (RawEventDto dto in dtos)
+		{
+			try
+			{
+				entities.Add(_normalizer.Normalize(dto));
+				if (IsSecurityChannel(dto.Channel))
+				{
+					_metrics.IncrementSecurityEventRead();
+					_metrics.IncrementSecurityEventNormalized();
+				}
+			}
+			catch (Exception ex)
+			{
+				if (IsSecurityChannel(dto.Channel))
+				{
+					_metrics.IncrementSecurityEventRead();
+					_metrics.IncrementSecurityEventRejected("NormalizeFailed: " + ex.GetType().Name);
+				}
+
+				_logger.LogWarning(ex, "Normalize failed for event {EventId} channel {Channel}", dto.EventId, dto.Channel);
+			}
+		}
 
 		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
 		await using var tx = await db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
@@ -281,8 +309,27 @@ public sealed class EventProcessorWorker : BackgroundService
 			await _correlationUpserter.ApplyAsync(db, candidates, ct).ConfigureAwait(false);
 			await _connectionFactUpserter.ApplyAsync(db, entities, ct).ConfigureAwait(false);
 
+			// v3 atomic-fact pass: persist one AuthAttemptFact per authoritative outcome event so
+			// IpFact / UserIpFact / Attack Statistics counters can be derived from a single source
+			// of truth (Detect_Attack_Strategy_v3.md §8.1, §17.14). Runs AFTER the RawEvents have
+			// been Add()'d so EvidenceRawEventId can reference the actual row id; we run a
+			// SaveChanges first to materialise those ids inside the same transaction.
+			await db.SaveChangesAsync(ct).ConfigureAwait(false);
+
+			AuthAttemptFactBatchResult authResult = await _authAttemptFactUpserter
+				.ApplyAsync(db, entities, ct)
+				.ConfigureAwait(false);
+
 			await db.SaveChangesAsync(ct).ConfigureAwait(false);
 			await tx.CommitAsync(ct).ConfigureAwait(false);
+
+			if (authResult.FailedCreated > 0 || authResult.SucceededCreated > 0)
+			{
+				_metrics.RecordAuthAttemptFacts(
+					authResult.FailedCreated,
+					authResult.SucceededCreated,
+					authResult.LastFactUtc == default ? now : authResult.LastFactUtc);
+			}
 		}
 		catch
 		{
@@ -305,6 +352,10 @@ public sealed class EventProcessorWorker : BackgroundService
 
 	private const string TsLsmChannelName = "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational";
 	private const string TsRcmChannelName = "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational";
+
+	private static bool IsSecurityChannel(string? channel)
+		=> !string.IsNullOrWhiteSpace(channel)
+			&& channel.Equals("Security", StringComparison.OrdinalIgnoreCase);
 
 	private static bool IsTsLsm21(RawEvent e)
 		=> e.EventId == 21

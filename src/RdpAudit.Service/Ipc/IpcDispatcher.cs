@@ -198,6 +198,21 @@ public sealed class IpcDispatcher
 			LastSecurityEventUtc = _metrics.LastSecurityEventUtc,
 			LastRdpCorePreAuthUtc = _metrics.LastRdpCorePreAuthUtc,
 			SecurityCorrelationDiagnostic = _metrics.SecurityCorrelationDiagnostic,
+			SecurityWatcherEnabled = _metrics.SecurityWatcherEnabled,
+			SecurityEventsRead = _metrics.SecurityEventsRead,
+			SecurityEventsNormalized = _metrics.SecurityEventsNormalized,
+			SecurityEventsRejected = _metrics.SecurityEventsRejected,
+			SecurityBackfillLastRunUtc = _metrics.SecurityBackfillLastRunUtc,
+			SecurityBackfillRecordsRead = _metrics.SecurityBackfillRecordsRead,
+			SecurityBackfillRecordsForwarded = _metrics.SecurityBackfillRecordsForwarded,
+			SecurityBackfillRecordsDeduped = _metrics.SecurityBackfillRecordsDeduped,
+			LastSecurityChannelError = _metrics.LastSecurityChannelError,
+			LastSecurityRejectReason = _metrics.LastSecurityRejectReason,
+			SecurityRejectReasonCount = _metrics.SecurityRejectReasonCount,
+			LastAuthAttemptFactCreatedUtc = _metrics.LastAuthAttemptFactCreatedUtc,
+			AuthAttemptFactCreated = _metrics.AuthAttemptFactCreated,
+			AuthAttemptFactFailed = _metrics.AuthAttemptFactFailed,
+			AuthAttemptFactSucceeded = _metrics.AuthAttemptFactSucceeded,
 		};
 	}
 
@@ -1063,19 +1078,42 @@ public sealed class IpcDispatcher
 			return new Dictionary<string, FactAggregate>(StringComparer.Ordinal);
 		}
 
-		var grouped = await db.RdpConnectionFacts.AsNoTracking()
-			.Where(r => set.Contains(r.Ip))
-			.GroupBy(r => r.Ip)
+		// v3 invariant (Detect_Attack_Strategy_v3.md §8.1): "All counters in IpFact and UserIpFact
+		// are computed only from AuthAttemptFact." The Configurator's Fact Failed / Fact Success
+		// columns therefore aggregate AuthAttemptFacts, not RdpConnectionFacts (which mix in
+		// LSM-21 / RCM-1149 session telemetry that is NOT authoritative for outcome).
+		var groupedAuth = await db.AuthAttemptFacts.AsNoTracking()
+			.Where(f => f.SourceIp != null && set.Contains(f.SourceIp))
+			.GroupBy(f => f.SourceIp!)
 			.Select(g => new
 			{
 				Ip = g.Key,
-				FirstSeen = g.Min(r => r.FirstSeenUtc),
-				LastSeen = g.Max(r => r.LastSeenUtc),
-				Failed = g.Sum(r => (long)r.FailedLogons),
-				Successful = g.Sum(r => (long)r.SuccessfulLogons),
-				AnyActive = g.Any(r => r.IsActive),
+				FirstSeen = g.Min(f => f.TimeUtc),
+				LastSeen = g.Max(f => f.TimeUtc),
+				Failed = g.LongCount(f => f.Outcome == AuthAttemptOutcome.Failed || f.Outcome == AuthAttemptOutcome.Denied),
+				Successful = g.LongCount(f => f.Outcome == AuthAttemptOutcome.Succeeded),
 			})
 			.ToListAsync(ct).ConfigureAwait(false);
+
+		// "Active fact" is still a connection-state question (is there an open RDP session from
+		// this IP?), so it continues to be sourced from RdpConnectionFacts.IsActive — that field
+		// is a session-lifecycle bit, not a counter.
+		Dictionary<string, bool> activeByIp = (await db.RdpConnectionFacts.AsNoTracking()
+			.Where(r => set.Contains(r.Ip))
+			.GroupBy(r => r.Ip)
+			.Select(g => new { Ip = g.Key, AnyActive = g.Any(r => r.IsActive) })
+			.ToListAsync(ct).ConfigureAwait(false))
+			.ToDictionary(x => x.Ip, x => x.AnyActive, StringComparer.Ordinal);
+
+		var grouped = groupedAuth.Select(g => new
+		{
+			g.Ip,
+			g.FirstSeen,
+			g.LastSeen,
+			g.Failed,
+			g.Successful,
+			AnyActive = activeByIp.TryGetValue(g.Ip, out bool active) && active,
+		}).ToList();
 
 		Dictionary<string, FactAggregate> result = new(StringComparer.Ordinal);
 		foreach (var g in grouped)

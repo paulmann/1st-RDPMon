@@ -1,12 +1,14 @@
 // File:    src/RdpAudit.Service/Workers/SecurityBackfillWorker.cs
 // Module:  RdpAudit.Service.Workers
-// Purpose: Defensive low-cost backfill for Security 4624/4625/4648. The primary collection path is
-//          EventLogWatcher; this worker exists to recover the small fraction of events that the
-//          push-based watcher misses on overloaded hosts or after a service restart that landed
-//          past the persisted bookmark. The poll is strictly bounded by a short XPath time window
-//          and a fixed event-id list, so it never scans the entire Security log and never
-//          competes with the watcher on the happy path — duplicate records are filtered by
-//          EventRecordID before being pushed into the in-memory pipeline.
+// Purpose: Bounded, idempotent backfill for the full v3 Security event set
+//          (Detect_Attack_Strategy_v3.md §5.2 "Critical Backfill Targets"): 4624, 4625, 4634, 4647,
+//          4648, 4672, 4719, 4720, 4724, 4732, 4740, 4768, 4769, 4771, 4776, 4778, 4779, 4825, 1102.
+//          The primary collection path is EventLogWatcher; this worker recovers events the
+//          push-based watcher missed on overloaded hosts, after a service restart that landed past
+//          the persisted bookmark, or when the live channel was briefly unavailable. The poll is
+//          strictly bounded by a short XPath time window and a fixed event-id list, so it never
+//          scans the entire Security log. Duplicates are dropped by EventRecordID before being
+//          forwarded to the in-memory pipeline.
 // Extends: Microsoft.Extensions.Hosting.BackgroundService
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
@@ -31,11 +33,25 @@ namespace RdpAudit.Service.Workers;
 /// </summary>
 public sealed class SecurityBackfillWorker : BackgroundService
 {
-	/// <summary>The Security event ids we backfill. Intentionally narrow: brute-force attribution
-	/// hinges on these three. Adding more here would lengthen the XPath, widen the result set, and
-	/// slow the poll without improving the operator-visible "Live Events missed my failed logon"
-	/// regression this worker exists to prevent.</summary>
-	private static readonly int[] BackfillEventIds = { 4624, 4625, 4648 };
+	/// <summary>Full v3 Security backfill set per Detect_Attack_Strategy_v3.md §5.2. The list is
+	/// expressed as <see cref="IReadOnlyList{T}"/> so tests can introspect the contract without
+	/// re-encoding it. Adding new ids here requires updating the v3 strategy document — the two
+	/// are tested for parity.</summary>
+	internal static readonly IReadOnlyList<int> BackfillEventIds = new[]
+	{
+		// Logon / Logoff
+		4624, 4625, 4634, 4647, 4648, 4672,
+		// Account / privilege management (post-compromise persistence + lockout)
+		4719, 4720, 4724, 4732, 4740,
+		// Kerberos + NTLM credential validation (carries Kerberos IP and DC-side fail evidence)
+		4768, 4769, 4771, 4776,
+		// Reconnect / disconnect (session hijacking detection)
+		4778, 4779,
+		// RDP authorization-denied
+		4825,
+		// Tamper indicator: audit log cleared (critical adversary TTP)
+		1102,
+	};
 
 	/// <summary>Cap on the in-memory dedup ring. Older record ids are dropped FIFO.</summary>
 	internal const int SeenRingCapacity = 8192;
@@ -124,8 +140,10 @@ public sealed class SecurityBackfillWorker : BackgroundService
 	{
 		// Bounded lookback window: we never scan more than the last few minutes of the Security
 		// channel. Combined with the event-id filter this makes the poll O(few) on a typical host.
-		DateTime sinceUtc = DateTime.UtcNow - DefaultLookback;
+		DateTime startedUtc = DateTime.UtcNow;
+		DateTime sinceUtc = startedUtc - DefaultLookback;
 		string xpath = BuildXPath(sinceUtc);
+		int recordsRead = 0;
 
 		EventLogQuery query;
 		try
@@ -154,6 +172,7 @@ public sealed class SecurityBackfillWorker : BackgroundService
 					break;
 				}
 
+				recordsRead++;
 				long recordId = record.RecordId ?? unchecked((long)record.GetHashCode());
 				if (!TryMarkSeen(recordId))
 				{
@@ -212,6 +231,7 @@ public sealed class SecurityBackfillWorker : BackgroundService
 			_metrics.SetChannelStatus(
 				EventCatalog.ChannelSecurity + "::Backfill",
 				"AccessDenied");
+			_metrics.SetLastSecurityChannelError("AccessDenied: " + ex.Message);
 			_logger.LogWarning(
 				ex,
 				"Security backfill cannot read the Security channel — service account is missing 'Manage auditing and security log' or membership in Event Log Readers");
@@ -221,6 +241,7 @@ public sealed class SecurityBackfillWorker : BackgroundService
 			_metrics.SetChannelStatus(
 				EventCatalog.ChannelSecurity + "::Backfill",
 				"ChannelNotFound");
+			_metrics.SetLastSecurityChannelError("ChannelNotFound: " + ex.Message);
 			_logger.LogWarning(ex, "Security backfill: Security channel not found");
 		}
 		catch (EventLogException ex)
@@ -228,7 +249,12 @@ public sealed class SecurityBackfillWorker : BackgroundService
 			_metrics.SetChannelStatus(
 				EventCatalog.ChannelSecurity + "::Backfill",
 				"QueryFailed");
+			_metrics.SetLastSecurityChannelError("QueryFailed: " + ex.Message);
 			_logger.LogDebug(ex, "Security backfill query failed");
+		}
+		finally
+		{
+			_metrics.RecordSecurityBackfillRun(startedUtc, recordsRead, forwarded, seenDuplicate);
 		}
 
 		return Task.CompletedTask;
@@ -239,7 +265,7 @@ public sealed class SecurityBackfillWorker : BackgroundService
 		// XPath time literal must be a Windows-recognised ISO-8601 string with millisecond
 		// precision and explicit Z. Format invariantly.
 		string iso = sinceUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
-		string ids = string.Join(" or ", Array.ConvertAll(BackfillEventIds, id => $"EventID={id}"));
+		string ids = string.Join(" or ", BackfillEventIds.Select(id => $"EventID={id}"));
 		return $"*[System[({ids}) and TimeCreated[@SystemTime >= '{iso}']]]";
 	}
 

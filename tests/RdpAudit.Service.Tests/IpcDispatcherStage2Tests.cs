@@ -94,6 +94,7 @@ public class IpcDispatcherStage2Tests
 					});
 				}
 
+				TestAuthAttemptFactHelper.SynthesizeFactsFromRawEvents(db);
 				await db.SaveChangesAsync();
 			}
 
@@ -285,6 +286,7 @@ public class IpcDispatcherStage2Tests
 					});
 				}
 
+				TestAuthAttemptFactHelper.SynthesizeFactsFromRawEvents(db);
 				await db.SaveChangesAsync();
 			}
 

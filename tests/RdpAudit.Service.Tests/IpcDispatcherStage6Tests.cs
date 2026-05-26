@@ -138,6 +138,9 @@ public class IpcDispatcherStage6Tests
 			SourceIp = "203.0.113.10",
 		});
 
+		// v3 invariant: counters derive from AuthAttemptFact. Synthesize the equivalent fact rows
+		// from the RawEvents seeded above so the AttackStatsRefreshWorker can do its job.
+		TestAuthAttemptFactHelper.SynthesizeFactsFromRawEvents(db);
 		await db.SaveChangesAsync();
 	}
 

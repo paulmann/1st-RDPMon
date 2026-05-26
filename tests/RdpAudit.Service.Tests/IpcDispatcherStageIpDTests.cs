@@ -119,8 +119,51 @@ public class IpcDispatcherStageIpDTests
 			IsActive = true,
 		});
 
+		// v3 invariant (Detect_Attack_Strategy_v3.md §8.1, §17.14): Fact Failed / Fact Success
+		// counters derive from AuthAttemptFact, not from RdpConnectionFacts. Mirror the seeded
+		// connection-fact tally as AuthAttemptFact rows so the IPC aggregation can find them.
+		for (int i = 0; i < 5; i++)
+		{
+			db.AuthAttemptFacts.Add(MakeFailureFact("203.0.113.7", "administrator", Now.AddHours(-3).AddMinutes(i)));
+		}
+
+		for (int i = 0; i < 7; i++)
+		{
+			db.AuthAttemptFacts.Add(MakeFailureFact("203.0.113.7", "root", Now.AddHours(-1).AddMinutes(i)));
+		}
+
+		db.AuthAttemptFacts.Add(MakeSuccessFact("10.0.0.7", "alice", Now.AddHours(-6)));
+
 		await db.SaveChangesAsync();
 	}
+
+	private static AuthAttemptFact MakeFailureFact(string ip, string user, DateTime utc) => new()
+	{
+		TimeUtc = utc,
+		SourceIp = ip,
+		TargetUser = user,
+		NormalizedUserName = user.ToLowerInvariant(),
+		Outcome = AuthAttemptOutcome.Failed,
+		EvidenceChannel = "Security",
+		EvidenceEventId = 4625,
+		EnrichmentSource = "DirectXml",
+		EnrichmentConfidence = "High",
+		IngestedUtc = utc,
+	};
+
+	private static AuthAttemptFact MakeSuccessFact(string ip, string user, DateTime utc) => new()
+	{
+		TimeUtc = utc,
+		SourceIp = ip,
+		TargetUser = user,
+		NormalizedUserName = user.ToLowerInvariant(),
+		Outcome = AuthAttemptOutcome.Succeeded,
+		EvidenceChannel = "Security",
+		EvidenceEventId = 4624,
+		EnrichmentSource = "DirectXml",
+		EnrichmentConfidence = "High",
+		IngestedUtc = utc,
+	};
 
 	private static async Task<T> CallAsync<T>(IpcDispatcher dispatcher, IpcCommand command, object? payload = null)
 	{

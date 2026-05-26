@@ -113,18 +113,14 @@ public sealed class AttackStatsRefreshWorker : BackgroundService
 
 		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
 
-		// Pull bounded slices. Indices on RawEvents.TimeUtc / SourceIp keep this query-index-friendly
-		// even at multi-million row scale; the Take ceiling protects pathological cases.
-		//
-		// Stage 2: include rows with SourceIpUnresolved == true. Stage 1 persists failed-logon
-		// evidence even when Windows omits the source IP (NLA / pre-auth path); those rows
-		// previously vanished from the dashboard because the filter excluded null/empty SourceIp.
-		// We surface them via the sentinel IP so operators can see brute-force pressure without
-		// false attribution to a specific attacker address.
-		List<RawEvent> events = await db.RawEvents.AsNoTracking()
-			.Where(e => e.TimeUtc >= sinceUtc
-				&& ((e.SourceIp != null && e.SourceIp != string.Empty) || e.SourceIpUnresolved))
-			.OrderBy(e => e.Id)
+		// v3 invariant (Detect_Attack_Strategy_v3.md §8.1, §17.14): Total / Successful / Failed
+		// counters MUST derive exclusively from AuthAttemptFact — the atomic source of truth.
+		// We pull a bounded slice from AuthAttemptFacts, then synthesize AttackEventSample rows
+		// keyed by the fact's authoritative SourceIp (or the unresolved-IP sentinel when NLA
+		// stripped the address and no transport-IP correlation could supply one).
+		List<AuthAttemptFact> facts = await db.AuthAttemptFacts.AsNoTracking()
+			.Where(f => f.TimeUtc >= sinceUtc)
+			.OrderBy(f => f.Id)
 			.Take(MaxRawEventsPerPass)
 			.ToListAsync(ct)
 			.ConfigureAwait(false);
@@ -137,16 +133,18 @@ public sealed class AttackStatsRefreshWorker : BackgroundService
 			.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
 		int unresolvedCount = 0;
-		List<AttackEventSample> samples = new(events.Count);
-		foreach (RawEvent e in events)
+		List<AttackEventSample> samples = new(facts.Count);
+		foreach (AuthAttemptFact fact in facts)
 		{
 			string? sourceIp;
-			if (!string.IsNullOrEmpty(e.SourceIp))
+			if (!string.IsNullOrEmpty(fact.SourceIp))
 			{
-				sourceIp = e.SourceIp;
+				sourceIp = fact.SourceIp;
 			}
-			else if (e.SourceIpUnresolved)
+			else if (fact.Outcome == AuthAttemptOutcome.Failed || fact.Outcome == AuthAttemptOutcome.Denied)
 			{
+				// Preserve the failure under the unresolved-IP sentinel so Attack Statistics
+				// reflects brute-force pressure even when Windows stripped the IpAddress field.
 				sourceIp = AttackStatsAggregator.SentinelUnresolvedIp;
 				unresolvedCount++;
 			}
@@ -157,17 +155,17 @@ public sealed class AttackStatsRefreshWorker : BackgroundService
 
 			samples.Add(new AttackEventSample(
 				sourceIp,
-				e.EventId,
-				e.TimeUtc,
-				e.UserName,
-				e.LogonType,
-				e.Channel));
+				MapFactOutcomeToSyntheticEventId(fact.Outcome, fact.EvidenceEventId),
+				fact.TimeUtc,
+				fact.TargetUser,
+				fact.LogonType,
+				"Security"));
 		}
 
 		if (unresolvedCount > 0)
 		{
 			_logger.LogInformation(
-				"{Worker} included {Count} unresolved-IP events under sentinel {Sentinel}",
+				"{Worker} included {Count} unresolved-IP AuthAttemptFacts under sentinel {Sentinel}",
 				nameof(AttackStatsRefreshWorker),
 				unresolvedCount,
 				AttackStatsAggregator.SentinelUnresolvedIp);
@@ -226,6 +224,26 @@ public sealed class AttackStatsRefreshWorker : BackgroundService
 
 		await db.SaveChangesAsync(ct).ConfigureAwait(false);
 		return upserts;
+	}
+
+	/// <summary>
+	/// Bridge between the AuthAttemptFact-derived facts and the existing
+	/// <see cref="AttackStatsAggregator"/> contract, which classifies samples by raw Windows event id.
+	/// We keep using the same aggregator (one source of truth for scoring) by mapping each fact
+	/// outcome to the canonical Security event id (4624 success / 4625 failure). The original
+	/// EvidenceEventId is preserved for diagnostic logs but never drives counter classification —
+	/// per v3 §6.3 rule 3, only AuthAttemptFact's Outcome field is authoritative.
+	/// </summary>
+	internal static int MapFactOutcomeToSyntheticEventId(AuthAttemptOutcome outcome, int evidenceEventId)
+	{
+		_ = evidenceEventId;
+		return outcome switch
+		{
+			AuthAttemptOutcome.Succeeded => AttackStatsAggregator.EventIdLogonSuccess,
+			AuthAttemptOutcome.Failed => AttackStatsAggregator.EventIdLogonFailure,
+			AuthAttemptOutcome.Denied => AttackStatsAggregator.EventIdLogonFailure,
+			_ => 0,
+		};
 	}
 
 	public override void Dispose()

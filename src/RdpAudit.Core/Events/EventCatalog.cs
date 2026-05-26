@@ -73,11 +73,17 @@ public static class EventCatalog
 		// Account management
 		new(4720, ChannelSecurity, "User account created", "Account"),
 		new(4722, ChannelSecurity, "User account enabled", "Account"),
+		new(4724, ChannelSecurity, "Account password reset", "Account"),
 		new(4725, ChannelSecurity, "User account disabled", "Account"),
 		new(4726, ChannelSecurity, "User account deleted", "Account"),
 		new(4728, ChannelSecurity, "Member added to global group", "Account"),
 		new(4732, ChannelSecurity, "Member added to local group", "Account"),
+		new(4740, ChannelSecurity, "User account locked out", "Account"),
 		new(4756, ChannelSecurity, "Member added to universal group", "Account"),
+
+		// Infrastructure tampering / authorization (v3 §9.10)
+		new(4719, ChannelSecurity, "System audit policy changed", "Tampering"),
+		new(4825, ChannelSecurity, "RDP access denied — user is not a member of Remote Desktop Users", "Authentication"),
 
 		// Object access (SACL)
 		new(4656, ChannelSecurity, "Object handle requested", "ObjectAccess"),

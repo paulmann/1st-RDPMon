@@ -26,18 +26,36 @@ public class SecurityBackfillWorkerTests
 	}
 
 	[Fact]
-	public void BuildXPath_LimitsToBackfillEventIds_AndIncludesTimeBound()
+	public void BuildXPath_CoversFullV3SecuritySet_AndIncludesTimeBound()
 	{
+		// Detect_Attack_Strategy_v3.md §5.2 "Critical Backfill Targets": the Security channel
+		// backfill must enumerate every authentication, post-compromise, lockout, NTLM/Kerberos,
+		// session-lifecycle, and tampering event needed for attack classification. The list is
+		// asserted in full here so a future regression that silently narrows it (the same defect
+		// this test was rewritten to prevent) fails immediately.
+		int[] expected =
+		{
+			4624, 4625, 4634, 4647, 4648, 4672,
+			4719, 4720, 4724, 4732, 4740,
+			4768, 4769, 4771, 4776,
+			4778, 4779,
+			4825,
+			1102,
+		};
+
 		DateTime since = new(2026, 5, 20, 12, 0, 0, DateTimeKind.Utc);
 		string xpath = SecurityBackfillWorker.BuildXPath(since);
-		Assert.Contains("EventID=4624", xpath);
-		Assert.Contains("EventID=4625", xpath);
-		Assert.Contains("EventID=4648", xpath);
+
+		foreach (int id in expected)
+		{
+			Assert.Contains("EventID=" + id, xpath);
+		}
+
 		// Time literal must be invariant ISO-8601 with millisecond precision and explicit Z.
 		Assert.Contains("2026-05-20T12:00:00.000Z", xpath);
-		// Must not enumerate event ids we did not opt into.
-		Assert.DoesNotContain("EventID=4634", xpath);
-		Assert.DoesNotContain("EventID=4776", xpath);
+
+		// The full set is exposed for tests so the v3 contract is one read away.
+		Assert.Equal(expected.OrderBy(x => x), SecurityBackfillWorker.BackfillEventIds.OrderBy(x => x));
 	}
 
 	[Fact]

@@ -50,4 +50,51 @@ public sealed class ServiceStatus
 	/// <summary>Human-readable diagnostic emitted when pre-auth events accumulate without matching
 	/// Security events. Null until the watchdog fires. Configurator surfaces this on the dashboard.</summary>
 	public string? SecurityCorrelationDiagnostic { get; set; }
+
+	// --- v3 telemetry surface (Detect_Attack_Strategy_v3.md acceptance criterion §17). ---
+
+	/// <summary>True once the live Security EventLogWatcher has armed at least once.</summary>
+	public bool SecurityWatcherEnabled { get; set; }
+
+	/// <summary>Cumulative count of Security events received by the live watcher path.</summary>
+	public long SecurityEventsRead { get; set; }
+
+	/// <summary>Cumulative count of Security events that completed normalization.</summary>
+	public long SecurityEventsNormalized { get; set; }
+
+	/// <summary>Cumulative count of Security events rejected with an explicit reason.</summary>
+	public long SecurityEventsRejected { get; set; }
+
+	/// <summary>UTC of the most recent Security backfill poll completion.</summary>
+	public DateTime? SecurityBackfillLastRunUtc { get; set; }
+
+	/// <summary>Cumulative count of Security records read during backfill polls.</summary>
+	public long SecurityBackfillRecordsRead { get; set; }
+
+	/// <summary>Cumulative count of Security records forwarded by backfill.</summary>
+	public long SecurityBackfillRecordsForwarded { get; set; }
+
+	/// <summary>Cumulative count of Security records dropped as duplicates by backfill.</summary>
+	public long SecurityBackfillRecordsDeduped { get; set; }
+
+	/// <summary>Most recent error message from the Security channel (live or backfill).</summary>
+	public string? LastSecurityChannelError { get; set; }
+
+	/// <summary>Most recent rejection reason for a normalized Security event.</summary>
+	public string? LastSecurityRejectReason { get; set; }
+
+	/// <summary>Cumulative count of Security events rejected, paired with <see cref="LastSecurityRejectReason"/>.</summary>
+	public long SecurityRejectReasonCount { get; set; }
+
+	/// <summary>UTC of the most recent <c>AuthAttemptFact</c> row created.</summary>
+	public DateTime? LastAuthAttemptFactCreatedUtc { get; set; }
+
+	/// <summary>Cumulative count of <c>AuthAttemptFact</c> rows created since service start.</summary>
+	public long AuthAttemptFactCreated { get; set; }
+
+	/// <summary>Cumulative count of failed/denied <c>AuthAttemptFact</c> rows since service start.</summary>
+	public long AuthAttemptFactFailed { get; set; }
+
+	/// <summary>Cumulative count of succeeded <c>AuthAttemptFact</c> rows since service start.</summary>
+	public long AuthAttemptFactSucceeded { get; set; }
 }
