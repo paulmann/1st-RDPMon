@@ -12,6 +12,7 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using RdpAudit.Core.Interop;
+using RdpAudit.Core.Util;
 
 namespace RdpAudit.Core.Events;
 
@@ -151,20 +152,29 @@ public sealed class AuditPolicyManager
 
 	/// <summary>Locale-tolerant parser for <c>auditpol /get /subcategory:{guid} /r</c> CSV output.
 	/// Expected schema: <c>Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting</c>.
-	/// The "Inclusion Setting" value is localized text — we match the GUID column to the requested GUID,
-	/// then decode the inclusion column via keyword heuristics that work in EN/RU/DE/FR/ES Windows builds.</summary>
+	/// The auditpol invocation is routed through the parse-stable English console
+	/// (<c>cmd /d /c "chcp 437 >nul &amp; auditpol.exe /get /subcategory:{GUID} /r"</c>) so the
+	/// header text and "Inclusion Setting" values are emitted in Latin-script form whenever the
+	/// chcp pin takes effect; the keyword fallback still handles localized output if it doesn't.</summary>
 	[SupportedOSPlatform("windows")]
 	private static AuditPolicyState? ReadViaAuditpolCsv(string guid)
 	{
-		string args = string.Format(CultureInfo.InvariantCulture, "/get /subcategory:{0} /r", guid);
 		try
 		{
-			ProcessStartInfo psi = new("auditpol.exe", args)
+			EnglishConsoleSpawn spawn = EnglishConsoleCommandFactory.Build(
+				TrustedEnglishConsoleTool.AuditpolGetSubcategoryCsv,
+				new EnglishConsoleArgs { SubcategoryGuid = guid });
+
+			System.Text.Encoding encoding = QwinstaConsoleEncoding.Resolve();
+			ProcessStartInfo psi = new(spawn.Executable)
 			{
+				Arguments = spawn.Arguments,
 				UseShellExecute = false,
 				CreateNoWindow = true,
 				RedirectStandardOutput = true,
 				RedirectStandardError = true,
+				StandardOutputEncoding = encoding,
+				StandardErrorEncoding = encoding,
 			};
 			using Process? proc = Process.Start(psi);
 			if (proc is null)
