@@ -197,7 +197,15 @@ public sealed class SecurityBackfillWorker : BackgroundService
 		int totalDuplicate = 0;
 		string? fatalChannelError = null;
 		bool hadFatalChannelError = false;
-		int nonFatalSkipCount = 0;
+		int forwardedIds = 0;
+		int duplicateOnlyIds = 0;
+		int noEventIds = 0;
+		int timeoutSkippedIds = 0;
+		int failedIds = 0;
+
+		// v1.2.2 — clear all stale per-id statuses up-front so a previous tick's
+		// "QueryFailed" or "TimeoutSkipped" entries do not linger past the next clean read.
+		_metrics.ClearSecurityBackfillPerIdStatuses();
 
 		// Read priority ids first; the rest after. Iterating per-id keeps each individual
 		// query tiny — Windows uses an event-id index for these — and isolates timeouts.
@@ -209,38 +217,79 @@ public sealed class SecurityBackfillWorker : BackgroundService
 				break;
 			}
 
+			DateTime perIdStartedUtc = DateTime.UtcNow;
 			PerIdResult r = ReadEventsForId(id, sinceUtc, maxPerId, ct);
+			TimeSpan perIdElapsed = DateTime.UtcNow - perIdStartedUtc;
 			totalRead += r.Read;
 			totalForwarded += r.Forwarded;
 			totalDuplicate += r.Duplicate;
+
+			string statusToken;
+			string? lastExceptionType = null;
+			string? lastExceptionMessage = null;
+
 			if (r.Error is not null)
 			{
-				// v1.2.1 — a per-id timeout / QueryFailed must not be treated as a top-level
-				// "Last Security channel error". When 4624/4625/4776 are flowing but 1102 (audit
-				// log cleared) times out because the index is cold, the operator should see
-				// "Forwarded:N" on the channel-level row and a quiet per-id "TimeoutSkipped" line
-				// — not an alarming "Last Security channel error" banner. Only fatal failures
-				// (AccessDenied / ChannelNotFound) bubble up to the top-level error surface.
-				string perIdStatus = r.IsFatalChannelError
-					? (r.ErrorOutcome ?? "QueryFailed")
-					: ClassifyNonFatal(r.Error);
-				_metrics.SetChannelStatus(EventCatalog.ChannelSecurity + "::Backfill::" + id, perIdStatus);
+				// v1.2.2 — distinguish AccessDenied / ChannelNotFound (fatal),
+				// TimeoutSkipped (non-fatal per-id), and QueryFailed (only when truly
+				// unexpected). The PowerShell triage path on a workstation/non-DC always
+				// throws "No events were found that match the specified selection criteria"
+				// for ids that are simply not produced on this SKU — that must classify as
+				// NoEvents, never as QueryFailed.
+				lastExceptionType = r.ExceptionType;
+				lastExceptionMessage = r.Error;
 				if (r.IsFatalChannelError)
 				{
+					statusToken = r.ErrorOutcome ?? "QueryFailed";
 					hadFatalChannelError = true;
 					fatalChannelError = "ID " + id + ": " + r.Error;
+					failedIds++;
 				}
 				else
 				{
-					nonFatalSkipCount++;
+					statusToken = ClassifyNonFatal(r.Error);
+					switch (statusToken)
+					{
+						case "NoEvents":
+							noEventIds++;
+							break;
+						case "TimeoutSkipped":
+							timeoutSkippedIds++;
+							break;
+						default:
+							failedIds++;
+							break;
+					}
 				}
+			}
+			else if (r.Read == 0)
+			{
+				statusToken = "NoEvents";
+				noEventIds++;
+			}
+			else if (r.Forwarded > 0)
+			{
+				statusToken = "OkForwarded";
+				forwardedIds++;
 			}
 			else
 			{
-				_metrics.SetChannelStatus(
-					EventCatalog.ChannelSecurity + "::Backfill::" + id,
-					r.Read == 0 ? "Idle" : "Forwarded:" + r.Forwarded);
+				statusToken = "OkDuplicateOnly";
+				duplicateOnlyIds++;
 			}
+
+			_metrics.SetChannelStatus(
+				EventCatalog.ChannelSecurity + "::Backfill::" + id, statusToken);
+			_metrics.RecordSecurityBackfillPerId(new SecurityBackfillPerIdSnapshot(
+				EventId: id,
+				LastRunUtc: perIdStartedUtc,
+				ElapsedMs: (long)perIdElapsed.TotalMilliseconds,
+				RecordsRead: r.Read,
+				Forwarded: r.Forwarded,
+				Duplicate: r.Duplicate,
+				Status: statusToken,
+				LastExceptionType: lastExceptionType,
+				LastExceptionMessage: lastExceptionMessage));
 		}
 
 		if (hadFatalChannelError && fatalChannelError is not null)
@@ -250,10 +299,12 @@ public sealed class SecurityBackfillWorker : BackgroundService
 
 		if (!hadFatalChannelError)
 		{
-			string aggregate = totalRead == 0
-				? (nonFatalSkipCount > 0 ? "Idle (some ids skipped)" : "Idle")
-				: "Forwarded:" + totalForwarded;
-			_metrics.SetChannelStatus(EventCatalog.ChannelSecurity + "::Backfill", aggregate);
+			// v1.2.2 — compact, informative aggregate. Operators only see
+			// "Forwarded:N, Duplicate:M, NoEvents:K, TimeoutSkipped:T, Failed:F" — never
+			// "QueryFailed" when a workstation simply has no DC/Kerberos/lockout events.
+			_metrics.SetChannelStatus(
+				EventCatalog.ChannelSecurity + "::Backfill",
+				FormatAggregateStatus(totalForwarded, totalDuplicate, noEventIds, timeoutSkippedIds, failedIds));
 		}
 
 		_metrics.RecordSecurityBackfillRun(startedUtc, totalRead, totalForwarded, totalDuplicate);
@@ -282,7 +333,7 @@ public sealed class SecurityBackfillWorker : BackgroundService
 		}
 		catch (Exception ex)
 		{
-			return new PerIdResult(0, 0, 0, ex.Message, "QueryBuildFailed", false);
+			return new PerIdResult(0, 0, 0, ex.Message, "QueryBuildFailed", false, ex.GetType().Name);
 		}
 
 		int read = 0;
@@ -350,19 +401,26 @@ public sealed class SecurityBackfillWorker : BackgroundService
 		catch (UnauthorizedAccessException ex)
 		{
 			_metrics.SetLastSecurityChannelError("AccessDenied: " + ex.Message);
-			return new PerIdResult(read, forwarded, duplicate, ex.Message, "AccessDenied", true);
+			return new PerIdResult(read, forwarded, duplicate, ex.Message, "AccessDenied", true, ex.GetType().Name);
 		}
 		catch (EventLogNotFoundException ex)
 		{
 			_metrics.SetLastSecurityChannelError("ChannelNotFound: " + ex.Message);
-			return new PerIdResult(read, forwarded, duplicate, ex.Message, "ChannelNotFound", true);
+			return new PerIdResult(read, forwarded, duplicate, ex.Message, "ChannelNotFound", true, ex.GetType().Name);
 		}
 		catch (EventLogException ex)
 		{
-			return new PerIdResult(read, forwarded, duplicate, ex.Message, "QueryFailed", false);
+			// v1.2.2 — Windows raises EventLogException with the message
+			// "No events were found that match the specified selection criteria." when an
+			// XPath produces zero matches. PowerShell triage with -ErrorAction Stop sees the
+			// same exception. That is NOT a query failure — it is the canonical no-data
+			// outcome. Surface as NoEvents so the Diagnostic tab does not flood the
+			// operator with bogus QueryFailed lines on workstation hosts.
+			string outcome = ClassifyEventLogException(ex);
+			return new PerIdResult(read, forwarded, duplicate, ex.Message, outcome, false, ex.GetType().Name);
 		}
 
-		return new PerIdResult(read, forwarded, duplicate, null, null, false);
+		return new PerIdResult(read, forwarded, duplicate, null, null, false, null);
 	}
 
 	internal static string BuildXPath(DateTime sinceUtc)
@@ -373,10 +431,15 @@ public sealed class SecurityBackfillWorker : BackgroundService
 	}
 
 	/// <summary>
-	/// v1.2.1 — name the specific non-fatal failure mode so the Diagnostic tab shows
-	/// "TimeoutSkipped" / "QueryFailed" per-id instead of a single scary "Last Security channel
-	/// error" banner when 4624/4625/4776 are flowing and 1102 simply timed out. The classifier
-	/// is intentionally narrow: anything not recognised collapses to "QueryFailed".
+	/// v1.2.2 — name the specific non-fatal failure mode so the Diagnostic tab shows
+	/// "NoEvents" / "TimeoutSkipped" / "QueryFailed" per-id instead of collapsing every
+	/// non-fatal exception into "QueryFailed". The PowerShell triage path raises
+	/// EventLogException with "No events were found that match the specified selection
+	/// criteria." for every event id that simply does not occur on this SKU (4768/4769/4771
+	/// on a workstation, 1102 on a host that has never had its audit log cleared, etc.). The
+	/// classifier therefore widens the v1.2.1 binary timeout/query split into a tri-state
+	/// (NoEvents / TimeoutSkipped / QueryFailed). Anything unrecognised still collapses to
+	/// QueryFailed — but only as a true catch-all.
 	/// </summary>
 	internal static string ClassifyNonFatal(string? errorMessage)
 	{
@@ -386,6 +449,11 @@ public sealed class SecurityBackfillWorker : BackgroundService
 		}
 
 		string msg = errorMessage;
+		if (IsNoEventsMessage(msg))
+		{
+			return "NoEvents";
+		}
+
 		if (msg.Contains("timeout", StringComparison.OrdinalIgnoreCase)
 			|| msg.Contains("timed out", StringComparison.OrdinalIgnoreCase)
 			|| msg.Contains("ERROR_TIMEOUT", StringComparison.OrdinalIgnoreCase))
@@ -394,6 +462,64 @@ public sealed class SecurityBackfillWorker : BackgroundService
 		}
 
 		return "QueryFailed";
+	}
+
+	/// <summary>True when the EventLogException message is Windows's canonical
+	/// "zero matches for this XPath" outcome — emitted for every event id the host has not
+	/// produced inside the lookback window. Matches the English message plus the localized
+	/// equivalents emitted on non-en-US Windows builds so a Russian / German server does
+	/// not light up the Diagnostic tab with bogus QueryFailed rows.</summary>
+	internal static bool IsNoEventsMessage(string? message)
+	{
+		if (string.IsNullOrWhiteSpace(message))
+		{
+			return false;
+		}
+
+		// English: "No events were found that match the specified selection criteria."
+		if (message.Contains("No events were found", StringComparison.OrdinalIgnoreCase)
+			|| message.Contains("no matching events", StringComparison.OrdinalIgnoreCase)
+			|| message.Contains("no matches", StringComparison.OrdinalIgnoreCase))
+		{
+			return true;
+		}
+
+		// Russian: "Не найдено событий, соответствующих указанному критерию выбора."
+		if (message.Contains("Не найдено событий", StringComparison.OrdinalIgnoreCase)
+			|| message.Contains("не найдено", StringComparison.OrdinalIgnoreCase))
+		{
+			return true;
+		}
+
+		// German: "Es wurden keine Ereignisse gefunden ..."
+		if (message.Contains("keine Ereignisse", StringComparison.OrdinalIgnoreCase))
+		{
+			return true;
+		}
+
+		return false;
+	}
+
+	/// <summary>v1.2.2 — classify an <see cref="System.Diagnostics.Eventing.Reader.EventLogException"/>
+	/// that escaped the <c>EventLogReader</c> read loop into one of the per-id outcome tokens.
+	/// The no-match message is recognised by language; everything else falls through to the
+	/// timeout/unknown split.</summary>
+	internal static string ClassifyEventLogException(EventLogException ex)
+	{
+		ArgumentNullException.ThrowIfNull(ex);
+		return ClassifyNonFatal(ex.Message);
+	}
+
+	/// <summary>v1.2.2 — render the per-tick aggregate so the Diagnostic UI shows a single
+	/// compact line instead of N flooded per-id rows. Format matches the v1.2.2 spec:
+	/// "Forwarded:N, Duplicate:M, NoEvents:K, TimeoutSkipped:T, Failed:F".</summary>
+	internal static string FormatAggregateStatus(
+		int forwarded, int duplicate, int noEvents, int timeoutSkipped, int failed)
+	{
+		return string.Format(
+			System.Globalization.CultureInfo.InvariantCulture,
+			"Forwarded:{0}, Duplicate:{1}, NoEvents:{2}, TimeoutSkipped:{3}, Failed:{4}",
+			forwarded, duplicate, noEvents, timeoutSkipped, failed);
 	}
 
 	internal bool TryMarkSeen(long recordId)
@@ -469,5 +595,21 @@ public sealed class SecurityBackfillWorker : BackgroundService
 		int Duplicate,
 		string? Error,
 		string? ErrorOutcome,
-		bool IsFatalChannelError);
+		bool IsFatalChannelError,
+		string? ExceptionType);
 }
+
+/// <summary>v1.2.2 — per-id diagnostic snapshot surfaced over IPC for the Diagnostic UI.
+/// Operators see last run UTC, elapsed ms, records read/forwarded/dedup, status token, and
+/// the last exception type/message when a per-id outcome is non-success. The structure is
+/// intentionally flat so it serialises with no extra effort.</summary>
+public sealed record SecurityBackfillPerIdSnapshot(
+	int EventId,
+	DateTime LastRunUtc,
+	long ElapsedMs,
+	int RecordsRead,
+	int Forwarded,
+	int Duplicate,
+	string Status,
+	string? LastExceptionType,
+	string? LastExceptionMessage);

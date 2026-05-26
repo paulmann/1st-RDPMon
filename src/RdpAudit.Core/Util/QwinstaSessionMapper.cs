@@ -21,13 +21,24 @@ public static class QwinstaSessionMapper
 	{
 		ArgumentNullException.ThrowIfNull(row);
 		string state = QwinstaParser.NormalizeState(row.State);
+		// v1.2.2 — operator-visible Current? must reflect the validated active-RDP
+		// semantics, not the raw qwinsta ">" marker (which under LocalSystem can point at
+		// session 0 / services). The raw marker is preserved on IsQueryCurrent for the
+		// diagnostic support bundle only.
+		ActiveRdpClassification classification = ActiveRdpSessionClassifier.Classify(
+			sessionId: row.SessionId,
+			sessionName: row.SessionName,
+			userName: row.UserName,
+			normalizedState: state);
 		return new RdpSessionDto
 		{
 			SessionId = row.SessionId,
 			UserName = row.UserName,
 			SessionName = row.SessionName,
 			State = state,
-			IsCurrent = row.IsCurrent,
+			IsCurrent = classification.IsActiveRdp,
+			IsQueryCurrent = row.IsCurrent,
+			IsActiveRdp = classification.IsActiveRdp,
 			IsActive = string.Equals(state, "Active", StringComparison.OrdinalIgnoreCase),
 			IsDisconnected = string.Equals(state, "Disconnected", StringComparison.OrdinalIgnoreCase),
 		};

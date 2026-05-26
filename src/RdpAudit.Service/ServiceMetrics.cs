@@ -5,6 +5,8 @@
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
 
+using RdpAudit.Service.Workers;
+
 namespace RdpAudit.Service;
 
 /// <summary>Thread-safe runtime counters surfaced via the IPC GetStatus command.</summary>
@@ -83,6 +85,13 @@ public sealed class ServiceMetrics
 	}
 
 	public Dictionary<string, string> ChannelStatus { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+	// v1.2.2 — per-id Security backfill snapshots: last run UTC, elapsed ms, counts, status
+	// token, and the last exception type/message. The Diagnostic UI hides / groups NoEvents
+	// rows by default so a workstation host without DC events does not flood the operator.
+	private readonly Dictionary<int, SecurityBackfillPerIdSnapshot> _securityBackfillPerId =
+		new();
+	private readonly object _backfillPerIdGate = new();
 
 	// --- v3 telemetry surface (acceptance criterion §17.13: pipeline observability). ---
 
@@ -310,6 +319,58 @@ public sealed class ServiceMetrics
 		lock (ChannelStatus)
 		{
 			ChannelStatus[channel] = status;
+		}
+	}
+
+	/// <summary>v1.2.2 — record / overwrite the per-id Security backfill diagnostic snapshot
+	/// for the supplied EventID. Surfaced over IPC so the Diagnostic UI can show last run
+	/// UTC, elapsed ms, counts, status token and last exception per id.</summary>
+	public void RecordSecurityBackfillPerId(SecurityBackfillPerIdSnapshot snapshot)
+	{
+		ArgumentNullException.ThrowIfNull(snapshot);
+		lock (_backfillPerIdGate)
+		{
+			_securityBackfillPerId[snapshot.EventId] = snapshot;
+		}
+	}
+
+	/// <summary>v1.2.2 — clear all per-id Security backfill diagnostic snapshots and per-id
+	/// channel status entries so the next tick starts from a clean slate. Called at the top
+	/// of every backfill poll cycle so stale "QueryFailed" / "TimeoutSkipped" entries from a
+	/// previous tick never linger.</summary>
+	public void ClearSecurityBackfillPerIdStatuses()
+	{
+		lock (_backfillPerIdGate)
+		{
+			_securityBackfillPerId.Clear();
+		}
+
+		lock (ChannelStatus)
+		{
+			List<string> stale = new();
+			string prefix = "Security::Backfill::";
+			foreach (string key in ChannelStatus.Keys)
+			{
+				if (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+				{
+					stale.Add(key);
+				}
+			}
+
+			foreach (string key in stale)
+			{
+				ChannelStatus.Remove(key);
+			}
+		}
+	}
+
+	/// <summary>v1.2.2 — snapshot every per-id Security backfill diagnostic record. The
+	/// returned dictionary is a copy so callers can iterate without holding the gate.</summary>
+	public IReadOnlyDictionary<int, SecurityBackfillPerIdSnapshot> SnapshotSecurityBackfillPerId()
+	{
+		lock (_backfillPerIdGate)
+		{
+			return new Dictionary<int, SecurityBackfillPerIdSnapshot>(_securityBackfillPerId);
 		}
 	}
 
