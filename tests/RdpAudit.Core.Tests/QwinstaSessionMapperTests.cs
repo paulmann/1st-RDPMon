@@ -27,6 +27,12 @@ public class QwinstaSessionMapperTests
 		Assert.Equal("Active", dto.State);
 		Assert.True(dto.IsActive);
 		Assert.False(dto.IsDisconnected);
+		// v1.2.2 — an Active rdp-tcp# row with a non-empty user and a SessionId in the
+		// operator range must classify as the operator-visible active RDP session even
+		// when the raw qwinsta ">" marker is absent (the marker reflects the *query
+		// session* under LocalSystem, not the live remote session).
+		Assert.True(dto.IsActiveRdp);
+		Assert.True(dto.IsCurrent);
 	}
 
 	[Fact]
@@ -40,11 +46,46 @@ public class QwinstaSessionMapperTests
 	}
 
 	[Fact]
-	public void Map_PropagatesCurrentFlag()
+	public void Map_PropagatesQueryCurrentMarker_OnRawQwinstaMarker()
 	{
+		// v1.2.2 — the raw qwinsta ">" marker now flows onto IsQueryCurrent (operator-
+		// visible Current? is gated on the validated active-RDP semantics instead).
 		QwinstaSessionRow row = new("rdp-tcp#7", "admin", 7, "Active", true);
 		RdpSessionDto dto = QwinstaSessionMapper.Map(row);
+		Assert.True(dto.IsQueryCurrent);
 		Assert.True(dto.IsCurrent);
+		Assert.True(dto.IsActiveRdp);
+	}
+
+	[Fact]
+	public void Map_NeverMarksServicesSessionAsCurrent_EvenWhenRawMarkerIsSet()
+	{
+		// The smoking gun behaviour the v1.2.2 brief calls out: under LocalSystem the
+		// qwinsta ">" marker lands on session 0 ("services"). The operator-visible
+		// Current? must NEVER be true for session 0, regardless of the raw marker.
+		QwinstaSessionRow row = new("services", string.Empty, 0, "Disconnected", true);
+		RdpSessionDto dto = QwinstaSessionMapper.Map(row);
+		Assert.True(dto.IsQueryCurrent);
+		Assert.False(dto.IsCurrent);
+		Assert.False(dto.IsActiveRdp);
+	}
+
+	[Fact]
+	public void Map_ListenRows_AreNeverActiveRdp()
+	{
+		QwinstaSessionRow listen = new("rdp-tcp", string.Empty, 65537, "Listen", false);
+		RdpSessionDto dto = QwinstaSessionMapper.Map(listen);
+		Assert.False(dto.IsCurrent);
+		Assert.False(dto.IsActiveRdp);
+	}
+
+	[Fact]
+	public void Map_ConsoleSession_IsNeverActiveRdp()
+	{
+		QwinstaSessionRow console = new("console", string.Empty, 1, "Conn", false);
+		RdpSessionDto dto = QwinstaSessionMapper.Map(console);
+		Assert.False(dto.IsCurrent);
+		Assert.False(dto.IsActiveRdp);
 	}
 
 	[Fact]

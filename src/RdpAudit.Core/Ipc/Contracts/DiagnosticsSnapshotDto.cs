@@ -104,6 +104,83 @@ public sealed class DiagnosticsSnapshotDto
 	/// <summary>Recent free-form pipeline error messages (e.g. last Security channel error, last
 	/// reject reason). Bounded to 16 entries.</summary>
 	public List<string> RecentPipelineErrors { get; set; } = new();
+
+	/// <summary>v1.2.2 — per-id Security backfill diagnostic snapshots. Each entry carries
+	/// the last run UTC, elapsed ms, records read / forwarded / duplicate counts, the
+	/// classified status (OkForwarded / OkDuplicateOnly / NoEvents / TimeoutSkipped /
+	/// AccessDenied / ChannelNotFound / QueryFailed), and the last exception type/message
+	/// when the outcome is non-success. Surfaced separately from
+	/// <see cref="ChannelStatus"/> so the Diagnostic UI can compact / group NoEvents rows
+	/// without losing the underlying detail.</summary>
+	public List<DiagnosticsSecurityBackfillPerId> SecurityBackfillPerId { get; set; } = new();
+
+	/// <summary>v1.2.2 — aggregate summary line for the Security backfill row, formatted as
+	/// "Forwarded:N, Duplicate:M, NoEvents:K, TimeoutSkipped:T, Failed:F".</summary>
+	public string? SecurityBackfillAggregateStatus { get; set; }
+
+	/// <summary>v1.2.2 — raw qwinsta stdout captured during the last RDP session
+	/// enumeration. Surfaced in the support bundle so an operator can re-derive what the
+	/// parser saw without reproducing the spawn.</summary>
+	public string? RdpClientsRawQwinsta { get; set; }
+
+	/// <summary>v1.2.2 — raw quser stdout captured during the last RDP session enumeration.</summary>
+	public string? RdpClientsRawQuser { get; set; }
+
+	/// <summary>v1.2.2 — parsed RDP rows with structured reasoning (state, IsCurrent flag,
+	/// raw-query-current marker, rejection reason if any). Surfaced for the support bundle.</summary>
+	public List<DiagnosticsRdpParsedRow> RdpClientsParsedRows { get; set; } = new();
+
+	/// <summary>v1.2.2 — the SessionIds the parser elected as the operator-visible active
+	/// RDP sessions according to the validated Current? semantics
+	/// (Active AND rdp-tcp# AND username AND 1 &lt; SessionId &lt; 65536).</summary>
+	public List<int> RdpClientsActiveRdpSessionIds { get; set; } = new();
+}
+
+/// <summary>v1.2.2 — one row of per-id Security backfill diagnostic detail.</summary>
+public sealed class DiagnosticsSecurityBackfillPerId
+{
+	public int EventId { get; set; }
+
+	public DateTime LastRunUtc { get; set; }
+
+	public long ElapsedMs { get; set; }
+
+	public int RecordsRead { get; set; }
+
+	public int Forwarded { get; set; }
+
+	public int Duplicate { get; set; }
+
+	public string Status { get; set; } = string.Empty;
+
+	public string? LastExceptionType { get; set; }
+
+	public string? LastExceptionMessage { get; set; }
+}
+
+/// <summary>v1.2.2 — one row of parsed RDP session detail surfaced in the diagnostic
+/// support bundle. Carries both the raw qwinsta current marker and the validated
+/// operator-visible Current?/ActiveRdp flag so the bundle is self-explanatory.</summary>
+public sealed class DiagnosticsRdpParsedRow
+{
+	public int SessionId { get; set; }
+
+	public string SessionName { get; set; } = string.Empty;
+
+	public string UserName { get; set; } = string.Empty;
+
+	public string State { get; set; } = string.Empty;
+
+	/// <summary>Raw <c>&gt;</c>-marker from qwinsta. Operator-visible Current? must NOT be
+	/// driven by this flag — see <see cref="IsActiveRdp"/>.</summary>
+	public bool IsQueryCurrent { get; set; }
+
+	/// <summary>Validated operator-visible active-RDP flag — Active AND rdp-tcp# AND
+	/// username AND 1 &lt; SessionId &lt; 65536.</summary>
+	public bool IsActiveRdp { get; set; }
+
+	/// <summary>Reason this row was rejected from the active-RDP set, when applicable.</summary>
+	public string? RejectionReason { get; set; }
 }
 
 /// <summary>One row in <see cref="DiagnosticsSnapshotDto.RawEventsByChannel"/>.</summary>

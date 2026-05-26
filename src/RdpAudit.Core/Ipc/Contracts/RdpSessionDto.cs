@@ -106,6 +106,20 @@ public sealed class RdpSessionDto
 	/// null when the session has no resolved IP or no matching facts exist.</summary>
 	[Key(21)]
 	public DateTime? HistoricalLastSeenByIpUtc { get; set; }
+
+	/// <summary>v1.2.2 — raw <c>&gt;</c> marker emitted by qwinsta for the session the query was
+	/// issued from. Under LocalSystem this marker can point at session 0 (services) — never use
+	/// it directly for the operator-visible "Current?" column. <see cref="IsCurrent"/> carries the
+	/// validated operator-visible semantics (Active AND rdp-tcp# AND user AND 1 &lt; SessionId &lt; 65536).</summary>
+	[Key(22)]
+	public bool IsQueryCurrent { get; set; }
+
+	/// <summary>v1.2.2 — validated operator-visible "active RDP" flag. True when this row is the
+	/// session an operator would consider the live remote RDP session — Active state, rdp-tcp#
+	/// station name, non-empty user name, and a SessionId strictly greater than 1 and strictly less
+	/// than 65536. Matches <see cref="IsCurrent"/>; kept as a discoverable name for the UI column.</summary>
+	[Key(23)]
+	public bool IsActiveRdp { get; set; }
 }
 
 /// <summary>List wrapper for <c>ListRdpSessions</c> so the response carries an operation status.</summary>
