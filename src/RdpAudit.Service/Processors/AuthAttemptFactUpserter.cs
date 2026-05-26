@@ -15,6 +15,7 @@ using Microsoft.EntityFrameworkCore;
 using RdpAudit.Core.Data;
 using RdpAudit.Core.Events;
 using RdpAudit.Core.Models;
+using RdpAudit.Core.Util;
 
 namespace RdpAudit.Service.Processors;
 
@@ -110,7 +111,13 @@ public sealed class AuthAttemptFactUpserter
 			return null;
 		}
 
-		string? ip = e.SourceIp;
+		// v1.2.1: re-run normalisation defensively. RawEvent.SourceIp is normally already
+		// canonical (PerEventIpResolver runs IpNormalizer), but the AuthAttemptFact rows are
+		// the single source of truth that the Attack-Statistics / RDP-Clients aggregates
+		// derive from — if a punctuation-wrapped value ever slips through (legacy rows,
+		// SessionCorrelationCache seed paths, tests that pre-date the normalizer), we MUST
+		// reject it here rather than persist it into the aggregate join key.
+		string? ip = IpNormalizer.Normalize(e.SourceIp);
 		bool ipFromCorrelation = e.SourceIpDerived;
 		string enrichmentSource = e.SourceIpDerived ? "LogonIdChain" : "DirectXml";
 		string enrichmentConfidence = e.SourceIpDerived ? "Medium" : (ip is not null ? "High" : "None");

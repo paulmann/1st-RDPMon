@@ -330,13 +330,13 @@ public sealed class AttackStatisticsPage : TabPage
 		});
 		grid.Columns.Add(new DataGridViewTextBoxColumn
 		{
-			HeaderText = "First Seen (UTC)",
+			HeaderText = "First Seen (local)",
 			DataPropertyName = nameof(AttackStatRow.FirstSeenUtcText),
 			Width = 150,
 		});
 		grid.Columns.Add(new DataGridViewTextBoxColumn
 		{
-			HeaderText = "Last Seen (UTC)",
+			HeaderText = "Last Seen (local)",
 			DataPropertyName = nameof(AttackStatRow.LastSeenUtcText),
 			Width = 150,
 		});
@@ -391,14 +391,14 @@ public sealed class AttackStatisticsPage : TabPage
 		});
 		grid.Columns.Add(new DataGridViewTextBoxColumn
 		{
-			HeaderText = "Fact First Seen (UTC)",
+			HeaderText = "Fact First Seen (local)",
 			DataPropertyName = nameof(AttackStatRow.FactFirstSeenUtcText),
 			Width = 160,
 			ToolTipText = "Earliest FirstSeenUtc across all RdpConnectionFacts for this IP.",
 		});
 		grid.Columns.Add(new DataGridViewTextBoxColumn
 		{
-			HeaderText = "Fact Last Seen (UTC)",
+			HeaderText = "Fact Last Seen (local)",
 			DataPropertyName = nameof(AttackStatRow.FactLastSeenUtcText),
 			Width = 160,
 			ToolTipText = "Most recent LastSeenUtc across all RdpConnectionFacts for this IP.",
@@ -890,8 +890,6 @@ public sealed class AttackStatisticsPage : TabPage
 	/// <summary>Grid view-model for one <see cref="AttackStatEntryDto"/> row.</summary>
 	public sealed class AttackStatRow
 	{
-		private const string TimeFormat = "yyyy-MM-dd HH:mm:ss";
-
 		public string Ip { get; init; } = string.Empty;
 
 		public double ThreatScore { get; init; }
@@ -966,8 +964,8 @@ public sealed class AttackStatisticsPage : TabPage
 				TotalAttempts = dto.TotalAttempts,
 				Failed = dto.Failed,
 				Successful = dto.Successful,
-				FirstSeenUtcText = dto.FirstSeenUtc.ToString(TimeFormat, CultureInfo.InvariantCulture),
-				LastSeenUtcText = dto.LastSeenUtc.ToString(TimeFormat, CultureInfo.InvariantCulture),
+				FirstSeenUtcText = LocalTimeFormatter.FormatLocal(dto.FirstSeenUtc),
+				LastSeenUtcText = LocalTimeFormatter.FormatLocal(dto.LastSeenUtc),
 				DurationText = AttackStatRowFormatter.FormatDuration(dto.DurationSeconds),
 				TopLoginsText = AttackStatRowFormatter.FormatTopLogins(dto.Top10AttemptedLogins),
 				LastLoginTypeText = dto.LastLoginType?.ToString(CultureInfo.InvariantCulture) ?? string.Empty,
@@ -975,8 +973,8 @@ public sealed class AttackStatisticsPage : TabPage
 				HasActiveConnectionFact = facts.HasActiveConnectionFact,
 				FactFailedLogons = facts.FactFailedLogons,
 				FactSuccessfulLogons = facts.FactSuccessfulLogons,
-				FactFirstSeenUtcText = facts.FactFirstSeenUtcText,
-				FactLastSeenUtcText = facts.FactLastSeenUtcText,
+				FactFirstSeenUtcText = LocalTimeFormatter.FormatLocal(dto.FactFirstSeenUtc, fallback: string.Empty),
+				FactLastSeenUtcText = LocalTimeFormatter.FormatLocal(dto.FactLastSeenUtc, fallback: string.Empty),
 				Source = dto,
 			};
 		}

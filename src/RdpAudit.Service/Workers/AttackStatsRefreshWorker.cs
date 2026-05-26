@@ -15,6 +15,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using RdpAudit.Core.Data;
 using RdpAudit.Core.Models;
+using RdpAudit.Core.Util;
 
 namespace RdpAudit.Service.Workers;
 
@@ -136,10 +137,15 @@ public sealed class AttackStatsRefreshWorker : BackgroundService
 		List<AttackEventSample> samples = new(facts.Count);
 		foreach (AuthAttemptFact fact in facts)
 		{
+			// v1.2.1: re-normalise at the aggregation boundary as a final defence against
+			// punctuation-wrapped legacy values (".77.37.192.246", " 77.37.192.246",
+			// "::ffff:77.37.192.246") landing under a different aggregation key than the
+			// canonical "77.37.192.246". Invalid values collapse to the unresolved sentinel.
+			string? canonicalIp = IpNormalizer.Normalize(fact.SourceIp);
 			string? sourceIp;
-			if (!string.IsNullOrEmpty(fact.SourceIp))
+			if (!string.IsNullOrEmpty(canonicalIp))
 			{
-				sourceIp = fact.SourceIp;
+				sourceIp = canonicalIp;
 			}
 			else if (fact.Outcome == AuthAttemptOutcome.Failed || fact.Outcome == AuthAttemptOutcome.Denied)
 			{

@@ -195,8 +195,9 @@ public sealed class SecurityBackfillWorker : BackgroundService
 		int totalRead = 0;
 		int totalForwarded = 0;
 		int totalDuplicate = 0;
-		string? lastChannelError = null;
+		string? fatalChannelError = null;
 		bool hadFatalChannelError = false;
+		int nonFatalSkipCount = 0;
 
 		// Read priority ids first; the rest after. Iterating per-id keeps each individual
 		// query tiny — Windows uses an event-id index for these — and isolates timeouts.
@@ -214,11 +215,24 @@ public sealed class SecurityBackfillWorker : BackgroundService
 			totalDuplicate += r.Duplicate;
 			if (r.Error is not null)
 			{
-				lastChannelError = "ID " + id + ": " + r.Error;
-				_metrics.SetChannelStatus(EventCatalog.ChannelSecurity + "::Backfill::" + id, r.ErrorOutcome ?? "QueryFailed");
+				// v1.2.1 — a per-id timeout / QueryFailed must not be treated as a top-level
+				// "Last Security channel error". When 4624/4625/4776 are flowing but 1102 (audit
+				// log cleared) times out because the index is cold, the operator should see
+				// "Forwarded:N" on the channel-level row and a quiet per-id "TimeoutSkipped" line
+				// — not an alarming "Last Security channel error" banner. Only fatal failures
+				// (AccessDenied / ChannelNotFound) bubble up to the top-level error surface.
+				string perIdStatus = r.IsFatalChannelError
+					? (r.ErrorOutcome ?? "QueryFailed")
+					: ClassifyNonFatal(r.Error);
+				_metrics.SetChannelStatus(EventCatalog.ChannelSecurity + "::Backfill::" + id, perIdStatus);
 				if (r.IsFatalChannelError)
 				{
 					hadFatalChannelError = true;
+					fatalChannelError = "ID " + id + ": " + r.Error;
+				}
+				else
+				{
+					nonFatalSkipCount++;
 				}
 			}
 			else
@@ -229,16 +243,17 @@ public sealed class SecurityBackfillWorker : BackgroundService
 			}
 		}
 
-		if (lastChannelError is not null)
+		if (hadFatalChannelError && fatalChannelError is not null)
 		{
-			_metrics.SetLastSecurityChannelError(lastChannelError);
+			_metrics.SetLastSecurityChannelError(fatalChannelError);
 		}
 
 		if (!hadFatalChannelError)
 		{
-			_metrics.SetChannelStatus(
-				EventCatalog.ChannelSecurity + "::Backfill",
-				totalRead == 0 ? "Idle" : "Forwarded:" + totalForwarded);
+			string aggregate = totalRead == 0
+				? (nonFatalSkipCount > 0 ? "Idle (some ids skipped)" : "Idle")
+				: "Forwarded:" + totalForwarded;
+			_metrics.SetChannelStatus(EventCatalog.ChannelSecurity + "::Backfill", aggregate);
 		}
 
 		_metrics.RecordSecurityBackfillRun(startedUtc, totalRead, totalForwarded, totalDuplicate);
@@ -355,6 +370,30 @@ public sealed class SecurityBackfillWorker : BackgroundService
 		// Preserved for compatibility with the v3 contract tests. The actual poll path now
 		// splits per-EventID — see ReadEventsForId.
 		return SecurityAuthQuery.BuildXPath(BackfillEventIds, sinceUtc);
+	}
+
+	/// <summary>
+	/// v1.2.1 — name the specific non-fatal failure mode so the Diagnostic tab shows
+	/// "TimeoutSkipped" / "QueryFailed" per-id instead of a single scary "Last Security channel
+	/// error" banner when 4624/4625/4776 are flowing and 1102 simply timed out. The classifier
+	/// is intentionally narrow: anything not recognised collapses to "QueryFailed".
+	/// </summary>
+	internal static string ClassifyNonFatal(string? errorMessage)
+	{
+		if (string.IsNullOrWhiteSpace(errorMessage))
+		{
+			return "QueryFailed";
+		}
+
+		string msg = errorMessage;
+		if (msg.Contains("timeout", StringComparison.OrdinalIgnoreCase)
+			|| msg.Contains("timed out", StringComparison.OrdinalIgnoreCase)
+			|| msg.Contains("ERROR_TIMEOUT", StringComparison.OrdinalIgnoreCase))
+		{
+			return "TimeoutSkipped";
+		}
+
+		return "QueryFailed";
 	}
 
 	internal bool TryMarkSeen(long recordId)
