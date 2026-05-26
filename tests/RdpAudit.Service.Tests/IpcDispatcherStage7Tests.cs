@@ -147,7 +147,15 @@ public class IpcDispatcherStage7Tests
 		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
 		try
 		{
-			IpcDispatcher dispatcher = CreateDispatcher(factory, new RdpAuditOptions());
+			// Deterministic across hosts: AllowShadow=false forces the controlled-rejection
+			// path on Windows (Refused), while non-Windows hosts still hit the early
+			// IsWindows() gate (Unavailable). Both outcomes satisfy the contract this test
+			// guards — the dispatcher must never return Success when the shadow manager is
+			// not wired in. AllowShadow defaults to true since b2d1c4e, so the test must
+			// override it explicitly rather than rely on the default.
+			RdpAuditOptions opts = new();
+			opts.SessionControl.AllowShadow = false;
+			IpcDispatcher dispatcher = CreateDispatcher(factory, opts);
 			SessionActionRequest req = new() { SessionId = 1, ShadowMode = 0 };
 			IpcResponse response = await dispatcher.DispatchAsync(new IpcRequest
 			{
@@ -158,8 +166,6 @@ public class IpcDispatcherStage7Tests
 			Assert.True(response.Success);
 			SessionActionResult? result = JsonSerializer.Deserialize<SessionActionResult>(response.Payload!, JsonOptions.Default);
 			Assert.NotNull(result);
-			// Non-Windows hosts return Unavailable; Windows hosts where AllowShadow is the default
-			// (false) return Refused. Either is a controlled response — we accept both.
 			Assert.True(result!.Status == IpcResultStatus.Unavailable
 				|| result.Status == IpcResultStatus.Refused);
 		}
