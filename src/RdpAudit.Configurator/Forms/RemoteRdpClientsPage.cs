@@ -384,14 +384,14 @@ public sealed class RemoteRdpClientsPage : TabPage
 		// Populated only when matching RdpConnectionFacts exist for the session's source IP.
 		grid.Columns.Add(new DataGridViewTextBoxColumn
 		{
-			HeaderText = "Hist First Seen (UTC)",
+			HeaderText = "Hist First Seen (local)",
 			DataPropertyName = nameof(SessionRow.HistoricalFirstSeenUtcText),
 			Width = 160,
 			ToolTipText = "Earliest FirstSeenUtc across matching RdpConnectionFacts for this session's source IP.",
 		});
 		grid.Columns.Add(new DataGridViewTextBoxColumn
 		{
-			HeaderText = "Hist Last Seen (UTC)",
+			HeaderText = "Hist Last Seen (local)",
 			DataPropertyName = nameof(SessionRow.HistoricalLastSeenUtcText),
 			Width = 160,
 			ToolTipText = "Latest LastSeenUtc across matching RdpConnectionFacts for this session's source IP.",
@@ -445,14 +445,14 @@ public sealed class RemoteRdpClientsPage : TabPage
 		});
 		grid.Columns.Add(new DataGridViewTextBoxColumn
 		{
-			HeaderText = "IP Hist First Seen (UTC)",
+			HeaderText = "IP Hist First Seen (local)",
 			DataPropertyName = nameof(SessionRow.HistoricalFirstSeenByIpUtcText),
 			Width = 170,
 			ToolTipText = "Earliest FirstSeenUtc across RdpConnectionFacts that share this session's source IP. Blank when the IP is unknown.",
 		});
 		grid.Columns.Add(new DataGridViewTextBoxColumn
 		{
-			HeaderText = "IP Hist Last Seen (UTC)",
+			HeaderText = "IP Hist Last Seen (local)",
 			DataPropertyName = nameof(SessionRow.HistoricalLastSeenByIpUtcText),
 			Width = 170,
 			ToolTipText = "Most recent LastSeenUtc across RdpConnectionFacts that share this session's source IP. Blank when the IP is unknown.",
@@ -1151,16 +1151,19 @@ public sealed class RemoteRdpClientsPage : TabPage
 				IsActive = dto.IsActive,
 				IsDisconnected = dto.IsDisconnected,
 				IsCurrent = dto.IsCurrent,
-				HistoricalFirstSeenUtcText = hist.HistoricalFirstSeenUtcText,
-				HistoricalLastSeenUtcText = hist.HistoricalLastSeenUtcText,
+				// v1.2.1: convert the UTC-keyed historical timestamps to local time for the grid.
+				// The pure projection in Core still emits UTC for clipboard / unit tests; this
+				// page is the WinForms rendering boundary so the operator sees host-local times.
+				HistoricalFirstSeenUtcText = LocalTimeFormatter.FormatLocal(dto.HistoricalFirstSeenUtc, fallback: string.Empty),
+				HistoricalLastSeenUtcText = LocalTimeFormatter.FormatLocal(dto.HistoricalLastSeenUtc, fallback: string.Empty),
 				HistoricalFailedLogons = hist.HistoricalFailedLogons,
 				HistoricalSuccessfulLogons = hist.HistoricalSuccessfulLogons,
 				HistoricalUserNamesAttemptedText = hist.HistoricalUserNamesAttemptedText,
 				HistoricalFailedLogonsByIpText = histByIp.HistoricalFailedLogonsByIpText,
 				HistoricalSuccessfulLogonsByIpText = histByIp.HistoricalSuccessfulLogonsByIpText,
 				HistoricalUsersAttemptedFromIpText = histByIp.HistoricalUsersAttemptedFromIpText,
-				HistoricalFirstSeenByIpUtcText = histByIp.HistoricalFirstSeenByIpUtcText,
-				HistoricalLastSeenByIpUtcText = histByIp.HistoricalLastSeenByIpUtcText,
+				HistoricalFirstSeenByIpUtcText = LocalTimeFormatter.FormatLocal(dto.HistoricalFirstSeenByIpUtc, fallback: string.Empty),
+				HistoricalLastSeenByIpUtcText = LocalTimeFormatter.FormatLocal(dto.HistoricalLastSeenByIpUtc, fallback: string.Empty),
 			};
 		}
 	}

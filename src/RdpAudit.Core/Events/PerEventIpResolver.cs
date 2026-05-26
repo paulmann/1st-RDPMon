@@ -8,8 +8,6 @@
 // Site:    https://Deynekin.com
 
 using System.Globalization;
-using System.Net;
-using System.Net.Sockets;
 using System.Xml;
 using RdpAudit.Core.Util;
 
@@ -118,38 +116,12 @@ public static class PerEventIpResolver
 
 	private static string? Normalize(string? raw)
 	{
-		if (string.IsNullOrWhiteSpace(raw))
-		{
-			return null;
-		}
-
-		string trimmed = raw.Trim();
-		if (IpClassifier.IsLocalSentinel(trimmed))
-		{
-			return null;
-		}
-
-		// Strip an IPv6 zone identifier ("fe80::1%eth0") and an IPv6 port wrapper ("[::1]:443")
-		// before parsing so canonical addresses still round-trip cleanly.
-		string forParse = trimmed;
-		int pct = forParse.IndexOf('%', StringComparison.Ordinal);
-		if (pct > 0)
-		{
-			forParse = forParse[..pct];
-		}
-
-		if (!IPAddress.TryParse(forParse, out IPAddress? parsed))
-		{
-			return null;
-		}
-
-		if (parsed.AddressFamily == AddressFamily.InterNetworkV6 && parsed.IsIPv4MappedToIPv6)
-		{
-			IPAddress v4 = parsed.MapToIPv4();
-			return v4.ToString();
-		}
-
-		return parsed.ToString();
+		// Stage 1.2.1 fix — the previous inline implementation rejected legitimate IPs that were
+		// wrapped in punctuation by stripped Windows payloads (".77.37.192.246",
+		// " 77.37.192.246", "[2001:db8::1]:443"). Defer to IpNormalizer, which is the single
+		// source of truth used at every layer that writes RawEvent.SourceIp / AuthAttemptFact /
+		// Attack-Statistics aggregates.
+		return IpNormalizer.Normalize(raw);
 	}
 
 	private static bool IsTsLsm(string channel) => channel.Equals(TsLsmChannel, StringComparison.OrdinalIgnoreCase);

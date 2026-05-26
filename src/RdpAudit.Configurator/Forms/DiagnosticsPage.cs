@@ -17,6 +17,7 @@ using System.Text;
 using RdpAudit.Configurator.Ipc;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
+using RdpAudit.Core.Util;
 
 namespace RdpAudit.Configurator.Forms;
 
@@ -291,9 +292,9 @@ public static class DiagnosticsReportFormatter
 		sb.AppendFormat(CultureInfo.InvariantCulture, "Events normalized:              {0}", dto.SecurityEventsNormalized).AppendLine();
 		sb.AppendFormat(CultureInfo.InvariantCulture, "Events rejected:                {0}", dto.SecurityEventsRejected).AppendLine();
 		sb.AppendFormat(CultureInfo.InvariantCulture, "Security 4624 / 4625 / 4648:    {0} / {1} / {2}", dto.Security4624Count, dto.Security4625Count, dto.Security4648Count).AppendLine();
-		sb.AppendFormat(CultureInfo.InvariantCulture, "Last Security event (UTC):      {0}", dto.LastSecurityEventUtc?.ToString("O", CultureInfo.InvariantCulture) ?? "(never)").AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Last Security event (local):    {0}", FormatLocalWithUtc(dto.LastSecurityEventUtc)).AppendLine();
 		sb.AppendFormat(CultureInfo.InvariantCulture, "Last Security channel error:    {0}", dto.LastSecurityChannelError ?? "(none)").AppendLine();
-		sb.AppendFormat(CultureInfo.InvariantCulture, "Backfill last run (UTC):        {0}", dto.SecurityBackfillLastRunUtc?.ToString("O", CultureInfo.InvariantCulture) ?? "(never)").AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Backfill last run (local):      {0}", FormatLocalWithUtc(dto.SecurityBackfillLastRunUtc)).AppendLine();
 		sb.AppendFormat(CultureInfo.InvariantCulture, "Backfill read / fwd / dup:      {0} / {1} / {2}", dto.SecurityBackfillRecordsRead, dto.SecurityBackfillRecordsForwarded, dto.SecurityBackfillRecordsDeduped).AppendLine();
 		sb.AppendLine();
 
@@ -302,7 +303,7 @@ public static class DiagnosticsReportFormatter
 		sb.AppendFormat(CultureInfo.InvariantCulture, "Created (failed+succeeded):     {0}", dto.AuthAttemptFactCreated).AppendLine();
 		sb.AppendFormat(CultureInfo.InvariantCulture, "Failed:                         {0}", dto.AuthAttemptFactFailed).AppendLine();
 		sb.AppendFormat(CultureInfo.InvariantCulture, "Succeeded:                      {0}", dto.AuthAttemptFactSucceeded).AppendLine();
-		sb.AppendFormat(CultureInfo.InvariantCulture, "Last created (UTC):             {0}", dto.LastAuthAttemptFactCreatedUtc?.ToString("O", CultureInfo.InvariantCulture) ?? "(never)").AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Last created (local):           {0}", FormatLocalWithUtc(dto.LastAuthAttemptFactCreatedUtc)).AppendLine();
 		sb.AppendLine();
 
 		sb.AppendLine("Database counts (EF Core / Microsoft.Data.Sqlite)");
@@ -372,6 +373,19 @@ public static class DiagnosticsReportFormatter
 
 		return sb.ToString();
 	}
+
+	/// <summary>v1.2.1: render a persisted UTC timestamp as "<local> | <UTC>Z" for the operator
+	/// diagnostics panel. The deep-diagnostic dump keeps the UTC trace alongside the local form so
+	/// support tickets pasted across timezones never lose evidence of the original wall clock.</summary>
+	private static string FormatLocalWithUtc(DateTime? utc)
+	{
+		if (utc is not DateTime v)
+		{
+			return "(never)";
+		}
+
+		return LocalTimeFormatter.FormatBoth(v);
+	}
 }
 
 /// <summary>Pure formatter that turns a <see cref="SecurityAuthProbeDto"/> into a flat,
@@ -421,7 +435,10 @@ public static class SecurityAuthProbeReportFormatter
 			sb.AppendLine("First parsed event");
 			sb.AppendLine("------------------");
 			sb.AppendFormat(CultureInfo.InvariantCulture, "EventId:               {0}", first.EventId).AppendLine();
-			sb.AppendFormat(CultureInfo.InvariantCulture, "Time (UTC):            {0}", first.TimeUtc?.ToString("O", CultureInfo.InvariantCulture) ?? "(unknown)").AppendLine();
+			sb.AppendFormat(
+				CultureInfo.InvariantCulture,
+				"Time:                  {0}",
+				first.TimeUtc is { } t ? LocalTimeFormatter.FormatBoth(t) : "(unknown)").AppendLine();
 			sb.AppendFormat(CultureInfo.InvariantCulture, "User:                  {0}", first.User ?? "(none)").AppendLine();
 			sb.AppendFormat(CultureInfo.InvariantCulture, "Domain:                {0}", first.Domain ?? "(none)").AppendLine();
 			sb.AppendFormat(CultureInfo.InvariantCulture, "Source IP:             {0}", first.Ip ?? "(none)").AppendLine();

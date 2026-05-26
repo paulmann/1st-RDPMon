@@ -1,11 +1,11 @@
 // File:    tests/RdpAudit.Core.Tests/RdpAuditVersionMetadataTests.cs
 // Module:  RdpAudit.Core.Tests
-// Purpose: Pins the current release version to exactly 1.2.0 across every assembly metadata
+// Purpose: Pins the current release version to exactly 1.2.1 across every assembly metadata
 //          surface that publish.ps1 and the running Service surface to the operator: the
 //          AssemblyInformationalVersion (the SemVer driving the Service tab "Runtime version"
 //          line), AssemblyVersion / FileVersion (the four-part identifiers embedded in the
 //          PE file and surfaced by FileVersionInfo), plus a hard guard against the previous
-//          1.0.0 placeholder default leaking back into the build. The 1.2.0 bump corresponds
+//          1.0.0 placeholder default leaking back into the build. The 1.2.1 bump corresponds
 //          to the dedicated Security auth ingestion path and the new RunSecurityAuthProbe
 //          diagnostic IPC command. If the release stream advances, this test must move with
 //          it — never weaken the assertion to "starts with".
@@ -19,13 +19,14 @@ using Xunit;
 
 namespace RdpAudit.Core.Tests;
 
-/// <summary>Locks the released version metadata at exactly 1.2.0 across the Core assembly,
+/// <summary>Locks the released version metadata at exactly 1.2.1 across the Core assembly,
 /// blocking the prior 1.0.0 placeholder default from regressing.</summary>
 public class RdpAuditVersionMetadataTests
 {
-	private const string ExpectedSemVer = "1.2.0";
-	private const string ExpectedFourPart = "1.2.0.0";
+	private const string ExpectedSemVer = "1.2.1";
+	private const string ExpectedFourPart = "1.2.1.0";
 	private const string ForbiddenLegacy = "1.0.0";
+	private const string ForbiddenPrev = "1.2.0";
 
 	[Fact]
 	public void Core_AssemblyInformationalVersion_IsPinnedTo110()
@@ -70,6 +71,10 @@ public class RdpAuditVersionMetadataTests
 		Assert.DoesNotContain(ForbiddenLegacy, informational ?? string.Empty, StringComparison.Ordinal);
 		Assert.DoesNotContain(ForbiddenLegacy, fileVersion ?? string.Empty, StringComparison.Ordinal);
 		Assert.DoesNotContain(ForbiddenLegacy, assemblyVersion ?? string.Empty, StringComparison.Ordinal);
+		// Block the previous release stream from regressing into the binary metadata.
+		Assert.DoesNotContain(ForbiddenPrev, informational ?? string.Empty, StringComparison.Ordinal);
+		Assert.DoesNotContain(ForbiddenPrev, fileVersion ?? string.Empty, StringComparison.Ordinal);
+		Assert.DoesNotContain(ForbiddenPrev, assemblyVersion ?? string.Empty, StringComparison.Ordinal);
 	}
 
 	private static string TrimBuildMetadata(string informational)

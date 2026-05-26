@@ -21,6 +21,7 @@ using RdpAudit.Configurator.Services;
 using RdpAudit.Core.Events;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
+using RdpAudit.Core.Util;
 
 namespace RdpAudit.Configurator.Forms;
 
@@ -97,7 +98,7 @@ public sealed class LiveEventsPage : TabPage
 			MultiSelect = false,
 		};
 		_grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Id", HeaderText = "Id", DataPropertyName = nameof(LiveEventRow.Id), Width = 70 });
-		_grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "TimeUtc", HeaderText = "Time (UTC)", DataPropertyName = nameof(LiveEventRow.TimeUtc), Width = 160 });
+		_grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "TimeUtc", HeaderText = "Time (local)", DataPropertyName = nameof(LiveEventRow.TimeUtc), Width = 160 });
 		_grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "EventId", HeaderText = "Event", DataPropertyName = nameof(LiveEventRow.EventId), Width = 70 });
 		_grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Channel", HeaderText = "Channel", DataPropertyName = nameof(LiveEventRow.Channel), Width = 220 });
 		_grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "UserName", HeaderText = "User", DataPropertyName = nameof(LiveEventRow.UserName), Width = 140 });
@@ -359,12 +360,21 @@ public sealed class LiveEventsPage : TabPage
 		}
 
 		DataGridViewColumn col = _grid.Columns[e.ColumnIndex];
+		LiveEventRow row = _binding[e.RowIndex];
+
+		// v1.2.1: render the persisted UTC timestamp as the operator's local time. The DB still
+		// holds UTC; the column header reads "Time (local)" so the operator is never confused.
+		if (string.Equals(col.Name, "TimeUtc", StringComparison.Ordinal))
+		{
+			e.Value = LocalTimeFormatter.FormatLocal(row.TimeUtc);
+			e.FormattingApplied = true;
+			return;
+		}
+
 		if (!string.Equals(col.Name, "SourceIp", StringComparison.Ordinal))
 		{
 			return;
 		}
-
-		LiveEventRow row = _binding[e.RowIndex];
 
 		// Stage 2: a row Stage-1 marked as SourceIpUnresolved persists failed-logon evidence
 		// without a parseable attacker address. Render "(unresolved)" so operators can spot
@@ -769,7 +779,7 @@ public sealed class LiveEventsPage : TabPage
 		string? raw = columnName switch
 		{
 			"Id" => row.Id.ToString(CultureInfo.InvariantCulture),
-			"TimeUtc" => row.TimeUtc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+			"TimeUtc" => LocalTimeFormatter.FormatLocal(row.TimeUtc),
 			"EventId" => row.EventId.ToString(CultureInfo.InvariantCulture),
 			"Channel" => row.Channel,
 			"UserName" => row.UserName,
