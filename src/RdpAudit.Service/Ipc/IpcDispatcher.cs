@@ -208,6 +208,7 @@ public sealed class IpcDispatcher
 				e.TimeUtc,
 				e.SourceIp,
 				e.SourceIpDerived,
+				e.SourceIpUnresolved,
 				e.UserName,
 				e.Domain,
 				e.LogonId,
@@ -914,18 +915,50 @@ public sealed class IpcDispatcher
 			.ConfigureAwait(false);
 
 		// Window summary counters — computed against RawEvents in the requested window so they line
-		// up with what the per-IP rows describe.
-		long failed = await db.RawEvents.AsNoTracking()
-			.Where(e => e.TimeUtc >= windowStart && e.TimeUtc <= windowEnd && e.EventId == AttackStatsAggregator.EventIdLogonFailure)
-			.LongCountAsync(ct).ConfigureAwait(false);
-		long successful = await db.RawEvents.AsNoTracking()
-			.Where(e => e.TimeUtc >= windowStart && e.TimeUtc <= windowEnd && e.EventId == AttackStatsAggregator.EventIdLogonSuccess)
-			.LongCountAsync(ct).ConfigureAwait(false);
-		long distinctIps = await db.RawEvents.AsNoTracking()
-			.Where(e => e.TimeUtc >= windowStart && e.TimeUtc <= windowEnd && e.SourceIp != null && e.SourceIp != string.Empty)
-			.Select(e => e.SourceIp!)
-			.Distinct()
-			.LongCountAsync(ct).ConfigureAwait(false);
+		// up with what the per-IP rows describe. Stage 2: we no longer hard-code 4624/4625 here —
+		// the same AttackStatsAggregator.Classify(...) used to project per-IP rows decides which
+		// raw events count as Successful / Failed so window totals stay consistent across TS-RCM
+		// 1149 and TS-LSM 21 successes.
+		List<RawEvent> windowEvents = await db.RawEvents.AsNoTracking()
+			.Where(e => e.TimeUtc >= windowStart && e.TimeUtc <= windowEnd)
+			.Select(e => new RawEvent
+			{
+				Id = e.Id,
+				EventId = e.EventId,
+				Channel = e.Channel,
+				TimeUtc = e.TimeUtc,
+				SourceIp = e.SourceIp,
+				SourceIpUnresolved = e.SourceIpUnresolved,
+				LogonType = e.LogonType,
+			})
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		long failed = 0;
+		long successful = 0;
+		HashSet<string> distinctIpSet = new(StringComparer.OrdinalIgnoreCase);
+		foreach (RawEvent ev in windowEvents)
+		{
+			AttackEventOutcome outcome = AttackStatsAggregator.Classify(ev.Channel, ev.EventId, ev.LogonType);
+			switch (outcome)
+			{
+				case AttackEventOutcome.Failed:
+					failed++;
+					break;
+				case AttackEventOutcome.Successful:
+					successful++;
+					break;
+			}
+
+			if (!string.IsNullOrEmpty(ev.SourceIp))
+			{
+				distinctIpSet.Add(ev.SourceIp);
+			}
+			else if (ev.SourceIpUnresolved)
+			{
+				distinctIpSet.Add(AttackStatsAggregator.SentinelUnresolvedIp);
+			}
+		}
+		long distinctIps = distinctIpSet.Count;
 		long alertsRaised = await db.Alerts.AsNoTracking()
 			.Where(a => a.TimeUtc >= windowStart && a.TimeUtc <= windowEnd)
 			.LongCountAsync(ct).ConfigureAwait(false);
@@ -1364,6 +1397,145 @@ public sealed class IpcDispatcher
 			if (attemptedByUser.TryGetValue(key, out string? attempted) && !string.IsNullOrEmpty(attempted))
 			{
 				session.HistoricalUserNamesAttempted = attempted;
+			}
+		}
+
+		// Stage 2: per-IP historical aggregation. Populates HistoricalFailedLogonsByIp /
+		// HistoricalSuccessfulLogonsByIp / HistoricalUsersAttemptedFromIp / HistoricalFirstSeenByIpUtc /
+		// HistoricalLastSeenByIpUtc from RdpConnectionFacts keyed on the session's ClientAddress.
+		// Sessions without a resolved IP keep these fields null (operator sees blank, not 0).
+		await EnrichSessionsHistoricalByIpAsync(db, sessions, ct).ConfigureAwait(false);
+	}
+
+	/// <summary>Stage 2 helper: fills per-IP historical context on each session from RdpConnectionFacts.
+	/// Populates the *ByIp fields only — never touches the user-keyed historical columns. Sessions
+	/// whose <c>ClientAddress</c> is empty or unparseable are skipped, leaving the new fields null so
+	/// the UI can distinguish unknown IP from a real zero.</summary>
+	internal static async Task EnrichSessionsHistoricalByIpAsync(
+		AuditDbContext db,
+		IList<RdpSessionDto> sessions,
+		CancellationToken ct)
+	{
+		if (sessions.Count == 0)
+		{
+			return;
+		}
+
+		HashSet<string> ips = new(StringComparer.Ordinal);
+		foreach (RdpSessionDto s in sessions)
+		{
+			if (!string.IsNullOrEmpty(s.ClientAddress))
+			{
+				ips.Add(s.ClientAddress.Trim());
+			}
+		}
+
+		if (ips.Count == 0)
+		{
+			return;
+		}
+
+		var grouped = await db.RdpConnectionFacts.AsNoTracking()
+			.Where(r => ips.Contains(r.Ip))
+			.GroupBy(r => r.Ip)
+			.Select(g => new
+			{
+				Ip = g.Key,
+				FirstSeen = g.Min(r => r.FirstSeenUtc),
+				LastSeen = g.Max(r => r.LastSeenUtc),
+				Failed = g.Sum(r => (long)r.FailedLogons),
+				Successful = g.Sum(r => (long)r.SuccessfulLogons),
+			})
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		Dictionary<string, (DateTime First, DateTime Last, long Failed, long Successful)> byIp =
+			new(StringComparer.Ordinal);
+		foreach (var g in grouped)
+		{
+			byIp[g.Ip] = (g.FirstSeen, g.LastSeen, g.Failed, g.Successful);
+		}
+
+		// Distinct attempted usernames per IP (deduplicated, bounded). Order by LastSeenUtc desc so
+		// the most recently attempted usernames come first.
+		List<RdpConnectionFact> userFacts = await db.RdpConnectionFacts.AsNoTracking()
+			.Where(r => ips.Contains(r.Ip) && r.UserName != null && r.UserName != string.Empty)
+			.OrderByDescending(r => r.LastSeenUtc)
+			.Select(r => new RdpConnectionFact
+			{
+				Ip = r.Ip,
+				UserName = r.UserName,
+			})
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		Dictionary<string, List<string>> distinctUsersByIp = new(StringComparer.Ordinal);
+		const int maxUsersPerIp = 20;
+		foreach (RdpConnectionFact r in userFacts)
+		{
+			if (string.IsNullOrEmpty(r.UserName))
+			{
+				continue;
+			}
+
+			if (!distinctUsersByIp.TryGetValue(r.Ip, out List<string>? list))
+			{
+				list = new List<string>();
+				distinctUsersByIp[r.Ip] = list;
+			}
+
+			if (list.Count >= maxUsersPerIp)
+			{
+				continue;
+			}
+
+			string trimmed = r.UserName.Trim();
+			if (trimmed.Length == 0)
+			{
+				continue;
+			}
+
+			bool exists = false;
+			foreach (string u in list)
+			{
+				if (string.Equals(u, trimmed, StringComparison.OrdinalIgnoreCase))
+				{
+					exists = true;
+					break;
+				}
+			}
+
+			if (!exists)
+			{
+				list.Add(trimmed);
+			}
+		}
+
+		foreach (RdpSessionDto session in sessions)
+		{
+			if (string.IsNullOrEmpty(session.ClientAddress))
+			{
+				continue;
+			}
+
+			string ipKey = session.ClientAddress.Trim();
+			if (byIp.TryGetValue(ipKey, out var agg))
+			{
+				session.HistoricalFirstSeenByIpUtc = agg.First;
+				session.HistoricalLastSeenByIpUtc = agg.Last;
+				session.HistoricalFailedLogonsByIp = agg.Failed;
+				session.HistoricalSuccessfulLogonsByIp = agg.Successful;
+			}
+			else
+			{
+				// No fact rows yet for this IP — still populate counters with 0 so operators can
+				// distinguish "we know the IP, just no history" from "no IP at all" (which leaves
+				// the fields null and shows blank).
+				session.HistoricalFailedLogonsByIp = 0;
+				session.HistoricalSuccessfulLogonsByIp = 0;
+			}
+
+			if (distinctUsersByIp.TryGetValue(ipKey, out List<string>? users) && users.Count > 0)
+			{
+				session.HistoricalUsersAttemptedFromIp = string.Join(", ", users);
 			}
 		}
 	}

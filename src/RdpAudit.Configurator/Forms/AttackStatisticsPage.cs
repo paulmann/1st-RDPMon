@@ -190,6 +190,7 @@ public sealed class AttackStatisticsPage : TabPage
 		_grid.DataSource = _binding;
 		_grid.RowPrePaint += OnRowPrePaint;
 		_grid.CellMouseDown += OnCellMouseDown;
+		_grid.CellFormatting += OnCellFormatting;
 
 		// --- Context menu ----------------------------------------------------------------------
 		_menuCopyDetails = new ToolStripMenuItem("Copy Row Details", null, (_, _) => OnCopyDetails());
@@ -542,14 +543,44 @@ public sealed class AttackStatisticsPage : TabPage
 		}
 
 		AttackStatRow row = _binding[e.RowIndex];
-		Color color = row.ThreatLevel switch
-		{
-			AttackThreatLevel.Red => RowColorRed,
-			AttackThreatLevel.Yellow => RowColorYellow,
-			_ => RowColorGreen,
-		};
+
+		// Stage 2: the unresolved-IP sentinel row always renders with the warning band so the
+		// operator instantly recognises it as "brute-force pressure without attribution".
+		Color color = row.IsUnresolvedSentinel
+			? RowColorRed
+			: row.ThreatLevel switch
+			{
+				AttackThreatLevel.Red => RowColorRed,
+				AttackThreatLevel.Yellow => RowColorYellow,
+				_ => RowColorGreen,
+			};
 
 		_grid.Rows[e.RowIndex].DefaultCellStyle.BackColor = color;
+	}
+
+	private void OnCellFormatting(object? sender, DataGridViewCellFormattingEventArgs e)
+	{
+		if (e.RowIndex < 0 || e.RowIndex >= _binding.Count || e.ColumnIndex < 0)
+		{
+			return;
+		}
+
+		AttackStatRow row = _binding[e.RowIndex];
+		if (!row.IsUnresolvedSentinel)
+		{
+			return;
+		}
+
+		DataGridViewColumn col = _grid.Columns[e.ColumnIndex];
+		if (string.Equals(col.DataPropertyName, nameof(AttackStatRow.Ip), StringComparison.Ordinal))
+		{
+			e.Value = AttackStatsAggregator.SentinelDisplayLabel;
+			e.FormattingApplied = true;
+			DataGridViewCell cell = _grid.Rows[e.RowIndex].Cells[e.ColumnIndex];
+			cell.ToolTipText =
+				"Source IP was absent in the Windows Security event (often NLA / pre-auth). "
+				+ "See Live Events filtered by 4625 for the underlying rows.";
+		}
 	}
 
 	// ---------------------------------------------------------------------------------------------
@@ -573,11 +604,12 @@ public sealed class AttackStatisticsPage : TabPage
 	private void OnMenuOpening(object? sender, CancelEventArgs e)
 	{
 		bool hasRow = _menuRow is not null;
-		bool hasValidIp = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip) && AddressListFilter.IsValidIp(_menuRow.Ip);
+		bool isSentinel = hasRow && _menuRow!.IsUnresolvedSentinel;
+		bool hasValidIp = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip) && AddressListFilter.IsValidIp(_menuRow.Ip) && !isSentinel;
 		_menuCopyDetails.Enabled = hasRow;
-		_menuCopyIp.Enabled = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip);
-		_menuBlockIp.Enabled = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip) && !_menuRow.IsBlocked;
-		_menuWhitelistIp.Enabled = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip);
+		_menuCopyIp.Enabled = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip) && !isSentinel;
+		_menuBlockIp.Enabled = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip) && !_menuRow!.IsBlocked && !isSentinel;
+		_menuWhitelistIp.Enabled = hasRow && !string.IsNullOrEmpty(_menuRow!.Ip) && !isSentinel;
 		_menuExportEvents.Enabled = hasValidIp;
 		_menuExportFacts.Enabled = hasValidIp;
 	}
@@ -856,6 +888,10 @@ public sealed class AttackStatisticsPage : TabPage
 
 		public string IsBlockedText => IsBlocked ? "yes" : "no";
 
+		/// <summary>True when the IP equals <see cref="AttackStatsAggregator.SentinelUnresolvedIp"/>.
+		/// The grid renders this row with the warning band and a friendly label instead of "0.0.0.0".</summary>
+		public bool IsUnresolvedSentinel { get; init; }
+
 		// --- Stage IP-E fact-derived columns (additive, never overrides AttackStat columns above). ---
 
 		/// <summary>True when at least one matching <c>RdpConnectionFact</c> currently represents an active session.</summary>
@@ -887,6 +923,7 @@ public sealed class AttackStatisticsPage : TabPage
 			return new AttackStatRow
 			{
 				Ip = dto.Ip,
+				IsUnresolvedSentinel = AttackStatsAggregator.IsSentinelUnresolvedIp(dto.Ip),
 				ThreatScore = dto.ThreatScore,
 				ThreatLevel = dto.ThreatLevel,
 				ThreatDisplay = string.Format(

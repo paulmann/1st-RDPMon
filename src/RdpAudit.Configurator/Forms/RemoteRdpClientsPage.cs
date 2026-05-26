@@ -410,6 +410,46 @@ public sealed class RemoteRdpClientsPage : TabPage
 			Width = 200,
 			ToolTipText = "Comma-separated, deduplicated usernames attempted from this IP across matching facts.",
 		});
+
+		// --- Stage 2 per-IP historical columns. These augment (not replace) the user-keyed Hist
+		// columns above so operators can compare per-user and per-IP brute-force pressure side by side.
+		// Cells render blank (not 0) when the session has no resolved IP — distinguishing unknown
+		// from a real zero.
+		grid.Columns.Add(new DataGridViewTextBoxColumn
+		{
+			HeaderText = "IP Hist Failed",
+			DataPropertyName = nameof(SessionRow.HistoricalFailedLogonsByIpText),
+			Width = 100,
+			ToolTipText = "Sum of failed logons across RdpConnectionFacts that share this session's source IP. Blank when the IP is unknown.",
+		});
+		grid.Columns.Add(new DataGridViewTextBoxColumn
+		{
+			HeaderText = "IP Hist Success",
+			DataPropertyName = nameof(SessionRow.HistoricalSuccessfulLogonsByIpText),
+			Width = 100,
+			ToolTipText = "Sum of successful logons across RdpConnectionFacts that share this session's source IP. Blank when the IP is unknown.",
+		});
+		grid.Columns.Add(new DataGridViewTextBoxColumn
+		{
+			HeaderText = "IP Hist Users",
+			DataPropertyName = nameof(SessionRow.HistoricalUsersAttemptedFromIpText),
+			Width = 220,
+			ToolTipText = "Comma-separated, deduplicated usernames attempted from this IP across all matching facts. Blank when the IP is unknown.",
+		});
+		grid.Columns.Add(new DataGridViewTextBoxColumn
+		{
+			HeaderText = "IP Hist First Seen (UTC)",
+			DataPropertyName = nameof(SessionRow.HistoricalFirstSeenByIpUtcText),
+			Width = 170,
+			ToolTipText = "Earliest FirstSeenUtc across RdpConnectionFacts that share this session's source IP. Blank when the IP is unknown.",
+		});
+		grid.Columns.Add(new DataGridViewTextBoxColumn
+		{
+			HeaderText = "IP Hist Last Seen (UTC)",
+			DataPropertyName = nameof(SessionRow.HistoricalLastSeenByIpUtcText),
+			Width = 170,
+			ToolTipText = "Most recent LastSeenUtc across RdpConnectionFacts that share this session's source IP. Blank when the IP is unknown.",
+		});
 	}
 
 	private static void ConfigureShadowGrid(DataGridView grid)
@@ -1046,10 +1086,28 @@ public sealed class RemoteRdpClientsPage : TabPage
 		/// <summary>Comma-separated deduplicated usernames attempted from this IP across matching facts.</summary>
 		public string HistoricalUserNamesAttemptedText { get; init; } = string.Empty;
 
+		// --- Stage 2 per-IP historical fields. Text-typed so blank is distinguishable from "0".
+
+		/// <summary>Per-IP sum of failed logons; blank when the session has no resolved IP.</summary>
+		public string HistoricalFailedLogonsByIpText { get; init; } = string.Empty;
+
+		/// <summary>Per-IP sum of successful logons; blank when the session has no resolved IP.</summary>
+		public string HistoricalSuccessfulLogonsByIpText { get; init; } = string.Empty;
+
+		/// <summary>Comma-separated deduplicated usernames attempted from this IP; blank when the session has no resolved IP.</summary>
+		public string HistoricalUsersAttemptedFromIpText { get; init; } = string.Empty;
+
+		/// <summary>Earliest fact FirstSeenUtc across this IP; blank when the session has no resolved IP.</summary>
+		public string HistoricalFirstSeenByIpUtcText { get; init; } = string.Empty;
+
+		/// <summary>Latest fact LastSeenUtc across this IP; blank when the session has no resolved IP.</summary>
+		public string HistoricalLastSeenByIpUtcText { get; init; } = string.Empty;
+
 		public static SessionRow From(RdpSessionDto dto)
 		{
 			ArgumentNullException.ThrowIfNull(dto);
 			RdpSessionHistoricalDisplay hist = ConnectionFactRowProjection.FromRdpSession(dto);
+			RdpSessionHistoricalByIpDisplay histByIp = ConnectionFactRowProjection.FromRdpSessionByIp(dto);
 			return new SessionRow
 			{
 				SessionId = dto.SessionId,
@@ -1066,6 +1124,11 @@ public sealed class RemoteRdpClientsPage : TabPage
 				HistoricalFailedLogons = hist.HistoricalFailedLogons,
 				HistoricalSuccessfulLogons = hist.HistoricalSuccessfulLogons,
 				HistoricalUserNamesAttemptedText = hist.HistoricalUserNamesAttemptedText,
+				HistoricalFailedLogonsByIpText = histByIp.HistoricalFailedLogonsByIpText,
+				HistoricalSuccessfulLogonsByIpText = histByIp.HistoricalSuccessfulLogonsByIpText,
+				HistoricalUsersAttemptedFromIpText = histByIp.HistoricalUsersAttemptedFromIpText,
+				HistoricalFirstSeenByIpUtcText = histByIp.HistoricalFirstSeenByIpUtcText,
+				HistoricalLastSeenByIpUtcText = histByIp.HistoricalLastSeenByIpUtcText,
 			};
 		}
 	}

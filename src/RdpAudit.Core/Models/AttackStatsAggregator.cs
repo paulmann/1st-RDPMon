@@ -42,9 +42,24 @@ public static class AttackStatsAggregator
 	/// <summary>Security channel logon-failure event id (Windows Security log).</summary>
 	public const int EventIdLogonFailure = 4625;
 
+	/// <summary>
+	/// Sentinel IP used when Stage 1 flagged the event as <c>SourceIpUnresolved</c>. The address
+	/// is reserved (IANA "this host on this network") and is unambiguous: real attacker traffic
+	/// never legitimately carries 0.0.0.0 as source. Operators see this row rendered as
+	/// <see cref="SentinelDisplayLabel"/> in the Attack Statistics tab.
+	/// </summary>
+	public const string SentinelUnresolvedIp = "0.0.0.0";
+
+	/// <summary>Operator-facing label for the unresolved-IP sentinel row.</summary>
+	public const string SentinelDisplayLabel = "(unresolved)";
+
 	internal const string SecurityChannel = "Security";
 	internal const string TsLsmChannel = "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational";
 	internal const string TsRcmChannel = "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational";
+
+	/// <summary>Returns true when the supplied IP equals the unresolved-attacker sentinel.</summary>
+	public static bool IsSentinelUnresolvedIp(string? ip) =>
+		!string.IsNullOrEmpty(ip) && string.Equals(ip, SentinelUnresolvedIp, StringComparison.Ordinal);
 
 	/// <summary>
 	/// Classifies an event into <see cref="AttackEventOutcome"/>. Mapping mirrors the same set of

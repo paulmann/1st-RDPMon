@@ -115,8 +115,15 @@ public sealed class AttackStatsRefreshWorker : BackgroundService
 
 		// Pull bounded slices. Indices on RawEvents.TimeUtc / SourceIp keep this query-index-friendly
 		// even at multi-million row scale; the Take ceiling protects pathological cases.
+		//
+		// Stage 2: include rows with SourceIpUnresolved == true. Stage 1 persists failed-logon
+		// evidence even when Windows omits the source IP (NLA / pre-auth path); those rows
+		// previously vanished from the dashboard because the filter excluded null/empty SourceIp.
+		// We surface them via the sentinel IP so operators can see brute-force pressure without
+		// false attribution to a specific attacker address.
 		List<RawEvent> events = await db.RawEvents.AsNoTracking()
-			.Where(e => e.TimeUtc >= sinceUtc && e.SourceIp != null && e.SourceIp != string.Empty)
+			.Where(e => e.TimeUtc >= sinceUtc
+				&& ((e.SourceIp != null && e.SourceIp != string.Empty) || e.SourceIpUnresolved))
 			.OrderBy(e => e.Id)
 			.Take(MaxRawEventsPerPass)
 			.ToListAsync(ct)
@@ -129,13 +136,42 @@ public sealed class AttackStatsRefreshWorker : BackgroundService
 			.ConfigureAwait(false))
 			.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-		IEnumerable<AttackEventSample> samples = events.Select(e => new AttackEventSample(
-			e.SourceIp,
-			e.EventId,
-			e.TimeUtc,
-			e.UserName,
-			e.LogonType,
-			e.Channel));
+		int unresolvedCount = 0;
+		List<AttackEventSample> samples = new(events.Count);
+		foreach (RawEvent e in events)
+		{
+			string? sourceIp;
+			if (!string.IsNullOrEmpty(e.SourceIp))
+			{
+				sourceIp = e.SourceIp;
+			}
+			else if (e.SourceIpUnresolved)
+			{
+				sourceIp = AttackStatsAggregator.SentinelUnresolvedIp;
+				unresolvedCount++;
+			}
+			else
+			{
+				continue;
+			}
+
+			samples.Add(new AttackEventSample(
+				sourceIp,
+				e.EventId,
+				e.TimeUtc,
+				e.UserName,
+				e.LogonType,
+				e.Channel));
+		}
+
+		if (unresolvedCount > 0)
+		{
+			_logger.LogInformation(
+				"{Worker} included {Count} unresolved-IP events under sentinel {Sentinel}",
+				nameof(AttackStatsRefreshWorker),
+				unresolvedCount,
+				AttackStatsAggregator.SentinelUnresolvedIp);
+		}
 
 		IReadOnlyList<AttackStat> projected = AttackStatsAggregator.Aggregate(samples, blockedIps, nowUtc);
 
