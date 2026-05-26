@@ -1,11 +1,15 @@
 // File:    src/RdpAudit.Configurator/Forms/ServicePage.cs
 // Module:  RdpAudit.Configurator.Forms
 // Purpose: Service status panel, lifecycle controls, and recent alerts grid.
+//          Stage 2: SCM/Win32_Service is authoritative for installed/running state, never
+//          a process-name scan or the distribution folder. IPC reports runtime telemetry
+//          independently. Installed binary state is compared against the distribution
+//          publish folder by length, SHA-256, and version, and an explicit
+//          "Update installed files" button is offered when the two disagree.
 //          Service install computes the absolute service binary path, never literal %ProgramFiles%.
 //          All Process.Start + WaitForExit calls are wrapped in Task.Run so the UI thread is free.
-//          Every lifecycle button (Start / Stop / Restart / Uninstall / Install) reports a
-//          consistent ServiceOperationResult including the action, per-step outcomes, the final
-//          service state, the hosting PID, the executable path, and a UTC timestamp.
+//          Every lifecycle button (Start / Stop / Restart / Uninstall / Install / Update)
+//          reports a consistent ServiceOperationResult and refreshes the displayed state.
 // Extends: System.Windows.Forms.TabPage
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
@@ -34,18 +38,22 @@ public sealed class ServicePage : TabPage
 	private readonly IpcClient _ipc;
 	private readonly Label _status;
 	private readonly Label _process;
+	private readonly Label _stateLabel;
+	private readonly Label _diagnostic;
 	private readonly TextBox _layoutPanel;
 	private readonly DataGridView _alertsGrid;
 	private readonly System.Windows.Forms.Timer _timer;
 	private readonly ServiceControlRunner _runner = new(ServiceName, ServiceDisplayName);
+	private readonly WmiServiceInfoReader _scmReader = new(ServiceName);
 
-	// FIX-3: keep lifecycle buttons as fields so RefreshAsync can disable/enable each one based
-	// on whether the Windows service is currently installed and running.
+	// Stage 2: lifecycle buttons kept as fields so RefreshAsync can drive enablement from
+	// the authoritative SCM snapshot plus the installed/distribution binary comparison.
 	private readonly Button _btnInstall;
 	private readonly Button _btnUninstall;
 	private readonly Button _btnStart;
 	private readonly Button _btnStop;
 	private readonly Button _btnRestart;
+	private readonly Button _btnUpdate;
 
 	private readonly ContextMenuStrip _alertsMenu;
 	private readonly ToolStripMenuItem _alertsMenuOpenRipeStat;
@@ -62,6 +70,7 @@ public sealed class ServicePage : TabPage
 		_btnStart = new Button { Text = "Start", Width = 80 };
 		_btnStop = new Button { Text = "Stop", Width = 80 };
 		_btnRestart = new Button { Text = "Restart", Width = 80 };
+		_btnUpdate = new Button { Text = "Update installed files", Width = 170 };
 		Button backup = new() { Text = "Backup Settings", Width = 140 };
 		Button restore = new() { Text = "Restore Registry/Policy", Width = 180 };
 
@@ -70,10 +79,14 @@ public sealed class ServicePage : TabPage
 		_btnStart.Click += async (_, _) => await RunLifecycleAsync(_btnStart, _runner.StartAsync, "RdpAudit Start").ConfigureAwait(true);
 		_btnStop.Click += async (_, _) => await RunLifecycleAsync(_btnStop, _runner.StopAsync, "RdpAudit Stop").ConfigureAwait(true);
 		_btnRestart.Click += async (_, _) => await RunLifecycleAsync(_btnRestart, _runner.RestartAsync, "RdpAudit Restart").ConfigureAwait(true);
+		_btnUpdate.Click += async (_, _) => await UpdateInstalledFilesAsync().ConfigureAwait(true);
 		backup.Click += async (_, _) => await BackupAsync().ConfigureAwait(true);
 		restore.Click += async (_, _) => await RestoreAsync().ConfigureAwait(true);
 
-		buttons.Controls.AddRange(new Control[] { _btnInstall, _btnUninstall, _btnStart, _btnStop, _btnRestart, backup, restore });
+		buttons.Controls.AddRange(new Control[]
+		{
+			_btnInstall, _btnUninstall, _btnStart, _btnStop, _btnRestart, _btnUpdate, backup, restore,
+		});
 
 		_process = new Label
 		{
@@ -85,11 +98,32 @@ public sealed class ServicePage : TabPage
 			Padding = new Padding(4, 2, 4, 2),
 		};
 
+		_stateLabel = new Label
+		{
+			Dock = DockStyle.Top,
+			Height = 22,
+			Text = "State: probing…",
+			AutoSize = false,
+			TextAlign = ContentAlignment.MiddleLeft,
+			Padding = new Padding(4, 2, 4, 2),
+		};
+
+		_diagnostic = new Label
+		{
+			Dock = DockStyle.Top,
+			Height = 36,
+			Text = string.Empty,
+			AutoSize = false,
+			TextAlign = ContentAlignment.MiddleLeft,
+			Padding = new Padding(4, 2, 4, 2),
+			ForeColor = Color.FromArgb(140, 60, 0),
+		};
+
 		_status = new Label { Dock = DockStyle.Top, Height = 80, Text = "Connecting…", AutoSize = false };
 		_layoutPanel = new TextBox
 		{
 			Dock = DockStyle.Top,
-			Height = 160,
+			Height = 180,
 			Multiline = true,
 			ReadOnly = true,
 			ScrollBars = ScrollBars.Vertical,
@@ -126,6 +160,8 @@ public sealed class ServicePage : TabPage
 
 		Controls.Add(_alertsGrid);
 		Controls.Add(_layoutPanel);
+		Controls.Add(_diagnostic);
+		Controls.Add(_stateLabel);
 		Controls.Add(_process);
 		Controls.Add(_status);
 		Controls.Add(buttons);
@@ -164,75 +200,57 @@ public sealed class ServicePage : TabPage
 
 	private async Task RefreshAsync()
 	{
-		ServiceStatus? status = await _ipc.SendAsync<ServiceStatus>(IpcCommand.GetStatus).ConfigureAwait(true);
-		string label = status is null
-			? "Service: not reachable (start the service or run as administrator)"
-			: $"Version: {status.Version}\r\nUptime: {status.Uptime}\r\nEvents captured: {status.EventsCaptured} (dropped {status.EventsDropped})\r\nAlerts raised: {status.AlertsRaised}";
-
+		// IPC telemetry runs first so the timer can keep "Events captured / Alerts raised"
+		// fresh even when the user's WMI principal is throttled.
+		ServiceStatus? ipcStatus = await _ipc.SendAsync<ServiceStatus>(IpcCommand.GetStatus).ConfigureAwait(true);
 		List<Alert>? alerts = await _ipc.SendAsync<List<Alert>>(IpcCommand.GetRecentAlerts).ConfigureAwait(true);
 		ServiceLayoutInfo layout = await Task.Run(() => ServiceLayout.Discover(AppContext.BaseDirectory)).ConfigureAwait(true);
-		ServiceProcessInfo processInfo = await _runner.QueryAsync().ConfigureAwait(true);
+		ServiceInstallationInfo scm = await _scmReader.ReadAsync().ConfigureAwait(true);
 
-		_status.Text = label;
-		_process.Text = FormatProcessInfo(processInfo);
-		_layoutPanel.Text = FormatLayout(layout);
+		string? installedExePath = scm.ResolveExecutablePath()
+			?? Path.Combine(layout.InstallDirectory, ServiceLayout.ServiceExeName);
+		string distributionExePath = layout.ExpectedServiceExecutable;
+
+		BinaryFingerprint installedFingerprint = await Task.Run(() => BinaryFingerprintReader.Read(installedExePath)).ConfigureAwait(true);
+		BinaryFingerprint distributionFingerprint = await Task.Run(() => BinaryFingerprintReader.Read(distributionExePath)).ConfigureAwait(true);
+
+		ServiceStateView view = ServiceStateViewBuilder.Build(
+			scm: scm,
+			installed: installedFingerprint,
+			distribution: distributionFingerprint,
+			runtimeVersion: ipcStatus?.Version,
+			ipcConnected: ipcStatus is not null);
+
+		_status.Text = ipcStatus is null
+			? "Service: not reachable (IPC GetStatus failed — start the service or run as administrator)"
+			: $"Version (runtime): {ipcStatus.Version}\r\nUptime: {ipcStatus.Uptime}\r\nEvents captured: {ipcStatus.EventsCaptured} (dropped {ipcStatus.EventsDropped})\r\nAlerts raised: {ipcStatus.AlertsRaised}";
+		_process.Text = view.ProcessLine;
+		_stateLabel.Text = view.InstallStateLine;
+		_diagnostic.Text = view.DiagnosticLine;
+		_diagnostic.Visible = !string.IsNullOrEmpty(view.DiagnosticLine);
+		_layoutPanel.Text = FormatLayout(layout, view);
 		_alertsGrid.DataSource = alerts ?? new List<Alert>();
-		UpdateButtonStates(processInfo);
+		UpdateButtonStates(view, layout);
 	}
 
-	/// <summary>Stage 4: reflect the live service state in the button row using the numeric
-	/// SCM state code (1=STOPPED, 4=RUNNING, …) rather than the localized state name. On
-	/// non-English Windows the textual state token is translated (e.g. "РАБОТАЕТ" instead of
-	/// "RUNNING"), so a string comparison against "RUNNING" silently fails and Start stays
-	/// enabled while the service is already running. The numeric code is locale-stable.
-	/// The mapping itself lives in <see cref="ServiceButtonStateModel"/> so it can be unit tested.</summary>
-	private void UpdateButtonStates(ServiceProcessInfo info)
+	/// <summary>Stage 2: button enablement derives from the authoritative SCM snapshot plus
+	/// the installed/distribution binary comparison via <see cref="ServiceButtonStateModel"/>.
+	/// Start/Stop no longer rely on locale-specific state strings, and the Update button is
+	/// enabled only when the publish folder offers content that differs from the installed
+	/// binary.</summary>
+	private void UpdateButtonStates(ServiceStateView view, ServiceLayoutInfo layout)
 	{
-		bool running = info.Installed
-			&& info.ProcessId is not null
-			&& info.FinalStateCode == ServiceStateCode.Running;
-		ServiceButtonState state = ServiceButtonStateModel.Compute(info.Installed, running);
+		bool distributionUsable = layout.DistributionExists && layout.ServiceExecutableExists;
+		ServiceButtonState state = ServiceButtonStateModel.Compute(view.Scm, view.BinaryState, distributionUsable);
 		_btnInstall.Enabled = state.Install;
 		_btnUninstall.Enabled = state.Uninstall;
 		_btnStart.Enabled = state.Start;
 		_btnStop.Enabled = state.Stop;
 		_btnRestart.Enabled = state.Restart;
+		_btnUpdate.Enabled = state.Update;
 	}
 
-	private static string FormatProcessInfo(ServiceProcessInfo info)
-	{
-		if (!info.Installed)
-		{
-			return "Process: Not installed";
-		}
-
-		if (info.ProcessId is null)
-		{
-			return $"Process: Not running (state: {info.FinalState})";
-		}
-
-		StringBuilder sb = new();
-		sb.Append("Process: PID ").Append(info.ProcessId.Value.ToString(CultureInfo.InvariantCulture));
-		sb.Append("  state ").Append(info.FinalState);
-		if (info.StartTimeUtc is DateTime started)
-		{
-			sb.Append("  started ").Append(started.ToString("yyyy-MM-dd HH:mm:ss 'UTC'", CultureInfo.InvariantCulture));
-		}
-
-		if (!string.IsNullOrEmpty(info.ExecutablePath))
-		{
-			sb.Append("  exe ").Append(info.ExecutablePath);
-		}
-
-		if (!string.IsNullOrEmpty(info.Detail))
-		{
-			sb.Append("  (").Append(info.Detail).Append(')');
-		}
-
-		return sb.ToString();
-	}
-
-	private static string FormatLayout(ServiceLayoutInfo layout)
+	private static string FormatLayout(ServiceLayoutInfo layout, ServiceStateView view)
 	{
 		string source = layout.DistributionDirectory ?? ServiceLayout.ResolveSiblingDistribution(layout.ConfiguratorDirectory);
 		string distLine = layout.DistributionExists
@@ -241,21 +259,39 @@ public sealed class ServicePage : TabPage
 				: $"present but missing executable {layout.ExpectedServiceExecutable}")
 			: "NOT FOUND — sc install will refuse to run";
 
+		string installedSrc = view.Scm.ResolveExecutablePath() ?? "(not registered with SCM)";
+		string installedVer = view.Installed.FileVersion ?? "(unknown)";
+		string installedHash = view.Installed.Sha256 is { Length: > 16 } h ? h[..16] : (view.Installed.Sha256 ?? "(unknown)");
+		string distVer = view.Distribution.FileVersion ?? "(unknown)";
+		string distHash = view.Distribution.Sha256 is { Length: > 16 } h2 ? h2[..16] : (view.Distribution.Sha256 ?? "(unknown)");
+		string runtimeVer = view.RuntimeVersion ?? "(IPC unreachable)";
+
 		return string.Format(CultureInfo.InvariantCulture,
 			"Install destination: {0}\r\n"
-			+ "Database path:       {1}\r\n"
-			+ "appsettings.json:    {2}\r\n"
+			+ "  ImagePath (SCM):    {1}\r\n"
+			+ "  Installed version:  {2}  sha256(16) {3}\r\n"
+			+ "Database path:       {4}\r\n"
+			+ "appsettings.json:    {5}\r\n"
 			+ "\r\n"
 			+ "Service distribution source\r\n"
-			+ "  Configurator dir: {3}\r\n"
-			+ "  Distribution dir: {4}\r\n"
-			+ "  Status:           {5}",
+			+ "  Configurator dir:   {6}\r\n"
+			+ "  Distribution dir:   {7}\r\n"
+			+ "  Status:             {8}\r\n"
+			+ "  Distribution ver:   {9}  sha256(16) {10}\r\n"
+			+ "\r\n"
+			+ "Runtime service version (IPC): {11}",
 			layout.InstallDirectory,
+			installedSrc,
+			installedVer,
+			installedHash,
 			layout.DefaultDatabasePath,
 			layout.AppSettingsPath,
 			layout.ConfiguratorDirectory,
 			source,
-			distLine);
+			distLine,
+			distVer,
+			distHash,
+			runtimeVer);
 	}
 
 	private async Task RunLifecycleAsync(
@@ -269,7 +305,6 @@ public sealed class ServicePage : TabPage
 			ServiceOperationResult result = await action(CancellationToken.None).ConfigureAwait(true);
 			MessageBox.Show(result.Format(), title, MessageBoxButtons.OK,
 				result.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
-			await RefreshAsync().ConfigureAwait(true);
 		}
 		catch (Win32Exception ex) when (ex.NativeErrorCode == 1223)
 		{
@@ -281,11 +316,8 @@ public sealed class ServicePage : TabPage
 		}
 		finally
 		{
-			// FIX-3: re-enable the trigger button temporarily so that if RefreshAsync below cannot
-			// reach the service IPC, the operator is not stranded with a permanently-disabled
-			// button. The follow-up RefreshAsync() restores the correct enabled state based on
-			// the live service install/run status — when the service is now Running, Start will
-			// be re-disabled by UpdateButtonStates immediately afterwards.
+			// Re-enable the trigger temporarily; RefreshAsync below restores the correct
+			// enabled state based on the authoritative SCM snapshot.
 			trigger.Enabled = true;
 		}
 
@@ -333,6 +365,43 @@ public sealed class ServicePage : TabPage
 
 		MessageBox.Show(sb.ToString(), "RdpAudit Install", MessageBoxButtons.OK,
 			outcome.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+		await RefreshAsync().ConfigureAwait(true);
+	}
+
+	/// <summary>Stage 2 'Update installed files' button. Copies the sibling distribution over
+	/// the configured install directory using <see cref="ServiceControlRunner.UpdateInstalledFilesAsync"/>,
+	/// which performs a safe stop -&gt; copy -&gt; start cycle when the service is running.</summary>
+	private async Task UpdateInstalledFilesAsync()
+	{
+		ServiceLayoutInfo layout = await Task.Run(() => ServiceLayout.Discover(AppContext.BaseDirectory)).ConfigureAwait(true);
+		if (!layout.DistributionExists || !layout.ServiceExecutableExists)
+		{
+			MessageBox.Show(
+				$"Distribution missing at {layout.ExpectedServiceExecutable}. Re-run publish.ps1 before updating.",
+				"RdpAudit Update",
+				MessageBoxButtons.OK,
+				MessageBoxIcon.Warning);
+			return;
+		}
+
+		_btnUpdate.Enabled = false;
+		try
+		{
+			ServiceOperationResult result = await _runner
+				.UpdateInstalledFilesAsync(layout.DistributionDirectory!, layout.InstallDirectory)
+				.ConfigureAwait(true);
+			MessageBox.Show(result.Format(), "RdpAudit Update", MessageBoxButtons.OK,
+				result.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+		}
+		catch (Exception ex)
+		{
+			MessageBox.Show(ex.Message, "RdpAudit Update", MessageBoxButtons.OK, MessageBoxIcon.Error);
+		}
+		finally
+		{
+			_btnUpdate.Enabled = true;
+		}
+
 		await RefreshAsync().ConfigureAwait(true);
 	}
 
