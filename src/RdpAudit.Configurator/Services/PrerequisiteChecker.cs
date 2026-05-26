@@ -12,7 +12,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Runtime.Versioning;
 using System.ServiceProcess;
-using Microsoft.Win32;
+using System.Text;
 using RdpAudit.Core.Events;
 using RdpAudit.Core.Firewall;
 using RdpAudit.Core.Util;
@@ -145,43 +145,41 @@ public sealed class PrerequisiteChecker
 		}
 	}
 
-	/// <summary>Reads the configured RDP TCP port from the WinStations\RDP-Tcp\PortNumber
-	/// registry value. Falls back to <see cref="RdpConfigurationModel.DefaultRdpPort"/> when
-	/// the value is missing or out of range — the listener is the source of truth, not the
-	/// well-known default.</summary>
+	/// <summary>Reads the configured RDP TCP port via the central
+	/// <see cref="RdpListenerPortResolver"/>. Falls back to
+	/// <see cref="RdpConfigurationModel.DefaultRdpPort"/> when the registry value is missing or
+	/// out of range — the listener is the source of truth, not the well-known default.</summary>
 	private static int ReadConfiguredRdpPort()
-	{
-		try
-		{
-			using RegistryKey? key = Registry.LocalMachine.OpenSubKey(
-				@"SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp",
-				writable: false);
-			if (key?.GetValue(RdpConfigurationModel.PortNumberValueName) is int dword
-				&& RdpConfigurationModel.IsValidPort(dword))
-			{
-				return dword;
-			}
-		}
-		catch
-		{
-			// Best-effort fallback — registry not readable on this host or under this account.
-		}
-
-		return RdpConfigurationModel.DefaultRdpPort;
-	}
+		=> RdpListenerPortResolver.Resolve().Port;
 
 	private static PrerequisiteResult CheckRdpFirewallRule()
 	{
-		int port = ReadConfiguredRdpPort();
+		// Stage 4: resolve the live RDP listener port via the central resolver so we never drift
+		// back to a hard-coded 3389 or to the user's diagnostic 55554. The resolver falls back
+		// to the documented default only when the registry value is missing / out of range.
+		RdpListenerPortResolution portResolution = RdpListenerPortResolver.Resolve();
+		int port = portResolution.Port;
 		string portString = port.ToString(CultureInfo.InvariantCulture);
+		string ruleName = "RdpAudit-RDP-Allow-" + portString;
 
-		// Probe for ANY allow-inbound rule on the configured port using a parse-stable English
-		// console: cmd /d /c "chcp 437 >nul & netsh advfirewall firewall show rule name=all verbose".
-		// Pinning to chcp 437 keeps the "LocalPort:" / "Direction:" / "Action:" header tokens in
-		// stable Latin script regardless of the operator's UI culture. We then scan stdout for a
-		// LocalPort=<port> hit. Matching by configured port + protocol avoids relying on the
-		// localised Windows group name ("Remote Desktop - User Mode (TCP-In)" /
-		// "Удаленный рабочий стол - пользовательский режим (TCP-входящий)").
+		// Provider / Kaspersky / GPO-store context — surfaced regardless of pass/fail so the
+		// operator always sees what RdpAudit observed about the firewall stack.
+		FirewallProviderDiagnostics providerDiagnostics;
+		try
+		{
+			providerDiagnostics = new FirewallProviderDiagnosticsProbe().Probe();
+		}
+		catch (Exception ex)
+		{
+			providerDiagnostics = new FirewallProviderDiagnostics
+			{
+				Notes = new[] { "Firewall provider probe failed: " + ex.GetType().Name + " — " + ex.Message },
+			};
+		}
+
+		// Probe for ANY enabled, inbound, allow, TCP rule covering the resolved port. The English
+		// console pin keeps the LocalPort / Direction / Action / Protocol tokens stable across
+		// localised hosts; we never depend on the localised Windows group name.
 		string[] showArgsForDiagnostics = new[]
 		{
 			"advfirewall", "firewall", "show", "rule", "name=all", "verbose",
@@ -196,19 +194,34 @@ public sealed class PrerequisiteChecker
 			StdOut: probe.StdOut,
 			StdErr: probe.StdErr,
 			ConfiguredRdpPort: port,
-			RuleNameAttempted: null,
+			RuleNameAttempted: ruleName,
 			TimedOut: probe.TimedOut);
 
 		bool ok = probe.ExitCode == 0 && ruleMatches;
 		string detail = ok
-			? string.Format(CultureInfo.InvariantCulture, "Found rule allowing inbound TCP/{0}.", portString)
-			: NetshDiagnosticsFormatter.FormatShort(outcome);
+			? BuildPassDetail(port, portResolution, providerDiagnostics)
+			: BuildFailDetail(probe, outcome, port, providerDiagnostics);
 
 		PrerequisiteFix? fix = ok ? null : new PrerequisiteFix(
 			string.Format(CultureInfo.InvariantCulture, "Add RdpAudit RDP allow rule on TCP/{0}", portString),
 			() =>
 			{
-				string ruleName = "RdpAudit-RDP-Allow-" + portString;
+				if (providerDiagnostics.LocalRulesAreGpoStoreOnly)
+				{
+					return Task.FromResult(string.Format(CultureInfo.InvariantCulture,
+						"Local Windows Firewall writes are blocked by Group Policy (LocalFirewallRules N/A — GPO-store only). "
+						+ "Add the allow rule on TCP/{0} through Group Policy or contact the policy administrator. "
+						+ "Provider: {1}.", portString, providerDiagnostics.ProviderName));
+				}
+
+				if (providerDiagnostics.ProviderKind == FirewallProviderDetectedKind.KasperskyManagedWindowsFirewall)
+				{
+					return Task.FromResult(string.Format(CultureInfo.InvariantCulture,
+						"Kaspersky is managing Windows Firewall on this host ({0}). RdpAudit will not invoke "
+						+ "Kaspersky's CLI directly. Use the Kaspersky management console to allow inbound "
+						+ "TCP/{1} or contact the Kaspersky administrator.", providerDiagnostics.ProviderName, portString));
+				}
+
 				string[] addArgs = new[]
 				{
 					"advfirewall", "firewall", "add", "rule",
@@ -234,10 +247,107 @@ public sealed class PrerequisiteChecker
 					ConfiguredRdpPort: port,
 					RuleNameAttempted: ruleName,
 					TimedOut: fixResult.TimedOut);
-				return Task.FromResult(NetshDiagnosticsFormatter.FormatShort(fixOutcome));
+				return Task.FromResult(NetshDiagnosticsFormatter.FormatShort(fixOutcome)
+					+ "; provider=" + providerDiagnostics.ProviderName
+					+ "; kind=" + providerDiagnostics.ProviderKind);
 			});
 
 		return new PrerequisiteResult("Windows Firewall RDP rule present", ok, detail, fix);
+	}
+
+	/// <summary>Builds the pass-case detail string. Includes the resolved port + source (registry
+	/// vs default) and the detected provider so the operator can confirm the rule is for the
+	/// listener actually in use.</summary>
+	private static string BuildPassDetail(
+		int port,
+		RdpListenerPortResolution portResolution,
+		FirewallProviderDiagnostics providerDiagnostics)
+	{
+		string portString = port.ToString(CultureInfo.InvariantCulture);
+		StringBuilder sb = new();
+		sb.AppendFormat(CultureInfo.InvariantCulture,
+			"Found enabled inbound allow rule for TCP/{0}", portString);
+		sb.Append(" (port source: ").Append(portResolution.Source).Append(')');
+		if (providerDiagnostics.ProviderKind != FirewallProviderDetectedKind.Unknown)
+		{
+			sb.Append("; provider=").Append(providerDiagnostics.ProviderName);
+		}
+		if (providerDiagnostics.LocalRulesAreGpoStoreOnly)
+		{
+			sb.Append("; note: LocalFirewallRules N/A (GPO-store only) — local writes are blocked by policy, but a GPO-pushed rule already covers the port.");
+		}
+		return sb.ToString();
+	}
+
+	/// <summary>Builds the fail-case detail string. Includes command label, exit code, timeout
+	/// flag, stdout/stderr summary, resolved port, proposed RdpAudit rule name, provider kind,
+	/// stale-rule hints (port-matched rule blocks that failed an Enabled/Protocol gate), and a
+	/// list of enabled inbound allow TCP ports observed elsewhere — so a stale 3389 rule is
+	/// immediately recognisable.</summary>
+	private static string BuildFailDetail(
+		CapturedCommand probe,
+		NetshProbeOutcome outcome,
+		int port,
+		FirewallProviderDiagnostics providerDiagnostics)
+	{
+		StringBuilder sb = new();
+		sb.Append(NetshDiagnosticsFormatter.FormatShort(outcome));
+
+		if (providerDiagnostics.ProviderKind != FirewallProviderDetectedKind.Unknown)
+		{
+			sb.Append("; provider=").Append(providerDiagnostics.ProviderName);
+			sb.Append("; kind=").Append(providerDiagnostics.ProviderKind);
+		}
+		if (providerDiagnostics.LocalRulesAreGpoStoreOnly)
+		{
+			sb.Append("; LocalFirewallRules=N/A (GPO-store only) — local netsh writes are blocked by Group Policy");
+		}
+
+		// Surface stale / mismatched rules so the operator sees "you have a rule for 3389 while
+		// the listener is on 55554" instead of an opaque negative.
+		if (probe.ExitCode == 0)
+		{
+			IReadOnlyList<int> enabledPorts = NetshRuleScanner.EnumerateEnabledAllowInboundTcpPorts(probe.StdOut);
+			if (enabledPorts.Count > 0)
+			{
+				sb.Append("; enabled-allow-tcp-ports=[");
+				for (int i = 0; i < enabledPorts.Count; i++)
+				{
+					if (i > 0)
+					{
+						sb.Append(',');
+					}
+					sb.Append(enabledPorts[i].ToString(CultureInfo.InvariantCulture));
+				}
+				sb.Append(']');
+
+				bool defaultRulePresent = enabledPorts.Contains(RdpConfigurationModel.DefaultRdpPort);
+				if (port != RdpConfigurationModel.DefaultRdpPort && defaultRulePresent)
+				{
+					sb.AppendFormat(CultureInfo.InvariantCulture,
+						"; stale-rule-hint: an allow rule exists for TCP/{0} but the live listener is on TCP/{1}",
+						RdpConfigurationModel.DefaultRdpPort, port);
+				}
+			}
+
+			IReadOnlyList<NetshRulePortMatchExplanation> portMatches = NetshRuleScanner.ExplainPortMatches(probe.StdOut, port);
+			foreach (NetshRulePortMatchExplanation match in portMatches)
+			{
+				if (match.EnabledOk && match.DirectionInOk && match.ActionAllowOk && match.ProtocolTcpOk)
+				{
+					continue;
+				}
+
+				sb.Append("; matching-rule-rejected[")
+					.Append(string.IsNullOrEmpty(match.RuleName) ? "(unnamed)" : match.RuleName)
+					.Append("]: enabled=").Append(match.EnabledOk ? "yes" : "no")
+					.Append(",in=").Append(match.DirectionInOk ? "yes" : "no")
+					.Append(",allow=").Append(match.ActionAllowOk ? "yes" : "no")
+					.Append(",tcp=").Append(match.ProtocolTcpOk ? "yes" : "no");
+			}
+		}
+
+		return sb.ToString();
 	}
 
 

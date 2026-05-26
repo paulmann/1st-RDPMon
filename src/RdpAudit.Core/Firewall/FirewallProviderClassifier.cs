@@ -162,6 +162,25 @@ public static class FirewallProviderClassifier
 				{
 					return "Kaspersky Endpoint Security for Windows";
 				}
+				if (string.Equals(tool.ToolName, "avp.exe", StringComparison.OrdinalIgnoreCase)
+					|| string.Equals(tool.ToolName, "avp.com", StringComparison.OrdinalIgnoreCase))
+				{
+					// `avp.exe` / `avp.com` is the canonical CLI shipped with Kaspersky AV /
+					// Endpoint Security for Windows. The user diagnostic on Windows 10 Pro
+					// reports both candidates and the running AVP21.24 service.
+					return "Kaspersky Endpoint Security for Windows";
+				}
+			}
+		}
+
+		// Last-resort: when only a generic `AVP*` service is observed (no display name match,
+		// no CLI hit), we still know the operator is running Kaspersky AV / Endpoint Security —
+		// on workstation SKUs that surfaces as `AVPxx.yy` (e.g. AVP21.24 in the user diagnostic).
+		foreach (FirewallServiceState svc in services)
+		{
+			if (Contains(svc.ServiceName, "AVP"))
+			{
+				return "Kaspersky Endpoint Security for Windows";
 			}
 		}
 
