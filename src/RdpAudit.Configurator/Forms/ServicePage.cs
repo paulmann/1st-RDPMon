@@ -17,6 +17,7 @@
 using System.ComponentModel;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Runtime.Versioning;
 using System.Text;
 using RdpAudit.Configurator.Ipc;
@@ -54,6 +55,7 @@ public sealed class ServicePage : TabPage
 	private readonly Button _btnStop;
 	private readonly Button _btnRestart;
 	private readonly Button _btnUpdate;
+	private readonly Button _btnCopyDiagnostics;
 
 	private readonly ContextMenuStrip _alertsMenu;
 	private readonly ToolStripMenuItem _alertsMenuOpenRipeStat;
@@ -71,6 +73,7 @@ public sealed class ServicePage : TabPage
 		_btnStop = new Button { Text = "Stop", Width = 80 };
 		_btnRestart = new Button { Text = "Restart", Width = 80 };
 		_btnUpdate = new Button { Text = "Update installed files", Width = 170 };
+		_btnCopyDiagnostics = new Button { Text = "Copy diagnostics", Width = 140 };
 		Button backup = new() { Text = "Backup Settings", Width = 140 };
 		Button restore = new() { Text = "Restore Registry/Policy", Width = 180 };
 
@@ -80,12 +83,13 @@ public sealed class ServicePage : TabPage
 		_btnStop.Click += async (_, _) => await RunLifecycleAsync(_btnStop, _runner.StopAsync, "RdpAudit Stop").ConfigureAwait(true);
 		_btnRestart.Click += async (_, _) => await RunLifecycleAsync(_btnRestart, _runner.RestartAsync, "RdpAudit Restart").ConfigureAwait(true);
 		_btnUpdate.Click += async (_, _) => await UpdateInstalledFilesAsync().ConfigureAwait(true);
+		_btnCopyDiagnostics.Click += async (_, _) => await CopyDiagnosticsAsync().ConfigureAwait(true);
 		backup.Click += async (_, _) => await BackupAsync().ConfigureAwait(true);
 		restore.Click += async (_, _) => await RestoreAsync().ConfigureAwait(true);
 
 		buttons.Controls.AddRange(new Control[]
 		{
-			_btnInstall, _btnUninstall, _btnStart, _btnStop, _btnRestart, _btnUpdate, backup, restore,
+			_btnInstall, _btnUninstall, _btnStart, _btnStop, _btnRestart, _btnUpdate, _btnCopyDiagnostics, backup, restore,
 		});
 
 		_process = new Label
@@ -363,6 +367,12 @@ public sealed class ServicePage : TabPage
 			sb.AppendLine("FAIL " + error);
 		}
 
+		if (!string.IsNullOrEmpty(outcome.LogFilePath))
+		{
+			sb.AppendLine();
+			sb.AppendLine("Log file: " + outcome.LogFilePath);
+		}
+
 		MessageBox.Show(sb.ToString(), "RdpAudit Install", MessageBoxButtons.OK,
 			outcome.Success ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
 		await RefreshAsync().ConfigureAwait(true);
@@ -403,6 +413,81 @@ public sealed class ServicePage : TabPage
 		}
 
 		await RefreshAsync().ConfigureAwait(true);
+	}
+
+	/// <summary>Builds the Copy diagnostics report and pushes the rendered text onto the
+	/// clipboard. Pulls the same SCM/IPC/binary inputs the Service tab already aggregates,
+	/// plus a best-effort snapshot of the running service process (PID, MainModule path,
+	/// SHA-256). Verdict and explanation come from <see cref="ServiceDiagnosticsReportBuilder"/>
+	/// so the headline label stays in lockstep with the Service tab state line.</summary>
+	private async Task CopyDiagnosticsAsync()
+	{
+		_btnCopyDiagnostics.Enabled = false;
+		try
+		{
+			ServiceLayoutInfo layout = await Task.Run(() => ServiceLayout.Discover(AppContext.BaseDirectory)).ConfigureAwait(true);
+			ServiceInstallationInfo scm = await _scmReader.ReadAsync().ConfigureAwait(true);
+			ServiceStatus? ipcStatus = await _ipc.SendAsync<ServiceStatus>(IpcCommand.GetStatus).ConfigureAwait(true);
+
+			string? installedExePath = scm.ResolveExecutablePath()
+				?? Path.Combine(layout.InstallDirectory, ServiceLayout.ServiceExeName);
+			string distributionExePath = layout.ExpectedServiceExecutable;
+
+			BinaryFingerprint installedFingerprint = await Task.Run(() => BinaryFingerprintReader.Read(installedExePath)).ConfigureAwait(true);
+			BinaryFingerprint distributionFingerprint = await Task.Run(() => BinaryFingerprintReader.Read(distributionExePath)).ConfigureAwait(true);
+			RunningProcessFingerprint running = await Task.Run(() => RunningProcessProbe.Probe(scm.ProcessId)).ConfigureAwait(true);
+
+			string configuratorVersion = ResolveConfiguratorVersion();
+			ServiceDiagnosticsInput input = new(
+				ConfiguratorVersion: configuratorVersion,
+				Layout: layout,
+				Scm: scm,
+				Distribution: distributionFingerprint,
+				Installed: installedFingerprint,
+				Running: running,
+				IpcRuntimeVersion: ipcStatus?.Version,
+				IpcConnected: ipcStatus is not null);
+
+			ServiceDiagnosticsReport report = ServiceDiagnosticsReportBuilder.Build(input);
+			try
+			{
+				Clipboard.SetText(report.ReportText);
+			}
+			catch (Exception)
+			{
+				// Clipboard.SetText can throw on locked clipboard sessions; we still display
+				// the report so the operator can copy it manually.
+			}
+
+			MessageBox.Show(report.ReportText,
+				$"RdpAudit diagnostics — {report.VerdictLabel}",
+				MessageBoxButtons.OK,
+				report.Verdict == ServiceDiagnosticsVerdict.Ok
+					? MessageBoxIcon.Information
+					: MessageBoxIcon.Warning);
+		}
+		catch (Exception ex)
+		{
+			MessageBox.Show(ex.Message, "RdpAudit diagnostics", MessageBoxButtons.OK, MessageBoxIcon.Error);
+		}
+		finally
+		{
+			_btnCopyDiagnostics.Enabled = true;
+		}
+	}
+
+	private static string ResolveConfiguratorVersion()
+	{
+		System.Reflection.Assembly asm = typeof(ServicePage).Assembly;
+		string? info = asm
+			.GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+		if (!string.IsNullOrWhiteSpace(info))
+		{
+			int plus = info.IndexOf('+', StringComparison.Ordinal);
+			return plus > 0 ? info[..plus] : info;
+		}
+
+		return asm.GetName().Version?.ToString() ?? "0.0.0";
 	}
 
 	private async Task BackupAsync()

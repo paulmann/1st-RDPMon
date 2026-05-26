@@ -121,10 +121,13 @@ public sealed class ServiceControlRunner
 
 	/// <summary>Stage 2: safe stop-copy-start update of the installed binaries from a
 	/// distribution folder. If the service is running it is stopped first; any in-flight
-	/// file handles release before the copy. Files are copied with overwrite=true so the
-	/// existing installed directory tree is brought into sync with <paramref name="distributionDir"/>.
-	/// After the copy the service is started again (best-effort; failure is reported in
-	/// the returned <see cref="ServiceOperationResult"/>).</summary>
+	/// file handles release before the copy. Each file is staged via <see cref="InstallTransfer.Copy"/>
+	/// with SHA-256 verification post-copy and atomic promotion, so a partial transfer can
+	/// never leave the install directory inconsistent. After the copy the service is started
+	/// again (best-effort; failure is reported in the returned <see cref="ServiceOperationResult"/>).
+	/// The update path is wrapped in an <see cref="InstallUpdateLogger"/> writing
+	/// %ProgramData%\RdpAudit\Logs\install-update-update-{utc}.log so the operator can attach
+	/// the transcript to a support ticket.</summary>
 	public async Task<ServiceOperationResult> UpdateInstalledFilesAsync(
 		string distributionDir,
 		string installDir,
@@ -139,12 +142,38 @@ public sealed class ServiceControlRunner
 	{
 		List<ServiceOperationStep> steps = new();
 
+		ServiceLayoutInfo layout = ServiceLayout.Discover(AppContext.BaseDirectory);
+		InstallUpdateLogger logger = new(layout, "update");
+		logger.Info($"Update started — distribution: {distributionDir}, install: {installDir}");
+
+		ElevationStatus elevation = ElevationGuard.Check();
+		logger.Info("Elevation check: " + elevation.Message);
+		if (!elevation.IsElevated)
+		{
+			steps.Add(new ServiceOperationStep("Verify elevation", false, elevation.Message));
+			return Finalize("Update installed files", steps, logger.LogFilePath);
+		}
+
 		if (!Directory.Exists(distributionDir))
 		{
+			string msg = "distribution folder does not exist";
 			steps.Add(new ServiceOperationStep(
-				$"Validate distribution at {distributionDir}", false, "distribution folder does not exist"));
-			return Finalize("Update installed files", steps);
+				$"Validate distribution at {distributionDir}", false, msg));
+			logger.Fail(msg);
+			return Finalize("Update installed files", steps, logger.LogFilePath);
 		}
+
+		DirectoryEnsureResult ensure = InstallDirectoryGuard.EnsureWritable(installDir);
+		if (!ensure.Success)
+		{
+			string detail = ensure.Detail is null ? ensure.Message : $"{ensure.Message} — {ensure.Detail}";
+			steps.Add(new ServiceOperationStep("Verify install directory writable", false, detail));
+			logger.Fail(detail);
+			return Finalize("Update installed files", steps, logger.LogFilePath);
+		}
+
+		steps.Add(new ServiceOperationStep("Verify install directory writable", true, ensure.Message));
+		logger.Info(ensure.Message);
 
 		bool wasRunning = false;
 		try
@@ -156,12 +185,14 @@ public sealed class ServiceControlRunner
 		catch (InvalidOperationException ex) when (IsServiceNotInstalled(ex))
 		{
 			steps.Add(new ServiceOperationStep("Probe SCM run state", false, "service is not installed"));
-			return Finalize("Update installed files", steps);
+			logger.Fail("Probe SCM run state — service is not installed");
+			return Finalize("Update installed files", steps, logger.LogFilePath);
 		}
 		catch (Exception ex)
 		{
 			steps.Add(new ServiceOperationStep("Probe SCM run state", false, ex.Message));
-			return Finalize("Update installed files", steps);
+			logger.Fail("Probe SCM run state — " + ex.Message);
+			return Finalize("Update installed files", steps, logger.LogFilePath);
 		}
 
 		if (wasRunning)
@@ -176,54 +207,55 @@ public sealed class ServiceControlRunner
 					}
 				}, allowAlreadyInTargetState: true, allowNotInstalled: false, ct);
 			steps.AddRange(stopOutcome.Steps);
+			foreach (ServiceOperationStep s in stopOutcome.Steps)
+			{
+				logger.Info($"{s.Description} — {(s.Ok ? "OK" : "FAIL")} {s.Detail ?? string.Empty}");
+			}
+
 			if (stopOutcome.Fatal)
 			{
-				return Finalize("Update installed files", steps);
+				return Finalize("Update installed files", steps, logger.LogFilePath);
 			}
 		}
 		else
 		{
 			steps.Add(new ServiceOperationStep("Stop service before update", true, "service was not running"));
+			logger.Info("Stop service before update — service was not running");
 		}
 
-		try
+		ct.ThrowIfCancellationRequested();
+		InstallTransferResult transfer = InstallTransfer.Copy(distributionDir, installDir);
+		if (transfer.Success)
 		{
-			Directory.CreateDirectory(installDir);
-			int copied = 0;
-			foreach (string file in Directory.EnumerateFiles(distributionDir, "*", SearchOption.AllDirectories))
+			string detail = $"copied {transfer.FilesCopied.ToString(CultureInfo.InvariantCulture)}/{transfer.FilesConsidered.ToString(CultureInfo.InvariantCulture)} files to {installDir} (SHA-256 verified)";
+			steps.Add(new ServiceOperationStep("Copy distribution to installed", true, detail));
+			logger.Info(detail);
+		}
+		else
+		{
+			StringBuilder sb = new();
+			if (transfer.Mismatches.Count > 0)
 			{
-				ct.ThrowIfCancellationRequested();
-				string relative = Path.GetRelativePath(distributionDir, file);
-				string target = Path.Combine(installDir, relative);
-				string? targetDir = Path.GetDirectoryName(target);
-				if (!string.IsNullOrEmpty(targetDir))
+				sb.AppendLine("Hash mismatches after copy:");
+				foreach (string m in transfer.Mismatches)
 				{
-					Directory.CreateDirectory(targetDir);
+					sb.AppendLine("  " + m);
 				}
-
-				File.Copy(file, target, overwrite: true);
-				copied++;
 			}
 
-			steps.Add(new ServiceOperationStep("Copy distribution to installed", true,
-				$"copied {copied.ToString(CultureInfo.InvariantCulture)} files to {installDir}"));
-		}
-		catch (UnauthorizedAccessException ex)
-		{
-			steps.Add(new ServiceOperationStep("Copy distribution to installed", false,
-				"Access denied — run the Configurator as Administrator: " + ex.Message));
-			return Finalize("Update installed files", steps);
-		}
-		catch (IOException ex)
-		{
-			steps.Add(new ServiceOperationStep("Copy distribution to installed", false,
-				"I/O failure (file may still be in use by the service process): " + ex.Message));
-			return Finalize("Update installed files", steps);
-		}
-		catch (Exception ex)
-		{
-			steps.Add(new ServiceOperationStep("Copy distribution to installed", false, ex.Message));
-			return Finalize("Update installed files", steps);
+			if (transfer.Failures.Count > 0)
+			{
+				sb.AppendLine("Failures:");
+				foreach (string f in transfer.Failures)
+				{
+					sb.AppendLine("  " + f);
+				}
+			}
+
+			string detail = sb.ToString().Trim();
+			steps.Add(new ServiceOperationStep("Copy distribution to installed", false, detail));
+			logger.Fail(detail);
+			return Finalize("Update installed files", steps, logger.LogFilePath);
 		}
 
 		if (wasRunning)
@@ -238,13 +270,18 @@ public sealed class ServiceControlRunner
 					}
 				}, allowAlreadyInTargetState: true, allowNotInstalled: false, ct);
 			steps.AddRange(startOutcome.Steps);
+			foreach (ServiceOperationStep s in startOutcome.Steps)
+			{
+				logger.Info($"{s.Description} — {(s.Ok ? "OK" : "FAIL")} {s.Detail ?? string.Empty}");
+			}
 		}
 		else
 		{
 			steps.Add(new ServiceOperationStep("Start service after update", true, "service was not running before update; leaving stopped"));
+			logger.Info("Start service after update — service was not running before update; leaving stopped");
 		}
 
-		return Finalize("Update installed files", steps);
+		return Finalize("Update installed files", steps, logger.LogFilePath);
 	}
 
 	private ServiceOperationResult RestartCore(CancellationToken ct)
@@ -327,7 +364,7 @@ public sealed class ServiceControlRunner
 	{
 		StepOutcome outcome = TryControllerOperation(description, desired, action,
 			allowAlreadyInTargetState, allowNotInstalled: false, ct);
-		return Finalize(description, outcome.Steps);
+		return Finalize(description, outcome.Steps, logFilePath: null);
 	}
 
 	private StepOutcome TryControllerOperation(
@@ -382,7 +419,8 @@ public sealed class ServiceControlRunner
 		}
 	}
 
-	private ServiceOperationResult Finalize(string action, IReadOnlyList<ServiceOperationStep> steps)
+	private ServiceOperationResult Finalize(string action, IReadOnlyList<ServiceOperationStep> steps,
+		string? logFilePath = null)
 	{
 		bool success = true;
 		foreach (ServiceOperationStep step in steps)
@@ -424,7 +462,8 @@ public sealed class ServiceControlRunner
 			ExecutablePath: exePath,
 			ProcessStartTimeUtc: startUtc,
 			Steps: steps,
-			TimestampUtc: DateTime.UtcNow);
+			TimestampUtc: DateTime.UtcNow,
+			LogFilePath: logFilePath);
 	}
 
 	private ServiceQueryResult RunQueryEx(CancellationToken ct)

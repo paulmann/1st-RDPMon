@@ -25,7 +25,8 @@ public sealed record InstallationOutcome(
 	bool Success,
 	IReadOnlyList<string> Steps,
 	IReadOnlyList<string> Warnings,
-	IReadOnlyList<string> Errors);
+	IReadOnlyList<string> Errors,
+	string? LogFilePath = null);
 
 /// <summary>Single step result for first-run install logging.</summary>
 internal sealed record InstallStep(string Description, bool Ok, string? Detail = null);
@@ -75,18 +76,46 @@ public sealed class InstallationService
 		List<string> warnings = new();
 		List<string> errors = new();
 
+		InstallUpdateLogger logger = new(_layout, "install");
+		logger.Info($"Install started — install directory: {_layout.InstallDirectory}");
+		logger.Info($"Distribution directory: {_layout.DistributionDirectory ?? "(missing)"}");
+
+		ElevationStatus elevation = ElevationGuard.Check();
+		logger.Info("Elevation check: " + elevation.Message);
+		if (!elevation.IsElevated)
+		{
+			errors.Add(elevation.Message);
+			logger.Fail(elevation.Message);
+			return new InstallationOutcome(false, steps, warnings, errors, logger.LogFilePath);
+		}
+
+		DirectoryEnsureResult installDirCheck = InstallDirectoryGuard.EnsureWritable(_layout.InstallDirectory);
+		logger.Info("Install directory check: " + installDirCheck.Message);
+		if (!installDirCheck.Success)
+		{
+			string compose = installDirCheck.Detail is null
+				? installDirCheck.Message
+				: $"{installDirCheck.Message} — {installDirCheck.Detail}";
+			errors.Add(compose);
+			logger.Fail(compose);
+			return new InstallationOutcome(false, steps, warnings, errors, logger.LogFilePath);
+		}
+
+		steps.Add(installDirCheck.Message);
+
 		// Snapshot before any audit policy / SACL / service / appsettings change is made,
 		// so a misbehaving repair can be undone via the Restore button.
 		await TakePreInstallBackupAsync(steps, warnings, ct).ConfigureAwait(false);
 
-		Record(EnsureProgramDataLayout, steps, errors);
-		Record(EnsureAppSettings, steps, errors);
+		Record(EnsureProgramDataLayout, steps, errors, logger);
+		Record(EnsureAppSettings, steps, errors, logger);
 
 		if (_layout.DistributionExists && _layout.ServiceExecutableExists)
 		{
-			Record(() => CopyDistribution(_layout.DistributionDirectory!, _layout.InstallDirectory), steps, errors);
-			await Record(InstallOrUpdateServiceAsync, steps, errors, ct).ConfigureAwait(false);
-			await Record(StartServiceAsync, steps, errors, ct).ConfigureAwait(false);
+			Record(() => CopyDistribution(_layout.DistributionDirectory!, _layout.InstallDirectory),
+				steps, errors, logger);
+			await Record(InstallOrUpdateServiceAsync, steps, errors, logger, ct).ConfigureAwait(false);
+			await Record(StartServiceAsync, steps, errors, logger, ct).ConfigureAwait(false);
 		}
 		else
 		{
@@ -95,9 +124,14 @@ public sealed class InstallationService
 				_layout.DistributionDirectory ?? ServiceLayout.ResolveSiblingDistribution(_layout.ConfiguratorDirectory),
 				ServiceLayout.ServiceExeName, _layout.InstallDirectory);
 			warnings.Add(detail);
+			logger.Warn(detail);
 		}
 
-		return new InstallationOutcome(errors.Count == 0, steps, warnings, errors);
+		bool success = errors.Count == 0;
+		logger.Info(success
+			? "Install finished — verdict: OK"
+			: "Install finished with errors — verdict: see error list");
+		return new InstallationOutcome(success, steps, warnings, errors, logger.LogFilePath);
 	}
 
 	internal async Task TakePreInstallBackupAsync(List<string> steps, List<string> warnings, CancellationToken ct)
@@ -159,30 +193,41 @@ public sealed class InstallationService
 
 	internal static InstallStep CopyDistribution(string source, string destination)
 	{
-		try
+		DirectoryEnsureResult ensure = InstallDirectoryGuard.EnsureWritable(destination);
+		if (!ensure.Success)
 		{
-			Directory.CreateDirectory(destination);
-			int copied = 0;
-			foreach (string file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+			string detail = ensure.Detail is null ? ensure.Message : $"{ensure.Message} — {ensure.Detail}";
+			return new InstallStep($"Copy distribution to {destination}", false, detail);
+		}
+
+		InstallTransferResult result = InstallTransfer.Copy(source, destination);
+		if (result.Success)
+		{
+			return new InstallStep(
+				$"Copied {result.FilesCopied}/{result.FilesConsidered} files to {destination} (SHA-256 verified)",
+				true);
+		}
+
+		System.Text.StringBuilder sb = new();
+		if (result.Mismatches.Count > 0)
+		{
+			sb.AppendLine("Hash mismatches after copy:");
+			foreach (string m in result.Mismatches)
 			{
-				string relative = Path.GetRelativePath(source, file);
-				string target = Path.Combine(destination, relative);
-				string? targetDir = Path.GetDirectoryName(target);
-				if (!string.IsNullOrEmpty(targetDir))
-				{
-					Directory.CreateDirectory(targetDir);
-				}
-
-				File.Copy(file, target, overwrite: true);
-				copied++;
+				sb.AppendLine("  " + m);
 			}
+		}
 
-			return new InstallStep($"Copied {copied} files to {destination}", true);
-		}
-		catch (Exception ex)
+		if (result.Failures.Count > 0)
 		{
-			return new InstallStep($"Copy distribution to {destination}", false, ex.Message);
+			sb.AppendLine("Failures:");
+			foreach (string f in result.Failures)
+			{
+				sb.AppendLine("  " + f);
+			}
 		}
+
+		return new InstallStep($"Copy distribution to {destination}", false, sb.ToString().Trim());
 	}
 
 	internal async Task<InstallStep> InstallOrUpdateServiceAsync(CancellationToken ct)
@@ -355,15 +400,35 @@ public sealed class InstallationService
 		return sb.ToString();
 	}
 
-	private static void Record(Func<InstallStep> action, List<string> steps, List<string> errors)
+	private static void Record(Func<InstallStep> action, List<string> steps, List<string> errors,
+		InstallUpdateLogger? logger = null)
 	{
 		InstallStep step = action();
-		(step.Ok ? steps : errors).Add(step.Detail is null ? step.Description : $"{step.Description} — {step.Detail}");
+		string composed = step.Detail is null ? step.Description : $"{step.Description} — {step.Detail}";
+		(step.Ok ? steps : errors).Add(composed);
+		if (step.Ok)
+		{
+			logger?.Info(composed);
+		}
+		else
+		{
+			logger?.Fail(composed);
+		}
 	}
 
-	private static async Task Record(Func<CancellationToken, Task<InstallStep>> action, List<string> steps, List<string> errors, CancellationToken ct)
+	private static async Task Record(Func<CancellationToken, Task<InstallStep>> action,
+		List<string> steps, List<string> errors, InstallUpdateLogger? logger, CancellationToken ct)
 	{
 		InstallStep step = await action(ct).ConfigureAwait(false);
-		(step.Ok ? steps : errors).Add(step.Detail is null ? step.Description : $"{step.Description} — {step.Detail}");
+		string composed = step.Detail is null ? step.Description : $"{step.Description} — {step.Detail}";
+		(step.Ok ? steps : errors).Add(composed);
+		if (step.Ok)
+		{
+			logger?.Info(composed);
+		}
+		else
+		{
+			logger?.Fail(composed);
+		}
 	}
 }

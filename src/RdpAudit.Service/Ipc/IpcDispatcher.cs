@@ -180,6 +180,22 @@ public sealed class IpcDispatcher
 	{
 		using Process self = Process.GetCurrentProcess();
 		string version = ResolveRuntimeVersion();
+		Dictionary<string, string> channelStatus = _metrics.SnapshotChannels();
+		SecurityVisibilityFlags flags = SecurityVisibilityDiagnosticBuilder.Build(
+			new SecurityVisibilityInputs(
+				SecurityEventsRead: _metrics.SecurityEventsRead,
+				Security4624Count: _metrics.Security4624Count,
+				Security4625Count: _metrics.Security4625Count,
+				Security4648Count: _metrics.Security4648Count,
+				RdpCorePreAuthOrphans: _metrics.RdpCorePreAuthOrphans,
+				SecurityWatcherEnabled: _metrics.SecurityWatcherEnabled,
+				LastSecurityChannelError: _metrics.LastSecurityChannelError,
+				ChannelStatus: channelStatus,
+				LastRdpCorePreAuthUtc: _metrics.LastRdpCorePreAuthUtc,
+				LastSecurityEventUtc: _metrics.LastSecurityEventUtc,
+				SecurityBackfillLastRunUtc: _metrics.SecurityBackfillLastRunUtc,
+				SecurityBackfillRecordsRead: _metrics.SecurityBackfillRecordsRead));
+
 		return new ServiceStatus
 		{
 			Version = version,
@@ -189,7 +205,7 @@ public sealed class IpcDispatcher
 			EventsCaptured = _metrics.EventsCaptured,
 			EventsDropped = _metrics.EventsDropped,
 			AlertsRaised = _metrics.AlertsRaised,
-			ChannelStatus = _metrics.SnapshotChannels(),
+			ChannelStatus = channelStatus,
 			Security4625Count = _metrics.Security4625Count,
 			Security4624Count = _metrics.Security4624Count,
 			Security4648Count = _metrics.Security4648Count,
@@ -212,6 +228,11 @@ public sealed class IpcDispatcher
 			AuthAttemptFactCreated = _metrics.AuthAttemptFactCreated,
 			AuthAttemptFactFailed = _metrics.AuthAttemptFactFailed,
 			AuthAttemptFactSucceeded = _metrics.AuthAttemptFactSucceeded,
+			SecurityLogMissing = flags.SecurityLogMissing,
+			AuditPolicyMissingLogon = flags.AuditPolicyMissingLogon,
+			SecurityReadDenied = flags.SecurityReadDenied,
+			ChannelDisabled = flags.ChannelDisabled,
+			BookmarkStaleOrLogRetentionGap = flags.BookmarkStaleOrLogRetentionGap,
 		};
 	}
 

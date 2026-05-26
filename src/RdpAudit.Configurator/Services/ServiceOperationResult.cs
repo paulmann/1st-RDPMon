@@ -31,7 +31,8 @@ public sealed record ServiceOperationResult(
 	string? ExecutablePath,
 	DateTime? ProcessStartTimeUtc,
 	IReadOnlyList<ServiceOperationStep> Steps,
-	DateTime TimestampUtc)
+	DateTime TimestampUtc,
+	string? LogFilePath = null)
 {
 	/// <summary>Renders the result in the multi-line "OK / FAIL" shape the rest of the
 	/// Configurator already uses for install/backup/restore outcomes.</summary>
@@ -57,6 +58,11 @@ public sealed record ServiceOperationResult(
 		}
 
 		sb.Append("Timestamp:     ").AppendLine(TimestampUtc.ToString("yyyy-MM-dd HH:mm:ss 'UTC'", CultureInfo.InvariantCulture));
+		if (!string.IsNullOrEmpty(LogFilePath))
+		{
+			sb.Append("Log file:      ").AppendLine(LogFilePath);
+		}
+
 		sb.AppendLine();
 		foreach (ServiceOperationStep step in Steps)
 		{
