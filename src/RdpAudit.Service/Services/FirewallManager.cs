@@ -6,11 +6,11 @@
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
 
-using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Runtime.Versioning;
 using Microsoft.Extensions.Logging;
+using RdpAudit.Core.Util;
 
 namespace RdpAudit.Service.Services;
 
@@ -132,32 +132,39 @@ internal interface IFirewallCommandRunner
 
 internal sealed class NetshFirewallCommandRunner : IFirewallCommandRunner
 {
+	private readonly IExternalCommandRunner _runner;
+	private readonly TimeSpan _timeout;
+
+	[SupportedOSPlatform("windows")]
+	public NetshFirewallCommandRunner()
+		: this(new ExternalCommandRunner(), ExternalCommandRunner.DefaultTimeout)
+	{
+	}
+
+	internal NetshFirewallCommandRunner(IExternalCommandRunner runner, TimeSpan timeout)
+	{
+		ArgumentNullException.ThrowIfNull(runner);
+		_runner = runner;
+		_timeout = timeout > TimeSpan.Zero ? timeout : ExternalCommandRunner.DefaultTimeout;
+	}
+
 	[SupportedOSPlatform("windows")]
 	public async Task<FirewallOperationResult> RunAsync(IReadOnlyList<string> args, CancellationToken ct)
 	{
-		ProcessStartInfo psi = new("netsh.exe")
-		{
-			UseShellExecute = false,
-			CreateNoWindow = true,
-			RedirectStandardOutput = true,
-			RedirectStandardError = true,
-		};
-		foreach (string a in args)
-		{
-			psi.ArgumentList.Add(a);
-		}
-
+		ArgumentNullException.ThrowIfNull(args);
 		try
 		{
-			using Process? proc = Process.Start(psi);
-			if (proc is null)
-			{
-				return new FirewallOperationResult(false, -1, "netsh.exe could not start");
-			}
+			ExternalCommandResult result = await _runner.RunDirectAsync(
+				commandLabel: "netsh " + string.Join(' ', args),
+				executable: "netsh.exe",
+				arguments: args,
+				timeout: _timeout,
+				ct: ct).ConfigureAwait(false);
 
-			string err = await proc.StandardError.ReadToEndAsync(ct).ConfigureAwait(false);
-			await proc.WaitForExitAsync(ct).ConfigureAwait(false);
-			return new FirewallOperationResult(proc.ExitCode == 0, proc.ExitCode, err);
+			return new FirewallOperationResult(
+				Success: result.Success,
+				ExitCode: result.TimedOut ? -1 : result.ExitCode,
+				Stderr: result.StdErr);
 		}
 		catch (OperationCanceledException)
 		{

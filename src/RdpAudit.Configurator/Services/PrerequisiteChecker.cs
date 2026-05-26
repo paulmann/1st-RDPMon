@@ -175,20 +175,23 @@ public sealed class PrerequisiteChecker
 		int port = ReadConfiguredRdpPort();
 		string portString = port.ToString(CultureInfo.InvariantCulture);
 
-		// Probe for ANY allow-inbound rule on the configured port using a localisation-stable
-		// "show rule name=all" output filter; we then scan stdout for a LocalPort=<port> hit.
-		// Matching by configured port + protocol avoids relying on the localised Windows group
-		// name ("Remote Desktop - User Mode (TCP-In)" / "Удаленный рабочий стол - пользовательский режим (TCP-входящий)").
-		string[] showArgs = new[]
+		// Probe for ANY allow-inbound rule on the configured port using a parse-stable English
+		// console: cmd /d /c "chcp 437 >nul & netsh advfirewall firewall show rule name=all verbose".
+		// Pinning to chcp 437 keeps the "LocalPort:" / "Direction:" / "Action:" header tokens in
+		// stable Latin script regardless of the operator's UI culture. We then scan stdout for a
+		// LocalPort=<port> hit. Matching by configured port + protocol avoids relying on the
+		// localised Windows group name ("Remote Desktop - User Mode (TCP-In)" /
+		// "Удаленный рабочий стол - пользовательский режим (TCP-входящий)").
+		string[] showArgsForDiagnostics = new[]
 		{
 			"advfirewall", "firewall", "show", "rule", "name=all", "verbose",
 		};
-		CapturedCommand probe = RunCapturedCommand("netsh", showArgs);
+		CapturedCommand probe = RunCapturedEnglishConsole(TrustedEnglishConsoleTool.NetshShowAllRulesVerbose);
 		bool ruleMatches = NetshRuleScanner.ContainsAllowInboundForPort(probe.StdOut, port);
 
 		NetshProbeOutcome outcome = new(
 			Command: "netsh",
-			Arguments: showArgs,
+			Arguments: showArgsForDiagnostics,
 			ExitCode: probe.ExitCode,
 			StdOut: probe.StdOut,
 			StdErr: probe.StdErr,
@@ -403,6 +406,57 @@ public sealed class PrerequisiteChecker
 
 	/// <summary>Captured outcome of one process invocation: exit code + both standard streams.</summary>
 	internal readonly record struct CapturedCommand(int ExitCode, string StdOut, string StdErr, bool TimedOut);
+
+	/// <summary>Spawns a whitelisted tool through the parse-stable English console
+	/// (<c>cmd /d /c "chcp 437 >nul &amp; ..."</c>). Used for parsed-stdout probes that need
+	/// stable Latin-script tokens regardless of the host's UI culture.</summary>
+	internal static CapturedCommand RunCapturedEnglishConsole(TrustedEnglishConsoleTool tool)
+	{
+		try
+		{
+			EnglishConsoleSpawn spawn = EnglishConsoleCommandFactory.Build(tool);
+			System.Text.Encoding encoding = QwinstaConsoleEncoding.Resolve();
+			ProcessStartInfo psi = new(spawn.Executable)
+			{
+				Arguments = spawn.Arguments,
+				UseShellExecute = false,
+				RedirectStandardOutput = true,
+				RedirectStandardError = true,
+				CreateNoWindow = true,
+				StandardOutputEncoding = encoding,
+				StandardErrorEncoding = encoding,
+			};
+
+			using Process? proc = Process.Start(psi);
+			if (proc is null)
+			{
+				return new CapturedCommand(-1, string.Empty, "Process.Start returned null", TimedOut: false);
+			}
+
+			string stdout = proc.StandardOutput.ReadToEnd();
+			string stderr = proc.StandardError.ReadToEnd();
+			bool exited = proc.WaitForExit(15_000);
+			if (!exited)
+			{
+				try
+				{
+					proc.Kill(entireProcessTree: true);
+				}
+				catch (InvalidOperationException)
+				{
+					// Already exited between WaitForExit and Kill.
+				}
+
+				return new CapturedCommand(-1, stdout, stderr, TimedOut: true);
+			}
+
+			return new CapturedCommand(proc.ExitCode, stdout, stderr, TimedOut: false);
+		}
+		catch (Exception ex)
+		{
+			return new CapturedCommand(-1, string.Empty, ex.GetType().Name + ": " + ex.Message, TimedOut: false);
+		}
+	}
 
 	/// <summary>Spawns <paramref name="exe"/> using <see cref="ProcessStartInfo.ArgumentList"/> —
 	/// arguments are NEVER concatenated into a shell string — and returns both captured

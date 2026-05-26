@@ -27,11 +27,8 @@
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
 
-using System.ComponentModel;
-using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.Versioning;
-using System.Text;
 using System.Threading;
 using RdpAudit.Core.Ipc.Contracts;
 using RdpAudit.Core.Util;
@@ -261,32 +258,35 @@ public sealed class LocalRdpSessionProvider
 		return flat.Length <= max ? flat : flat[..max];
 	}
 
-	/// <summary>Production spawner: runs the trusted tool through cmd.exe with chcp 437 so the
-	/// active console code page is the US-OEM page. Captures stdout with the OEM-page encoding
-	/// (cp866 on Russian builds, cp437 on English ones) so any Cyrillic state tokens that slip
-	/// through still decode correctly for the localized parser fallback.</summary>
+	/// <summary>Production spawner: delegates to the centralized <see cref="ExternalCommandRunner"/>
+	/// so qwinsta / quser execute through cmd.exe with chcp 437 in effect. The runner pins the
+	/// stdout encoding to the host OEM code page (cp866 on Russian builds, cp437 on English ones)
+	/// so any Cyrillic state tokens that slip through still decode correctly for the localized
+	/// parser fallback.</summary>
 	private sealed class SystemConsoleSpawner : ILocalSessionToolSpawner
 	{
+		private static readonly TimeSpan SpawnTimeout = ExternalCommandRunner.DefaultTimeout;
+		private readonly IExternalCommandRunner _runner;
+
+		public SystemConsoleSpawner()
+			: this(new ExternalCommandRunner())
+		{
+		}
+
+		internal SystemConsoleSpawner(IExternalCommandRunner runner)
+		{
+			ArgumentNullException.ThrowIfNull(runner);
+			_runner = runner;
+		}
+
 		public async Task<LocalSessionToolResult> RunAsync(TrustedSessionTool tool, CancellationToken ct)
 		{
-			SessionConsoleSpawn spawn = SessionConsoleCommandFactory.Build(tool);
-			Encoding encoding = QwinstaConsoleEncoding.Resolve();
-			ProcessStartInfo psi = new(spawn.Executable)
+			TrustedEnglishConsoleTool generalized = tool switch
 			{
-				Arguments = spawn.Arguments,
-				UseShellExecute = false,
-				CreateNoWindow = true,
-				RedirectStandardOutput = true,
-				RedirectStandardError = true,
-				StandardOutputEncoding = encoding,
-				StandardErrorEncoding = encoding,
+				TrustedSessionTool.Qwinsta => TrustedEnglishConsoleTool.Qwinsta,
+				TrustedSessionTool.Quser => TrustedEnglishConsoleTool.Quser,
+				_ => throw new ArgumentOutOfRangeException(nameof(tool), tool, "Unknown trusted session tool."),
 			};
-
-			// Push en-US into the child process environment too so any wrapping locale layer
-			// prefers English. cmd.exe ignores these, the inner tool ignores them — they are
-			// retained for parity with the prior implementation and any future locale shim.
-			psi.EnvironmentVariables["LANG"] = "en-US";
-			psi.EnvironmentVariables["LC_ALL"] = "en-US";
 
 			CultureInfo originalCulture = Thread.CurrentThread.CurrentCulture;
 			CultureInfo originalUiCulture = Thread.CurrentThread.CurrentUICulture;
@@ -295,38 +295,9 @@ public sealed class LocalRdpSessionProvider
 
 			try
 			{
-				using Process? proc = Process.Start(psi);
-				if (proc is null)
-				{
-					throw new Win32Exception("Failed to start "
-						+ tool.ToString().ToLowerInvariant() + ".exe via cmd.exe.");
-				}
-
-				try
-				{
-					Task<string> stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);
-					Task<string> stderrTask = proc.StandardError.ReadToEndAsync(ct);
-					await proc.WaitForExitAsync(ct).ConfigureAwait(false);
-					string stdout = await stdoutTask.ConfigureAwait(false);
-					string stderr = await stderrTask.ConfigureAwait(false);
-					return new LocalSessionToolResult(proc.ExitCode, stdout, stderr);
-				}
-				catch (OperationCanceledException)
-				{
-					try
-					{
-						if (!proc.HasExited)
-						{
-							proc.Kill(entireProcessTree: true);
-						}
-					}
-					catch (InvalidOperationException)
-					{
-						// Process already exited between the cancellation check and Kill.
-					}
-
-					throw;
-				}
+				ExternalCommandResult result = await _runner.RunEnglishConsoleAsync(
+					generalized, args: null, SpawnTimeout, ct).ConfigureAwait(false);
+				return new LocalSessionToolResult(result.ExitCode, result.StdOut, result.StdErr);
 			}
 			finally
 			{
