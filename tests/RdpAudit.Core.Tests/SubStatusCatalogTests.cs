@@ -48,4 +48,19 @@ public class SubStatusCatalogTests
 		Assert.Null(SubStatusCatalog.Translate(""));
 		Assert.Null(SubStatusCatalog.Translate("   "));
 	}
+
+	[Theory]
+	// Signed-decimal int32 form Windows / PowerShell render as Properties[Status] — pinned to the
+	// real-host evidence the user pasted from Get-WinEvent: bad password / misc-logon-failure /
+	// no-such-user surface as negative int32 in the raw event payload.
+	[InlineData("-1073741718", "Bad Password")]         // 0xC000006A
+	[InlineData("-1073741724", "No Such User")]         // 0xC0000064
+	[InlineData("-1073741715", "Misc. Logon Failure")]  // 0xC000006D
+	// Unsigned-decimal form (some Windows producers emit this).
+	[InlineData("3221225578", "Bad Password")]
+	[InlineData("3221225572", "No Such User")]
+	public void Translate_AcceptsSignedAndUnsignedDecimal(string code, string expected)
+	{
+		Assert.Equal(expected, SubStatusCatalog.Translate(code));
+	}
 }

@@ -137,4 +137,43 @@ public class ScCommandBuilderTests
 	{
 		Assert.Throws<ArgumentOutOfRangeException>(() => ScCommandBuilder.BuildFailure("Svc", -1, "restart/1000"));
 	}
+
+	[Fact]
+	public void BuildCreateQuoted_WrapsBinaryPathInLiteralQuotes()
+	{
+		IReadOnlyList<string> args = ScCommandBuilder.BuildCreateQuoted(
+			"RdpAuditService",
+			@"C:\Program Files\RdpAudit\Service\RdpAudit.Service.exe",
+			"RDP Monitor");
+
+		Assert.Equal("create", args[0]);
+		Assert.Equal("RdpAuditService", args[1]);
+		Assert.Equal("binPath=", args[2]);
+		Assert.Equal("\"C:\\Program Files\\RdpAudit\\Service\\RdpAudit.Service.exe\"", args[3]);
+		Assert.Equal("start=", args[4]);
+		Assert.Equal("auto", args[5]);
+		Assert.Equal("obj=", args[6]);
+		Assert.Equal("LocalSystem", args[7]);
+		Assert.Equal("DisplayName=", args[8]);
+		Assert.Equal("RDP Monitor", args[9]);
+	}
+
+	[Fact]
+	public void BuildConfigQuoted_WrapsBinaryPathInLiteralQuotes()
+	{
+		IReadOnlyList<string> args = ScCommandBuilder.BuildConfigQuoted(
+			"RdpAuditService", @"C:\Program Files\RdpAudit\Service\RdpAudit.Service.exe");
+
+		Assert.Contains("\"C:\\Program Files\\RdpAudit\\Service\\RdpAudit.Service.exe\"", args);
+	}
+
+	[Fact]
+	public void BuildCreateQuoted_DoesNotDoubleQuoteAlreadyQuotedPath()
+	{
+		IReadOnlyList<string> args = ScCommandBuilder.BuildCreateQuoted(
+			"Svc", "\"C:\\already.exe\"", "Display");
+
+		Assert.Contains("\"C:\\already.exe\"", args);
+		Assert.DoesNotContain("\"\"C:\\already.exe\"\"", args);
+	}
 }

@@ -45,6 +45,7 @@ public sealed class IpcDispatcher
 	private readonly IAbuseIpDbClient? _abuseClient;
 	private readonly ISecretProtector? _protector;
 	private readonly IMikroTikClient? _mikroTikClient;
+	private readonly ConfigRepairReporter? _configRepair;
 
 	public IpcDispatcher(
 		IDbContextFactory<AuditDbContext> factory,
@@ -59,7 +60,8 @@ public sealed class IpcDispatcher
 		IAbuseIpDbClient? abuseClient = null,
 		ISecretProtector? protector = null,
 		IMikroTikClient? mikroTikClient = null,
-		RdpConfigurationReader? rdpConfigReader = null)
+		RdpConfigurationReader? rdpConfigReader = null,
+		ConfigRepairReporter? configRepair = null)
 	{
 		_factory = factory;
 		_metrics = metrics;
@@ -74,6 +76,7 @@ public sealed class IpcDispatcher
 		_protector = protector;
 		_mikroTikClient = mikroTikClient;
 		_rdpConfigReader = rdpConfigReader;
+		_configRepair = configRepair;
 	}
 
 	public async Task<IpcResponse> DispatchAsync(IpcRequest request, CancellationToken ct)
@@ -143,6 +146,9 @@ public sealed class IpcDispatcher
 
 				// --- Stage RDP-Config handler (RDP Configuration tab). ---
 				IpcCommand.GetRdpConfiguration => GetRdpConfigurationHandler(),
+
+				// --- Stage Diag handler (Diagnostic tab). ---
+				IpcCommand.GetDiagnostics => await GetDiagnosticsAsync(ct).ConfigureAwait(false),
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
 
@@ -961,48 +967,41 @@ public sealed class IpcDispatcher
 			.ToListAsync(ct)
 			.ConfigureAwait(false);
 
-		// Window summary counters — computed against RawEvents in the requested window so they line
-		// up with what the per-IP rows describe. Stage 2: we no longer hard-code 4624/4625 here —
-		// the same AttackStatsAggregator.Classify(...) used to project per-IP rows decides which
-		// raw events count as Successful / Failed so window totals stay consistent across TS-RCM
-		// 1149 and TS-LSM 21 successes.
-		List<RawEvent> windowEvents = await db.RawEvents.AsNoTracking()
-			.Where(e => e.TimeUtc >= windowStart && e.TimeUtc <= windowEnd)
-			.Select(e => new RawEvent
-			{
-				Id = e.Id,
-				EventId = e.EventId,
-				Channel = e.Channel,
-				TimeUtc = e.TimeUtc,
-				SourceIp = e.SourceIp,
-				SourceIpUnresolved = e.SourceIpUnresolved,
-				LogonType = e.LogonType,
-			})
+		// Window summary counters — computed against AuthAttemptFacts in the requested window.
+		// Detect_Attack_Strategy_v3.md §8.1 makes AuthAttemptFact the atomic source of truth for
+		// authentication outcomes. RDP/Operational, RdpCoreTS, and TerminalServices events are
+		// context / enrichment only — they MUST NOT move Total / Failed / Successful counters.
+		// Querying AuthAttemptFacts directly (rather than RawEvents + Classify) keeps the IPC
+		// window summary consistent with the per-IP Fact* columns and with AttackStat rows
+		// projected by AttackStatsRefreshWorker.
+		var windowFacts = await db.AuthAttemptFacts.AsNoTracking()
+			.Where(f => f.TimeUtc >= windowStart && f.TimeUtc <= windowEnd)
+			.Select(f => new { f.Outcome, f.SourceIp })
 			.ToListAsync(ct).ConfigureAwait(false);
 
 		long failed = 0;
 		long successful = 0;
 		HashSet<string> distinctIpSet = new(StringComparer.OrdinalIgnoreCase);
-		foreach (RawEvent ev in windowEvents)
+		foreach (var fact in windowFacts)
 		{
-			AttackEventOutcome outcome = AttackStatsAggregator.Classify(ev.Channel, ev.EventId, ev.LogonType);
-			switch (outcome)
+			switch (fact.Outcome)
 			{
-				case AttackEventOutcome.Failed:
+				case AuthAttemptOutcome.Failed:
+				case AuthAttemptOutcome.Denied:
 					failed++;
+					if (string.IsNullOrEmpty(fact.SourceIp))
+					{
+						distinctIpSet.Add(AttackStatsAggregator.SentinelUnresolvedIp);
+					}
 					break;
-				case AttackEventOutcome.Successful:
+				case AuthAttemptOutcome.Succeeded:
 					successful++;
 					break;
 			}
 
-			if (!string.IsNullOrEmpty(ev.SourceIp))
+			if (!string.IsNullOrEmpty(fact.SourceIp))
 			{
-				distinctIpSet.Add(ev.SourceIp);
-			}
-			else if (ev.SourceIpUnresolved)
-			{
-				distinctIpSet.Add(AttackStatsAggregator.SentinelUnresolvedIp);
+				distinctIpSet.Add(fact.SourceIp);
 			}
 		}
 		long distinctIps = distinctIpSet.Count;
@@ -2747,5 +2746,142 @@ public sealed class IpcDispatcher
 		}
 
 		return trimmed.ToLowerInvariant();
+	}
+
+	// ----------------------------------------------------------------------------------------------
+	// Stage Diag: GetDiagnostics
+	// ----------------------------------------------------------------------------------------------
+
+	/// <summary>Build the LLM-friendly diagnostics snapshot exposed via IpcCommand.GetDiagnostics.
+	/// All DB lookups go through Microsoft.Data.Sqlite via EF Core — no external sqlite3.exe.</summary>
+	private async Task<DiagnosticsSnapshotDto> GetDiagnosticsAsync(CancellationToken ct)
+	{
+		DiagnosticsSnapshotDto dto = new()
+		{
+			GeneratedUtc = DateTime.UtcNow,
+			ServiceVersion = ResolveRuntimeVersion(),
+			ChannelStatus = _metrics.SnapshotChannels(),
+			SecurityWatcherEnabled = _metrics.SecurityWatcherEnabled,
+			SecurityEventsRead = _metrics.SecurityEventsRead,
+			SecurityEventsNormalized = _metrics.SecurityEventsNormalized,
+			SecurityEventsRejected = _metrics.SecurityEventsRejected,
+			LastSecurityChannelError = _metrics.LastSecurityChannelError,
+			LastSecurityEventUtc = _metrics.LastSecurityEventUtc,
+			SecurityBackfillLastRunUtc = _metrics.SecurityBackfillLastRunUtc,
+			SecurityBackfillRecordsRead = _metrics.SecurityBackfillRecordsRead,
+			SecurityBackfillRecordsForwarded = _metrics.SecurityBackfillRecordsForwarded,
+			SecurityBackfillRecordsDeduped = _metrics.SecurityBackfillRecordsDeduped,
+			Security4624Count = _metrics.Security4624Count,
+			Security4625Count = _metrics.Security4625Count,
+			Security4648Count = _metrics.Security4648Count,
+			AuthAttemptFactCreated = _metrics.AuthAttemptFactCreated,
+			AuthAttemptFactFailed = _metrics.AuthAttemptFactFailed,
+			AuthAttemptFactSucceeded = _metrics.AuthAttemptFactSucceeded,
+			LastAuthAttemptFactCreatedUtc = _metrics.LastAuthAttemptFactCreatedUtc,
+		};
+
+		// Effective channels/event IDs come from the live options snapshot — the post-configure
+		// repair has already run by the time options are materialised here.
+		RdpAuditOptions opts = _options.CurrentValue;
+		dto.EnabledChannels.AddRange(opts.Monitoring.EnabledChannels);
+		dto.EnabledEventIds.AddRange(opts.Monitoring.EnabledEventIds);
+		dto.DatabasePath = opts.Storage.ResolveDatabasePath();
+
+		// Service install path — best-effort runtime discovery via AppContext.BaseDirectory
+		// (RdpAudit.Service.exe lives next to the worker DLLs). For SCM-authoritative ImagePath
+		// resolution use ServiceInstallationInfo on the Configurator side.
+		try
+		{
+			dto.InstallPath = AppContext.BaseDirectory;
+		}
+		catch (Exception ex)
+		{
+			dto.RecentPipelineErrors.Add("InstallPath probe failed: " + ex.Message);
+		}
+
+		if (_configRepair?.LastReport is { } report)
+		{
+			dto.MonitoringConfigRepairChanged = report.Changed;
+			dto.MonitoringConfigRepairAddedChannels.AddRange(report.AddedChannels);
+			dto.MonitoringConfigRepairAddedEventIds.AddRange(report.AddedEventIds);
+			dto.MonitoringConfigRepairReason = report.Reason;
+			dto.MonitoringConfigRepairUtc = _configRepair.LastReportUtc;
+			dto.MonitoringConfigRepairChangedRunCount = _configRepair.ChangedRunCount;
+		}
+
+		if (!string.IsNullOrEmpty(_metrics.LastSecurityChannelError))
+		{
+			dto.RecentPipelineErrors.Add("Security channel: " + _metrics.LastSecurityChannelError);
+		}
+		if (!string.IsNullOrEmpty(_metrics.LastSecurityRejectReason))
+		{
+			dto.RecentPipelineErrors.Add(string.Format(
+				CultureInfo.InvariantCulture,
+				"Last reject ({0}): {1}",
+				_metrics.SecurityRejectReasonCount,
+				_metrics.LastSecurityRejectReason));
+		}
+		if (!string.IsNullOrEmpty(_metrics.SecurityCorrelationDiagnostic))
+		{
+			dto.RecentPipelineErrors.Add("Correlation diagnostic: " + _metrics.SecurityCorrelationDiagnostic);
+		}
+
+		try
+		{
+			await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+
+			dto.RawEventsTotal = await db.RawEvents.AsNoTracking().LongCountAsync(ct).ConfigureAwait(false);
+			dto.AuthAttemptFactsTotal = await db.AuthAttemptFacts.AsNoTracking().LongCountAsync(ct).ConfigureAwait(false);
+
+			List<DiagnosticsChannelCount> byChannel = await db.RawEvents.AsNoTracking()
+				.GroupBy(e => e.Channel)
+				.Select(g => new DiagnosticsChannelCount { Channel = g.Key, Count = g.LongCount() })
+				.OrderByDescending(x => x.Count)
+				.Take(20)
+				.ToListAsync(ct).ConfigureAwait(false);
+			dto.RawEventsByChannel.AddRange(byChannel);
+
+			List<DiagnosticsEventIdCount> byEventId = await db.RawEvents.AsNoTracking()
+				.GroupBy(e => new { e.Channel, e.EventId })
+				.Select(g => new DiagnosticsEventIdCount
+				{
+					Channel = g.Key.Channel,
+					EventId = g.Key.EventId,
+					Count = g.LongCount(),
+				})
+				.OrderByDescending(x => x.Count)
+				.Take(30)
+				.ToListAsync(ct).ConfigureAwait(false);
+			dto.RawEventsByEventId.AddRange(byEventId);
+
+			List<DiagnosticsFactOutcomeCount> byOutcome = await db.AuthAttemptFacts.AsNoTracking()
+				.GroupBy(f => new { f.EvidenceEventId, f.Outcome })
+				.Select(g => new DiagnosticsFactOutcomeCount
+				{
+					EvidenceEventId = g.Key.EvidenceEventId,
+					Outcome = g.Key.Outcome.ToString(),
+					Count = g.LongCount(),
+				})
+				.OrderByDescending(x => x.Count)
+				.Take(30)
+				.ToListAsync(ct).ConfigureAwait(false);
+			dto.AuthAttemptFactsByOutcome.AddRange(byOutcome);
+		}
+		catch (Exception ex)
+		{
+			dto.Status = IpcResultStatus.Unavailable;
+			dto.RecentPipelineErrors.Add("DB diagnostics failed: " + ex.GetType().Name + " — " + ex.Message);
+		}
+
+		dto.Message = string.Format(
+			CultureInfo.InvariantCulture,
+			"Snapshot built at {0:O}. RawEvents={1} AuthAttemptFacts={2} SecurityWatcher={3} RepairChanged={4}",
+			dto.GeneratedUtc,
+			dto.RawEventsTotal,
+			dto.AuthAttemptFactsTotal,
+			dto.SecurityWatcherEnabled,
+			dto.MonitoringConfigRepairChanged);
+
+		return dto;
 	}
 }

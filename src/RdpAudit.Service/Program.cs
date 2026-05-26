@@ -64,6 +64,17 @@ public static class Program
 		builder.Services.Configure<RdpAuditOptions>(
 			builder.Configuration.GetSection(RdpAuditOptions.SectionName));
 
+		// Singleton recorder for the most recent monitoring-config repair (surfaced via the
+		// Diagnostic IPC command).
+		builder.Services.AddSingleton<ConfigRepairReporter>();
+
+		// Repair stale appsettings.json before any worker consumes the effective MonitoringOptions.
+		// A pre-v3 config that pruned EnabledChannels (no Security) or wrote a partial EnabledEventIds
+		// filter would otherwise leave the Security watcher disarmed at startup. The repair is
+		// idempotent and runs every time options are materialized (including IOptionsMonitor reloads),
+		// so an operator who hand-edits appsettings.json with the Configurator open also benefits.
+		builder.Services.AddSingleton<IPostConfigureOptions<RdpAuditOptions>, MonitoringConfigPostConfigure>();
+
 		ConfigureSerilog(builder, programData);
 
 		if (isService)

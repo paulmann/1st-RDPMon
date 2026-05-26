@@ -79,4 +79,12 @@ public enum IpcCommand
 	/// <summary>Returns the current RDP listener configuration snapshot (port, fDenyTSConnections,
 	/// NLA, SecurityLayer, single-session, hide-users, shadow mode, plus TermService context).</summary>
 	GetRdpConfiguration = 42,
+
+	// --- Stage Diag additions (append-only). ---
+
+	/// <summary>Returns an LLM-friendly diagnostics snapshot: effective channels/event IDs, Security
+	/// watcher state + last error + last event UTC, Security backfill telemetry, RawEvent and
+	/// AuthAttemptFact counts grouped by channel/event ID, monitoring-config repair report, service
+	/// version, install path, and recent pipeline errors. Used by the Configurator's Diagnostic tab.</summary>
+	GetDiagnostics = 43,
 }
