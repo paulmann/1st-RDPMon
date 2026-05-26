@@ -75,4 +75,24 @@ public sealed class BookmarkStore
 
 		await db.SaveChangesAsync(ct).ConfigureAwait(false);
 	}
+
+	/// <summary>
+	/// Deletes the persisted bookmark for <paramref name="channel"/> from the in-memory cache and
+	/// the database. Used to recover from a stale/invalid bookmark that bricks watcher arming.
+	/// </summary>
+	public async Task DeleteBookmarkAsync(string channel, CancellationToken ct = default)
+	{
+		lock (_gate)
+		{
+			_cache.Remove(channel);
+		}
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+		Bookmark? row = await db.Bookmarks.FirstOrDefaultAsync(b => b.Channel == channel, ct).ConfigureAwait(false);
+		if (row is not null)
+		{
+			db.Bookmarks.Remove(row);
+			await db.SaveChangesAsync(ct).ConfigureAwait(false);
+		}
+	}
 }
