@@ -41,6 +41,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 	private readonly LocalRdpSessionProvider _localSessions = new();
 	private readonly LocalShadowPolicyReader _localShadowPolicy = new();
 	private readonly LocalSessionEnrichmentProvider _localEnrichment = new();
+	private readonly LocalActiveTcpEnrichmentProvider _localTcpEnrichment = new();
 
 	private readonly DataGridView _grid;
 	private readonly BindingList<SessionRow> _binding = new();
@@ -487,21 +488,31 @@ public sealed class RemoteRdpClientsPage : TabPage
 				LocalSessionEnrichmentReport enrichment = await _localEnrichment
 					.EnrichAsync(_allSessions)
 					.ConfigureAwait(true);
+
+				// Apply the live TCP fallback AFTER the DB enrichment so a stronger DB
+				// correlation always wins. The TCP enricher only fills missing Client IP on
+				// Active RDP sessions when both sides are unambiguous.
+				LocalActiveTcpEnrichmentReport tcpEnrichment = await _localTcpEnrichment
+					.EnrichAsync(_allSessions)
+					.ConfigureAwait(true);
+
 				ApplyLocalFilter();
 
 				string enrichmentStatus = enrichment.Available
 					? "historical enrichment: " + enrichment.Status
 					: "historical enrichment unavailable: " + enrichment.Status;
+				string tcpStatus = "live TCP enrichment: " + tcpEnrichment.Status;
 
 				SetStatus(string.Format(CultureInfo.InvariantCulture,
-					"Source: local session fallback ({4}); {5}. "
+					"Source: local session fallback ({4}); {5}; {6}. "
 					+ "count={0}, active={1}, disconnected={2}. Service IPC: {3}.",
 					_allSessions.Count,
 					_allSessions.Count(s => s.IsActive),
 					_allSessions.Count(s => s.IsDisconnected),
 					snapshot.IpcDetail ?? "unreachable",
 					snapshot.LocalDetail ?? "unspecified mode",
-					enrichmentStatus));
+					enrichmentStatus,
+					tcpStatus));
 			}
 		}
 		catch (Exception ex)

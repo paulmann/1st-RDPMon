@@ -2,11 +2,16 @@
 // Module:  RdpAudit.Service.Services
 // Purpose: Service-side RDP session enumeration and control. Wraps the safe Windows
 //          command-line tools used by the Configurator's Remote RDP Clients tab:
-//          qwinsta (list), tsdiscon (disconnect) and logoff (terminate). Every call
-//          uses ProcessStartInfo.ArgumentList so user-supplied data is never
-//          concatenated into a shell string. Output is parsed by the pure
-//          RdpAudit.Core QwinstaParser so spawn / parse stages can be unit-tested
-//          separately.
+//          qwinsta (list), tsdiscon (disconnect) and logoff (terminate). The list path is
+//          spawned through the parse-stable English console
+//          (cmd.exe /d /c "chcp 437 >nul & qwinsta.exe") so the STATE column carries the
+//          stable English tokens (Active / Disc / Conn / Listen) regardless of the host's
+//          UI culture. The command line is composed exclusively from SessionConsoleCommandFactory
+//          constants — no user input ever flows into it. The destructive tools (tsdiscon /
+//          logoff) keep their argument-list spawn since they only carry a validated session id.
+//          Output is parsed by the pure RdpAudit.Core QwinstaParser so spawn / parse stages can
+//          be unit-tested separately. The service-side path also augments qwinsta from quser so
+//          rows with a blank SESSIONNAME (a disconnected user, e.g.) are recovered.
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
@@ -38,15 +43,17 @@ public sealed class RdpSessionManager
 		_logger = logger;
 	}
 
-	/// <summary>Lists currently known sessions on the local host using <c>qwinsta</c>.</summary>
+	/// <summary>Lists currently known sessions on the local host using <c>qwinsta</c> spawned
+	/// through the parse-stable English console (chcp 437). Augments rows with a blank
+	/// SESSIONNAME from a parallel <c>quser</c> invocation when possible.</summary>
 	public async Task<RdpSessionListDto> ListAsync(CancellationToken ct)
 	{
 		RdpSessionListDto result = new() { QueriedUtc = DateTime.UtcNow };
 
-		SessionToolResult tool;
+		SessionToolResult qwinsta;
 		try
 		{
-			tool = await RunToolAsync("qwinsta.exe", SessionCommandBuilder.BuildListSessions(), ct).ConfigureAwait(false);
+			qwinsta = await RunTrustedToolAsync(TrustedSessionTool.Qwinsta, ct).ConfigureAwait(false);
 		}
 		catch (Exception ex)
 		{
@@ -56,23 +63,44 @@ public sealed class RdpSessionManager
 			return result;
 		}
 
-		if (!tool.Ok)
+		if (!qwinsta.Ok)
 		{
 			result.Status = IpcResultStatus.Unavailable;
 			result.Message = string.Format(CultureInfo.InvariantCulture,
-				"qwinsta exit {0}: {1}", tool.ExitCode, Truncate(tool.StdErr, 240));
+				"qwinsta exit {0}: {1}", qwinsta.ExitCode, Truncate(qwinsta.StdErr, 240));
 			return result;
 		}
 
-		IReadOnlyList<QwinstaSessionRow> rows = QwinstaParser.Parse(tool.StdOut);
+		List<QwinstaSessionRow> rows = new(QwinstaParser.Parse(qwinsta.StdOut));
+
+		int quserAugmented = 0;
+		try
+		{
+			SessionToolResult quser = await RunTrustedToolAsync(TrustedSessionTool.Quser, ct).ConfigureAwait(false);
+			if (quser.Ok)
+			{
+				IReadOnlyList<QuserSessionRow> quserRows = QuserParser.Parse(quser.StdOut);
+				quserAugmented = QwinstaQuserMerger.Merge(rows, quserRows).RowsAugmented;
+			}
+		}
+		catch (Exception ex)
+		{
+			// quser is best-effort — failure to spawn it never aborts the qwinsta listing.
+			_logger.LogDebug(ex, "quser augmentation skipped");
+		}
+
 		IReadOnlyList<RdpSessionDto> dtos = QwinstaSessionMapper.MapAll(rows);
 		foreach (RdpSessionDto dto in dtos)
 		{
 			result.Sessions.Add(dto);
 		}
 
-		result.Message = string.Format(CultureInfo.InvariantCulture,
-			"Listed {0} session(s).", result.Sessions.Count);
+		result.Message = quserAugmented > 0
+			? string.Format(CultureInfo.InvariantCulture,
+				"Listed {0} session(s); {1} qwinsta row(s) repaired from quser.",
+				result.Sessions.Count, quserAugmented)
+			: string.Format(CultureInfo.InvariantCulture,
+				"Listed {0} session(s).", result.Sessions.Count);
 		return result;
 	}
 
@@ -173,6 +201,36 @@ public sealed class RdpSessionManager
 		if (proc is null)
 		{
 			throw new Win32Exception(string.Format(CultureInfo.InvariantCulture, "{0} failed to start.", tool));
+		}
+
+		Task<string> stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);
+		Task<string> stderrTask = proc.StandardError.ReadToEndAsync(ct);
+		await proc.WaitForExitAsync(ct).ConfigureAwait(false);
+		string stdout = await stdoutTask.ConfigureAwait(false);
+		string stderr = await stderrTask.ConfigureAwait(false);
+		return new SessionToolResult(proc.ExitCode, stdout, stderr);
+	}
+
+	private static async Task<SessionToolResult> RunTrustedToolAsync(TrustedSessionTool tool, CancellationToken ct)
+	{
+		SessionConsoleSpawn spawn = SessionConsoleCommandFactory.Build(tool);
+		System.Text.Encoding encoding = QwinstaConsoleEncoding.Resolve();
+		ProcessStartInfo psi = new(spawn.Executable)
+		{
+			Arguments = spawn.Arguments,
+			UseShellExecute = false,
+			CreateNoWindow = true,
+			RedirectStandardOutput = true,
+			RedirectStandardError = true,
+			StandardOutputEncoding = encoding,
+			StandardErrorEncoding = encoding,
+		};
+
+		using Process? proc = Process.Start(psi);
+		if (proc is null)
+		{
+			throw new Win32Exception(string.Format(CultureInfo.InvariantCulture,
+				"{0} failed to start via cmd.exe.", tool.ToString().ToLowerInvariant() + ".exe"));
 		}
 
 		Task<string> stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);

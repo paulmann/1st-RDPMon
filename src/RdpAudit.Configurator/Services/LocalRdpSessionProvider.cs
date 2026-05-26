@@ -3,25 +3,26 @@
 // Purpose: Configurator-side direct enumeration of local RDP sessions for the Remote RDP
 //          Clients tab when the RdpAudit service IPC pipe is unreachable. Mirrors the
 //          service-side RdpSessionManager behaviour: spawns the supported Windows
-//          command-line tool (qwinsta.exe), reads its column output through the pure
-//          RdpAudit.Core QwinstaParser, and projects every parsed row into the existing
-//          RdpSessionDto contract.
+//          command-line tools (qwinsta.exe and, for repair, quser.exe), reads their column
+//          output through the pure RdpAudit.Core QwinstaParser / QuserParser, merges the
+//          two via QwinstaQuserMerger (so a qwinsta row with a blank SESSIONNAME gets its
+//          name filled from the matching quser entry), and projects every parsed row into
+//          the existing RdpSessionDto contract.
 //
-//          The provider now follows the same stable-output technique used in the
-//          reference qwinsta_IP_PS7.ps1 script:
-//            * pin the spawning thread's CurrentCulture/CurrentUICulture to en-US so
-//              localised .NET callers do not bias child-process resource lookups;
-//            * inject LANG=en-US and LC_ALL=en-US into the child process environment;
-//            * resolve qwinsta.exe through the System32 absolute path (with a PATH
-//              fallback) so a malformed PATH cannot pick up a substitute binary;
-//            * capture stdout with the current OEM/console code page so the Cyrillic
-//              tokens emitted by Russian-language Windows builds are preserved when the
-//              English forcing has no effect — the header-agnostic parser then handles
-//              both flavours.
-//          ProcessStartInfo.ArgumentList is used so no user-supplied data is ever
-//          concatenated into a shell string. A hard timeout kills the process tree so
-//          a hung qwinsta cannot freeze the UI worker. Read-only — never spawns
-//          tsdiscon/logoff/mstsc.
+//          The provider runs qwinsta and quser through the parse-stable English console
+//          composed by SessionConsoleCommandFactory — cmd.exe /d /c "chcp 437 >nul & tool" —
+//          which pins the active code page to US-OEM. That is the documented technique for
+//          getting English STATE tokens (Active / Disc / Conn / Listen) out of these tools
+//          regardless of the operator's UI culture (Russian, in the field diagnostic). When
+//          the active-code-page forcing has no effect the header-agnostic / Cyrillic-aware
+//          parser still recovers the rows.
+//
+//          Shell-injection safety: the cmd /d /c argument string is built from FIXED
+//          constants in SessionConsoleCommandFactory — no operator input ever flows into it.
+//          ProcessStartInfo uses a single Arguments string composed entirely from those
+//          constants so the user cannot inject additional tokens. A hard timeout kills the
+//          process tree so a hung qwinsta/quser cannot freeze the UI worker. Read-only —
+//          never spawns tsdiscon/logoff/mstsc.
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
@@ -61,20 +62,30 @@ public sealed record LocalSessionListResult(
 	bool Success,
 	IReadOnlyList<RdpSessionDto> Sessions,
 	string? Error,
-	LocalSessionOutputFlavour Flavour)
+	LocalSessionOutputFlavour Flavour,
+	int QuserAugmentedRows)
 {
 	/// <summary>Convenience factory for a successful listing.</summary>
-	public static LocalSessionListResult Ok(IReadOnlyList<RdpSessionDto> sessions, LocalSessionOutputFlavour flavour) =>
-		new(true, sessions, null, flavour);
+	public static LocalSessionListResult Ok(IReadOnlyList<RdpSessionDto> sessions, LocalSessionOutputFlavour flavour, int quserAugmentedRows) =>
+		new(true, sessions, null, flavour, quserAugmentedRows);
 
 	/// <summary>Convenience factory for a failed listing.</summary>
 	public static LocalSessionListResult Failed(string error) =>
-		new(false, Array.Empty<RdpSessionDto>(), error, LocalSessionOutputFlavour.Unknown);
+		new(false, Array.Empty<RdpSessionDto>(), error, LocalSessionOutputFlavour.Unknown, 0);
 }
 
-/// <summary>Configurator-side enumeration of local RDP sessions via <c>qwinsta.exe</c>. Used by
-/// <see cref="Forms.RemoteRdpClientsPage"/> when the RdpAudit service IPC pipe is unreachable so
-/// the operator still sees live session rows; historical enrichment is unavailable in this mode.</summary>
+/// <summary>Abstraction over spawning a single trusted session-query tool. Lets tests inject
+/// deterministic stdout for both qwinsta and quser without touching the real Windows console.</summary>
+public interface ILocalSessionToolSpawner
+{
+	/// <summary>Run the specified trusted tool and capture its stdout/stderr/exit code.</summary>
+	Task<LocalSessionToolResult> RunAsync(TrustedSessionTool tool, CancellationToken ct);
+}
+
+/// <summary>Configurator-side enumeration of local RDP sessions via <c>qwinsta.exe</c> repaired
+/// from <c>quser.exe</c>. Used by <see cref="Forms.RemoteRdpClientsPage"/> when the RdpAudit
+/// service IPC pipe is unreachable so the operator still sees live session rows; historical
+/// enrichment is unavailable in this mode.</summary>
 [SupportedOSPlatform("windows")]
 public sealed class LocalRdpSessionProvider
 {
@@ -83,23 +94,21 @@ public sealed class LocalRdpSessionProvider
 	internal const int DefaultTimeoutMs = 5_000;
 
 	private readonly int _timeoutMs;
-	private readonly Func<IReadOnlyList<string>, CancellationToken, Task<LocalSessionToolResult>> _spawn;
+	private readonly ILocalSessionToolSpawner _spawner;
 
-	/// <summary>Production constructor — spawns the system qwinsta.exe.</summary>
+	/// <summary>Production constructor — spawns through the system English console.</summary>
 	public LocalRdpSessionProvider()
-		: this(DefaultTimeoutMs, RunSystemQwinstaAsync)
+		: this(DefaultTimeoutMs, new SystemConsoleSpawner())
 	{
 	}
 
-	/// <summary>Test-friendly constructor that lets the unit suite inject a deterministic spawn function.</summary>
-	internal LocalRdpSessionProvider(
-		int timeoutMs,
-		Func<IReadOnlyList<string>, CancellationToken, Task<LocalSessionToolResult>> spawn)
+	/// <summary>Test-friendly constructor that lets the unit suite inject a deterministic spawner.</summary>
+	internal LocalRdpSessionProvider(int timeoutMs, ILocalSessionToolSpawner spawner)
 	{
 		_timeoutMs = timeoutMs > 0
 			? timeoutMs
 			: throw new ArgumentOutOfRangeException(nameof(timeoutMs));
-		_spawn = spawn ?? throw new ArgumentNullException(nameof(spawn));
+		_spawner = spawner ?? throw new ArgumentNullException(nameof(spawner));
 	}
 
 	/// <summary>Lists currently known sessions on the local host. Never throws — failures are
@@ -109,10 +118,10 @@ public sealed class LocalRdpSessionProvider
 		using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 		cts.CancelAfter(_timeoutMs);
 
-		LocalSessionToolResult tool;
+		LocalSessionToolResult qwinsta;
 		try
 		{
-			tool = await _spawn(SessionCommandBuilder.BuildListSessions(), cts.Token).ConfigureAwait(false);
+			qwinsta = await _spawner.RunAsync(TrustedSessionTool.Qwinsta, cts.Token).ConfigureAwait(false);
 		}
 		catch (OperationCanceledException)
 		{
@@ -125,16 +134,26 @@ public sealed class LocalRdpSessionProvider
 				+ ex.GetType().Name + " — " + ex.Message);
 		}
 
-		if (!tool.Ok)
+		if (!qwinsta.Ok)
 		{
 			return LocalSessionListResult.Failed(string.Format(CultureInfo.InvariantCulture,
-				"qwinsta exit {0}: {1}", tool.ExitCode, Truncate(tool.StdErr, 200)));
+				"qwinsta exit {0}: {1}", qwinsta.ExitCode, Truncate(qwinsta.StdErr, 200)));
 		}
 
-		IReadOnlyList<QwinstaSessionRow> rows = QwinstaParser.Parse(tool.StdOut);
-		IReadOnlyList<RdpSessionDto> dtos = QwinstaSessionMapper.MapAll(rows);
-		LocalSessionOutputFlavour flavour = ClassifyOutputFlavour(tool.StdOut, rows.Count);
-		return LocalSessionListResult.Ok(dtos, flavour);
+		List<QwinstaSessionRow> qwinstaRows = new(QwinstaParser.Parse(qwinsta.StdOut));
+
+		int quserAugmented = 0;
+		LocalSessionToolResult? quser = await TryRunQuserAsync(cts.Token).ConfigureAwait(false);
+		if (quser is not null && quser.Ok)
+		{
+			IReadOnlyList<QuserSessionRow> quserRows = QuserParser.Parse(quser.StdOut);
+			QwinstaQuserMergeResult merge = QwinstaQuserMerger.Merge(qwinstaRows, quserRows);
+			quserAugmented = merge.RowsAugmented;
+		}
+
+		IReadOnlyList<RdpSessionDto> dtos = QwinstaSessionMapper.MapAll(qwinstaRows);
+		LocalSessionOutputFlavour flavour = ClassifyOutputFlavour(qwinsta.StdOut, qwinstaRows.Count);
+		return LocalSessionListResult.Ok(dtos, flavour, quserAugmented);
 	}
 
 	/// <summary>Adapter that returns the orchestrator-friendly <see cref="LocalSessionFallbackResult"/>
@@ -148,7 +167,30 @@ public sealed class LocalRdpSessionProvider
 		}
 
 		string detail = DescribeFlavour(result.Flavour);
+		if (result.QuserAugmentedRows > 0)
+		{
+			detail += string.Format(CultureInfo.InvariantCulture,
+				"; {0} qwinsta row(s) repaired from quser", result.QuserAugmentedRows);
+		}
+
 		return LocalSessionFallbackResult.Ok(result.Sessions, detail);
+	}
+
+	private async Task<LocalSessionToolResult?> TryRunQuserAsync(CancellationToken ct)
+	{
+		try
+		{
+			return await _spawner.RunAsync(TrustedSessionTool.Quser, ct).ConfigureAwait(false);
+		}
+		catch (OperationCanceledException)
+		{
+			return null;
+		}
+		catch (Exception)
+		{
+			// quser is best-effort — failure to run it must not abort the qwinsta path.
+			return null;
+		}
 	}
 
 	/// <summary>Inspects the raw stdout for language markers so the UI can tell whether
@@ -208,98 +250,6 @@ public sealed class LocalRdpSessionProvider
 		_ => "qwinsta output not classified",
 	};
 
-	private static async Task<LocalSessionToolResult> RunSystemQwinstaAsync(
-		IReadOnlyList<string> args,
-		CancellationToken ct)
-	{
-		string exe = ResolveQwinstaPath();
-		Encoding encoding = QwinstaConsoleEncoding.Resolve();
-		ProcessStartInfo psi = new(exe)
-		{
-			UseShellExecute = false,
-			CreateNoWindow = true,
-			RedirectStandardOutput = true,
-			RedirectStandardError = true,
-			StandardOutputEncoding = encoding,
-			StandardErrorEncoding = encoding,
-		};
-		foreach (string a in args)
-		{
-			psi.ArgumentList.Add(a);
-		}
-
-		// Mirror the reference qwinsta_IP_PS7.ps1 technique: push en-US into the child
-		// process environment so any locale-driven message lookups prefer English. Real
-		// qwinsta does not honour LANG/LC_ALL on its own — the variables are propagated
-		// for the benefit of any wrapping locale layers and to keep behaviour aligned
-		// with the reference script. The header-agnostic parser tolerates both flavours.
-		psi.EnvironmentVariables["LANG"] = "en-US";
-		psi.EnvironmentVariables["LC_ALL"] = "en-US";
-
-		CultureInfo originalCulture = Thread.CurrentThread.CurrentCulture;
-		CultureInfo originalUiCulture = Thread.CurrentThread.CurrentUICulture;
-		Thread.CurrentThread.CurrentCulture = CultureInfo.GetCultureInfo("en-US");
-		Thread.CurrentThread.CurrentUICulture = CultureInfo.GetCultureInfo("en-US");
-
-		try
-		{
-			using Process? proc = Process.Start(psi);
-			if (proc is null)
-			{
-				throw new Win32Exception("qwinsta.exe failed to start.");
-			}
-
-			try
-			{
-				Task<string> stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);
-				Task<string> stderrTask = proc.StandardError.ReadToEndAsync(ct);
-				await proc.WaitForExitAsync(ct).ConfigureAwait(false);
-				string stdout = await stdoutTask.ConfigureAwait(false);
-				string stderr = await stderrTask.ConfigureAwait(false);
-				return new LocalSessionToolResult(proc.ExitCode, stdout, stderr);
-			}
-			catch (OperationCanceledException)
-			{
-				try
-				{
-					if (!proc.HasExited)
-					{
-						proc.Kill(entireProcessTree: true);
-					}
-				}
-				catch (InvalidOperationException)
-				{
-					// Process already exited between the cancellation check and Kill.
-				}
-
-				throw;
-			}
-		}
-		finally
-		{
-			Thread.CurrentThread.CurrentCulture = originalCulture;
-			Thread.CurrentThread.CurrentUICulture = originalUiCulture;
-		}
-	}
-
-	/// <summary>Returns the absolute path to <c>%WINDIR%\System32\qwinsta.exe</c>. Falls
-	/// back to the bare command name (PATH lookup) when the System32 directory cannot be
-	/// resolved — Process.Start will then surface the diagnostic.</summary>
-	internal static string ResolveQwinstaPath()
-	{
-		string sys32 = Environment.GetFolderPath(Environment.SpecialFolder.System);
-		if (!string.IsNullOrEmpty(sys32))
-		{
-			string candidate = System.IO.Path.Combine(sys32, "qwinsta.exe");
-			if (System.IO.File.Exists(candidate))
-			{
-				return candidate;
-			}
-		}
-
-		return "qwinsta.exe";
-	}
-
 	private static string Truncate(string? value, int max)
 	{
 		if (string.IsNullOrEmpty(value))
@@ -309,6 +259,81 @@ public sealed class LocalRdpSessionProvider
 
 		string flat = value.Replace('\r', ' ').Replace('\n', ' ').Trim();
 		return flat.Length <= max ? flat : flat[..max];
+	}
+
+	/// <summary>Production spawner: runs the trusted tool through cmd.exe with chcp 437 so the
+	/// active console code page is the US-OEM page. Captures stdout with the OEM-page encoding
+	/// (cp866 on Russian builds, cp437 on English ones) so any Cyrillic state tokens that slip
+	/// through still decode correctly for the localized parser fallback.</summary>
+	private sealed class SystemConsoleSpawner : ILocalSessionToolSpawner
+	{
+		public async Task<LocalSessionToolResult> RunAsync(TrustedSessionTool tool, CancellationToken ct)
+		{
+			SessionConsoleSpawn spawn = SessionConsoleCommandFactory.Build(tool);
+			Encoding encoding = QwinstaConsoleEncoding.Resolve();
+			ProcessStartInfo psi = new(spawn.Executable)
+			{
+				Arguments = spawn.Arguments,
+				UseShellExecute = false,
+				CreateNoWindow = true,
+				RedirectStandardOutput = true,
+				RedirectStandardError = true,
+				StandardOutputEncoding = encoding,
+				StandardErrorEncoding = encoding,
+			};
+
+			// Push en-US into the child process environment too so any wrapping locale layer
+			// prefers English. cmd.exe ignores these, the inner tool ignores them — they are
+			// retained for parity with the prior implementation and any future locale shim.
+			psi.EnvironmentVariables["LANG"] = "en-US";
+			psi.EnvironmentVariables["LC_ALL"] = "en-US";
+
+			CultureInfo originalCulture = Thread.CurrentThread.CurrentCulture;
+			CultureInfo originalUiCulture = Thread.CurrentThread.CurrentUICulture;
+			Thread.CurrentThread.CurrentCulture = CultureInfo.GetCultureInfo("en-US");
+			Thread.CurrentThread.CurrentUICulture = CultureInfo.GetCultureInfo("en-US");
+
+			try
+			{
+				using Process? proc = Process.Start(psi);
+				if (proc is null)
+				{
+					throw new Win32Exception("Failed to start "
+						+ tool.ToString().ToLowerInvariant() + ".exe via cmd.exe.");
+				}
+
+				try
+				{
+					Task<string> stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);
+					Task<string> stderrTask = proc.StandardError.ReadToEndAsync(ct);
+					await proc.WaitForExitAsync(ct).ConfigureAwait(false);
+					string stdout = await stdoutTask.ConfigureAwait(false);
+					string stderr = await stderrTask.ConfigureAwait(false);
+					return new LocalSessionToolResult(proc.ExitCode, stdout, stderr);
+				}
+				catch (OperationCanceledException)
+				{
+					try
+					{
+						if (!proc.HasExited)
+						{
+							proc.Kill(entireProcessTree: true);
+						}
+					}
+					catch (InvalidOperationException)
+					{
+						// Process already exited between the cancellation check and Kill.
+					}
+
+					throw;
+				}
+			}
+			finally
+			{
+				Thread.CurrentThread.CurrentCulture = originalCulture;
+				Thread.CurrentThread.CurrentUICulture = originalUiCulture;
+			}
+		}
 	}
 }
 
