@@ -180,14 +180,17 @@ public sealed class ServicePage : TabPage
 		UpdateButtonStates(processInfo);
 	}
 
-	/// <summary>FIX-3: reflect the live service state in the button row so the operator cannot
-	/// click Install when already installed, or Start when already running. The mapping itself
-	/// lives in <see cref="ServiceButtonStateModel"/> so it can be unit tested.</summary>
+	/// <summary>Stage 4: reflect the live service state in the button row using the numeric
+	/// SCM state code (1=STOPPED, 4=RUNNING, …) rather than the localized state name. On
+	/// non-English Windows the textual state token is translated (e.g. "РАБОТАЕТ" instead of
+	/// "RUNNING"), so a string comparison against "RUNNING" silently fails and Start stays
+	/// enabled while the service is already running. The numeric code is locale-stable.
+	/// The mapping itself lives in <see cref="ServiceButtonStateModel"/> so it can be unit tested.</summary>
 	private void UpdateButtonStates(ServiceProcessInfo info)
 	{
 		bool running = info.Installed
 			&& info.ProcessId is not null
-			&& string.Equals(info.FinalState, "RUNNING", StringComparison.OrdinalIgnoreCase);
+			&& info.FinalStateCode == ServiceStateCode.Running;
 		ServiceButtonState state = ServiceButtonStateModel.Compute(info.Installed, running);
 		_btnInstall.Enabled = state.Install;
 		_btnUninstall.Enabled = state.Uninstall;
