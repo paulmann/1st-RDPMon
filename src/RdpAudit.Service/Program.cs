@@ -175,7 +175,14 @@ public static class Program
 			services.AddSingleton<RouteBlackholeProvider>();
 			services.AddSingleton<IFirewallProvider>(sp => sp.GetRequiredService<RouteBlackholeProvider>());
 			services.AddSingleton<IRdpPortProvider, RegistryRdpPortProvider>();
+			services.AddSingleton<IFirewallRuleScanner>(sp => new NetshFirewallRuleScanner(
+				sp.GetRequiredService<ILogger<NetshFirewallRuleScanner>>()));
 		}
+		else
+		{
+			services.AddSingleton<IFirewallRuleScanner, UnsupportedFirewallRuleScanner>();
+		}
+		services.AddSingleton<EnforcementReconciliationService>();
 		if (OperatingSystem.IsWindows())
 		{
 			services.AddSingleton<RdpSessionManager>();
@@ -218,6 +225,7 @@ public static class Program
 		services.AddHostedService<MaintenanceWorker>();
 		services.AddHostedService<FirewallAutoBlockWorker>();
 		services.AddHostedService<FirewallExpirationWorker>();
+		services.AddHostedService<EnforcementReconciliationWorker>();
 		services.AddHostedService<AttackStatsRefreshWorker>();
 		services.AddHostedService<AbuseIpDbReportWorker>();
 	}

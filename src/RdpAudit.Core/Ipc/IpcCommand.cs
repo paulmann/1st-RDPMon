@@ -106,4 +106,24 @@ public enum IpcCommand
 	/// reconciliation of active-block database rows against verified firewall enforcement. Used by the
 	/// Configurator's Firewall tab "Copy firewall diagnostics" button.</summary>
 	GetFirewallDiagnostics = 45,
+
+	// --- Stage 1.2.4 live enforcement reconciliation additions (append-only). ---
+
+	/// <summary>Runs a live enforcement reconciliation pass: scans the real Windows Firewall (and
+	/// other enabled backends) for RdpAudit rules, compares them against the DB-intended blocks, and
+	/// returns a per-block status (Active / MissingRule / ParameterMismatch / Expired / Orphaned /
+	/// ProviderUnavailable / EffectiveUnknown / Failed) plus a confidence (Verified /
+	/// ExistsButProviderMayBypass / Missing / Failed / Unknown) and recommended next action. Also
+	/// returns orphaned RdpAudit rules with no backing database row. RdpAudit never claims an IP is
+	/// actively blocked unless a matching backend object is discovered here.</summary>
+	ReconcileEnforcement = 46,
+
+	/// <summary>Repairs one ActiveBlock row by id: re-installs the missing/mismatched firewall rule
+	/// via the owning backend and re-reconciles, returning the post-repair reconciled row.</summary>
+	RepairActiveBlock = 47,
+
+	/// <summary>Emergency cleanup: removes every RdpAudit-created enforcement object (firewall rules,
+	/// blackhole routes, IPsec objects if any) and marks the corresponding ActiveBlock rows Removed.
+	/// Never deletes unrelated admin-created rules. Returns a per-category removal summary.</summary>
+	RemoveAllEnforcement = 48,
 }

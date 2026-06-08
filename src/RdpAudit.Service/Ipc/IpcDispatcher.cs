@@ -48,6 +48,7 @@ public sealed class IpcDispatcher
 	private readonly ConfigRepairReporter? _configRepair;
 	private readonly SecurityAuthProbeService? _securityAuthProbe;
 	private readonly Firewall.IRdpPortProvider? _rdpPortProvider;
+	private readonly EnforcementReconciliationService? _reconciliation;
 
 	public IpcDispatcher(
 		IDbContextFactory<AuditDbContext> factory,
@@ -65,7 +66,8 @@ public sealed class IpcDispatcher
 		RdpConfigurationReader? rdpConfigReader = null,
 		ConfigRepairReporter? configRepair = null,
 		SecurityAuthProbeService? securityAuthProbe = null,
-		Firewall.IRdpPortProvider? rdpPortProvider = null)
+		Firewall.IRdpPortProvider? rdpPortProvider = null,
+		EnforcementReconciliationService? reconciliation = null)
 	{
 		_factory = factory;
 		_metrics = metrics;
@@ -83,6 +85,7 @@ public sealed class IpcDispatcher
 		_configRepair = configRepair;
 		_securityAuthProbe = securityAuthProbe;
 		_rdpPortProvider = rdpPortProvider;
+		_reconciliation = reconciliation;
 	}
 
 	public async Task<IpcResponse> DispatchAsync(IpcRequest request, CancellationToken ct)
@@ -161,6 +164,11 @@ public sealed class IpcDispatcher
 
 				// --- Stage 8: Firewall enforcement diagnostics ---
 				IpcCommand.GetFirewallDiagnostics => await GetFirewallDiagnosticsAsync(ct).ConfigureAwait(false),
+
+				// --- Stage 1.2.4: live enforcement reconciliation ---
+				IpcCommand.ReconcileEnforcement => await ReconcileEnforcementAsync(ct).ConfigureAwait(false),
+				IpcCommand.RepairActiveBlock => await RepairActiveBlockAsync(request.Payload, ct).ConfigureAwait(false),
+				IpcCommand.RemoveAllEnforcement => await RemoveAllEnforcementAsync(ct).ConfigureAwait(false),
 
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
@@ -529,11 +537,52 @@ public sealed class IpcDispatcher
 			.CountAsync(b => b.Status == ActiveBlockStatus.Active || b.Status == ActiveBlockStatus.Pending, ct)
 			.ConfigureAwait(false);
 
-		// Verified enforcement: an Active row whose provider returned a rule handle is treated as
-		// confirmed (VerifyAfterBlock demotes a row whose post-block verification failed to Failed).
-		int verifiedRows = await db.ActiveBlocks
-			.CountAsync(b => b.Status == ActiveBlockStatus.Active && b.RuleHandle != null && b.RuleHandle != string.Empty, ct)
-			.ConfigureAwait(false);
+		// Live reconciliation: never claim enforcement from DB rows alone. When the reconciliation
+		// service is available, the verified count and per-IP detail come from a real firewall scan.
+		List<ReconciledEnforcementLine> reconciledLines = new();
+		List<string> orphanNames = new();
+		int verifiedEnforced = 0;
+		int rdpAuditRuleCount = 0;
+		bool thirdPartySuspected = false;
+		string? thirdPartyNote = null;
+		if (_reconciliation is not null)
+		{
+			ReconciliationReportDto rec = await _reconciliation.ReconcileAsync(ct).ConfigureAwait(false);
+			verifiedEnforced = rec.VerifiedCount;
+			rdpAuditRuleCount = rec.VerifiedCount;
+			foreach (ReconciledBlockDto b in rec.Blocks)
+			{
+				reconciledLines.Add(new ReconciledEnforcementLine(
+					Ip: b.Ip,
+					Status: EnforcementReconciler.DescribeStatus(b.Status),
+					Confidence: EnforcementReconciler.DescribeConfidence(b.Confidence),
+					EnforcementObjectId: b.EnforcementObjectId,
+					RecommendedAction: b.RecommendedAction));
+
+				if (b.Confidence == EnforcementConfidence.ExistsButProviderMayBypass)
+				{
+					thirdPartySuspected = true;
+					thirdPartyNote ??= "Windows Firewall rule verified; a third-party provider (e.g. Kaspersky) "
+						+ "may control effective enforcement.";
+				}
+			}
+
+			foreach (ReconciledBlockDto o in rec.Orphans)
+			{
+				if (!string.IsNullOrEmpty(o.EnforcementObjectId))
+				{
+					orphanNames.Add(o.EnforcementObjectId);
+				}
+			}
+		}
+		else
+		{
+			// Fallback proxy when reconciliation is unavailable: an Active row with a rule handle.
+			verifiedEnforced = await db.ActiveBlocks
+				.CountAsync(b => b.Status == ActiveBlockStatus.Active && b.RuleHandle != null && b.RuleHandle != string.Empty, ct)
+				.ConfigureAwait(false);
+			rdpAuditRuleCount = verifiedEnforced;
+		}
 
 		FirewallDiagnosticsInput input = new(
 			ConfiguredProviderKind: cfg.Provider.ToString(),
@@ -542,23 +591,27 @@ public sealed class IpcDispatcher
 			ResolvedRdpPort: rdpPort,
 			RdpPortFromRegistry: fromRegistry,
 			Providers: providers,
-			RdpAuditGroupBlockRuleCount: verifiedRows,
+			RdpAuditGroupBlockRuleCount: rdpAuditRuleCount,
 			EnabledAllowInboundTcpPorts: Array.Empty<int>(),
 			RdpAuditAllowRuleForResolvedPort: false,
 			RouteBackendState: routeState,
 			IPsecBackendState: ipsecState,
-			ThirdPartyFirewallSuspected: false,
-			ThirdPartyFirewallNote: null,
+			ThirdPartyFirewallSuspected: thirdPartySuspected,
+			ThirdPartyFirewallNote: thirdPartyNote,
 			BlocklistRowCount: blocklistRows,
 			ActiveBlockRowCount: activeRows,
-			VerifiedEnforcedCount: verifiedRows);
+			VerifiedEnforcedCount: verifiedEnforced)
+		{
+			ReconciledBlocks = reconciledLines,
+			OrphanedRuleNames = orphanNames,
+		};
 
 		return new FirewallDiagnosticsDto
 		{
 			Status = IpcResultStatus.Success,
 			ReportText = FirewallDiagnosticsReportBuilder.Build(input),
-			Message = "Firewall enforcement diagnostics snapshot. Combine with the client-side netsh / "
-				+ "provider probe shown above for the full picture.",
+			Message = "Firewall enforcement diagnostics snapshot with live reconciliation. Combine with the "
+				+ "client-side netsh / provider probe shown above for the full picture.",
 		};
 	}
 
@@ -891,6 +944,15 @@ public sealed class IpcDispatcher
 
 	private async Task<object?> ListActiveBlocksDetailedAsync(CancellationToken ct)
 	{
+		// The Active Blocks view is built from live reconciliation results — never DB rows alone — so
+		// RdpAudit never claims an IP is actively blocked unless a matching backend object is found.
+		if (_reconciliation is not null)
+		{
+			return await _reconciliation.ReconcileToActiveBlockDtosAsync(ct).ConfigureAwait(false);
+		}
+
+		// Fallback (reconciliation service not wired): surface DB rows but mark enforcement unknown so
+		// the operator is never misled into believing a row is verified.
 		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
 		List<ActiveBlock> rows = await db.ActiveBlocks.AsNoTracking()
 			.OrderByDescending(b => b.CreatedUtc)
@@ -908,7 +970,60 @@ public sealed class IpcDispatcher
 			Reason = b.Reason,
 			Status = b.Status,
 			LastError = b.LastError,
+			EnforcementStatus = EnforcementStatus.EffectiveUnknown,
+			EnforcementConfidence = EnforcementConfidence.Unknown,
+			RecommendedAction = "Reconciliation service unavailable; enforcement not verified.",
 		});
+	}
+
+	private async Task<object?> ReconcileEnforcementAsync(CancellationToken ct)
+	{
+		if (_reconciliation is null)
+		{
+			throw new IpcException("Enforcement reconciliation service is not available in this build.");
+		}
+
+		return await _reconciliation.ReconcileAsync(ct).ConfigureAwait(false);
+	}
+
+	private async Task<object?> RepairActiveBlockAsync(string? payload, CancellationToken ct)
+	{
+		if (_reconciliation is null)
+		{
+			throw new IpcException("Enforcement reconciliation service is not available in this build.");
+		}
+
+		if (string.IsNullOrWhiteSpace(payload))
+		{
+			throw new IpcException("RepairActiveBlock requires a JSON payload with the row Id.");
+		}
+
+		long id;
+		try
+		{
+			id = JsonSerializer.Deserialize<long>(payload, JsonOptions.Default);
+		}
+		catch (JsonException ex)
+		{
+			throw new IpcException("RepairActiveBlock payload is not a valid Id: " + ex.Message);
+		}
+
+		if (id <= 0)
+		{
+			throw new IpcException("RepairActiveBlock requires a positive Id.");
+		}
+
+		return await _reconciliation.RepairAsync(id, ct).ConfigureAwait(false);
+	}
+
+	private async Task<object?> RemoveAllEnforcementAsync(CancellationToken ct)
+	{
+		if (_reconciliation is null)
+		{
+			throw new IpcException("Enforcement reconciliation service is not available in this build.");
+		}
+
+		return await _reconciliation.RemoveAllEnforcementAsync(ct).ConfigureAwait(false);
 	}
 
 	private async Task<object?> UnblockActiveBlockAsync(string? payload, CancellationToken ct)
