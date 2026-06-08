@@ -151,4 +151,73 @@ public class NetshRuleScannerTests
 		Assert.False(NetshRuleScanner.ContainsEnabledInboundBlockRule("No rules match the specified criteria.\n"));
 		Assert.False(NetshRuleScanner.ContainsEnabledInboundBlockRule(string.Empty));
 	}
+
+	private const string MixedRulesDump =
+		"Rule Name:                            RdpAudit-Block-203.0.113.10\n" +
+		"----------------------------------------------------------------------\n" +
+		"Enabled:                              Yes\n" +
+		"Direction:                            In\n" +
+		"Profiles:                             Domain,Private,Public\n" +
+		"Grouping:                             RdpAudit\n" +
+		"RemoteIP:                             203.0.113.10/32\n" +
+		"Protocol:                             TCP\n" +
+		"LocalPort:                            3389\n" +
+		"Action:                               Block\n" +
+		"\n" +
+		"Rule Name:                            Some Unrelated Admin Rule\n" +
+		"----------------------------------------------------------------------\n" +
+		"Enabled:                              Yes\n" +
+		"Direction:                            In\n" +
+		"RemoteIP:                             198.51.100.5/32\n" +
+		"Protocol:                             TCP\n" +
+		"Action:                               Block\n" +
+		"\n" +
+		"Rule Name:                            RdpAudit-Block-198.51.100.7\n" +
+		"----------------------------------------------------------------------\n" +
+		"Enabled:                              No\n" +
+		"Direction:                            In\n" +
+		"Grouping:                             RdpAudit\n" +
+		"RemoteIP:                             198.51.100.7/32\n" +
+		"Protocol:                             Any\n" +
+		"Action:                               Block\n" +
+		"\n";
+
+	[Fact]
+	public void DiscoverRdpAuditBlockRules_ReturnsOnlyPrefixedRules()
+	{
+		IReadOnlyList<DiscoveredBlockRule> rules =
+			NetshRuleScanner.DiscoverRdpAuditBlockRules(MixedRulesDump, "RdpAudit-Block");
+
+		Assert.Equal(2, rules.Count);
+		Assert.All(rules, r => Assert.StartsWith("RdpAudit-Block", r.RuleName, StringComparison.Ordinal));
+		Assert.DoesNotContain(rules, r => r.RuleName.Contains("Unrelated", StringComparison.Ordinal));
+	}
+
+	[Fact]
+	public void DiscoverRdpAuditBlockRules_CapturesRemoteIpAndDirectionAndAction()
+	{
+		IReadOnlyList<DiscoveredBlockRule> rules =
+			NetshRuleScanner.DiscoverRdpAuditBlockRules(MixedRulesDump, "RdpAudit-Block");
+
+		DiscoveredBlockRule enabled = Assert.Single(rules, r => r.Enabled);
+		Assert.True(enabled.DirectionInbound);
+		Assert.True(enabled.ActionBlock);
+		// netsh renders 203.0.113.10/32; the parser strips the /prefix to the canonical IP token.
+		Assert.Contains("203.0.113.10", enabled.RemoteIps);
+	}
+
+	[Fact]
+	public void DiscoverRdpAuditBlockRules_PreservesDisabledRule()
+	{
+		IReadOnlyList<DiscoveredBlockRule> rules =
+			NetshRuleScanner.DiscoverRdpAuditBlockRules(MixedRulesDump, "RdpAudit-Block");
+
+		Assert.Contains(rules, r => !r.Enabled && r.RuleName.EndsWith("198.51.100.7", StringComparison.Ordinal));
+	}
+
+	[Fact]
+	public void DiscoverRdpAuditBlockRules_EmptyOutput_ReturnsEmpty()
+	{
+		Assert.Empty(NetshRuleScanner.DiscoverRdpAuditBlockRules(string.Empty, "RdpAudit-Block"));
+	}
 }

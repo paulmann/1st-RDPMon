@@ -332,7 +332,10 @@ public sealed class FirewallPage : TabPage
 		AttachReputationMenu(_activeBlocksGrid, () => SelectedRow(_activeBlocksGrid, _activeBlockRows)?.Ip);
 		_activeBlocksFilter = MakeFilterBox("Filter IP / reason / provider / status…", () => ApplyActiveBlockFilter());
 		Button activeUnblock = MakeButton("Unblock selected", async (_, _) => await OnUnblockActiveAsync().ConfigureAwait(true));
-		_innerTabs.TabPages.Add(BuildGridTab("Active blocks", _activeBlocksGrid, _activeBlocksFilter, null, activeUnblock));
+		Button activeVerify = MakeButton("Verify all", async (_, _) => await OnVerifyAllAsync().ConfigureAwait(true));
+		Button activeRepair = MakeButton("Repair selected", async (_, _) => await OnRepairActiveAsync().ConfigureAwait(true));
+		Button activeRemoveAll = MakeButton("Remove all enforcement", async (_, _) => await OnRemoveAllEnforcementAsync().ConfigureAwait(true));
+		_innerTabs.TabPages.Add(BuildGridTab("Active blocks", _activeBlocksGrid, _activeBlocksFilter, null, activeUnblock, activeVerify, activeRepair, activeRemoveAll));
 
 		// --- Firewall provider diagnostics panel -------------------------------------------------
 		// Surfaces the detected provider (plain Windows Defender Firewall vs. Kaspersky-detected vs.
@@ -1039,6 +1042,109 @@ public sealed class FirewallPage : TabPage
 	}
 
 	// ---------------------------------------------------------------------------------------------
+	// Reconciliation actions: verify all, repair selected, remove all enforcement
+	// ---------------------------------------------------------------------------------------------
+
+	/// <summary>Forces a live reconciliation pass on the service, then refreshes the grid so the
+	/// Active Blocks view reflects verified enforcement rather than database intent alone.</summary>
+	private async Task OnVerifyAllAsync()
+	{
+		try
+		{
+			ReconciliationReportDto? report =
+				await _ipc.SendAsync<ReconciliationReportDto>(IpcCommand.ReconcileEnforcement).ConfigureAwait(true);
+			if (report is null)
+			{
+				SetStatus("Verify all: FAILED (no response).");
+			}
+			else
+			{
+				SetStatus(string.Format(CultureInfo.InvariantCulture,
+					"Verify all: {0} block(s), {1} verified, {2} unenforced, {3} orphan(s).",
+					report.Blocks.Count, report.VerifiedCount, report.UnenforcedCount, report.Orphans.Count));
+			}
+
+			await RefreshAllAsync().ConfigureAwait(true);
+		}
+		catch (Exception ex)
+		{
+			SetStatus(string.Format(CultureInfo.InvariantCulture,
+				"Verify all: FAILED — {0}", ex.GetType().Name));
+		}
+	}
+
+	/// <summary>Re-installs the backend enforcement object for the selected block via its owning
+	/// provider, then refreshes the grid so the operator sees the post-repair status.</summary>
+	private async Task OnRepairActiveAsync()
+	{
+		ActiveBlockRow? row = SelectedRow(_activeBlocksGrid, _activeBlockRows);
+		if (row is null)
+		{
+			SetStatus("Repair aborted: no row selected.");
+			return;
+		}
+
+		try
+		{
+			ReconciledBlockDto? result =
+				await _ipc.SendAsync<ReconciledBlockDto>(IpcCommand.RepairActiveBlock, row.Id).ConfigureAwait(true);
+			SetStatus(result is null
+				? string.Format(CultureInfo.InvariantCulture, "Repair {0}: FAILED (no response).", row.Ip)
+				: string.Format(CultureInfo.InvariantCulture, "Repair {0}: {1} / {2}.",
+					row.Ip,
+					EnforcementReconciler.DescribeStatus(result.Status),
+					EnforcementReconciler.DescribeConfidence(result.Confidence)));
+			await RefreshAllAsync().ConfigureAwait(true);
+		}
+		catch (Exception ex)
+		{
+			SetStatus(string.Format(CultureInfo.InvariantCulture,
+				"Repair {0}: FAILED — {1}", row.Ip, ex.GetType().Name));
+		}
+	}
+
+	/// <summary>Emergency cleanup: removes every RdpAudit-owned enforcement object (firewall rules,
+	/// routes, IPsec policies) and marks the matching database rows Removed. Confirms first because
+	/// this unblocks every IP RdpAudit is currently enforcing.</summary>
+	private async Task OnRemoveAllEnforcementAsync()
+	{
+		const string prompt =
+			"Remove ALL RdpAudit enforcement?\r\n\r\nThis deletes every RdpAudit-owned firewall rule, "
+			+ "blackhole route and IPsec policy, and marks the matching active blocks as removed. "
+			+ "Unrelated administrator rules are never touched.";
+		if (!Confirm(prompt, "Confirm remove all enforcement"))
+		{
+			SetStatus("Remove all enforcement cancelled.");
+			return;
+		}
+
+		try
+		{
+			EnforcementCleanupResultDto? result =
+				await _ipc.SendAsync<EnforcementCleanupResultDto>(IpcCommand.RemoveAllEnforcement).ConfigureAwait(true);
+			if (result is null)
+			{
+				SetStatus("Remove all enforcement: FAILED (no response).");
+			}
+			else
+			{
+				SetStatus(string.Format(CultureInfo.InvariantCulture,
+					"Remove all enforcement: {0} rule(s), {1} route(s), {2} IPsec object(s) removed, "
+					+ "{3} row(s) marked removed, {4} failure(s).",
+					result.FirewallRulesRemoved, result.RoutesRemoved, result.IpsecObjectsRemoved,
+					result.ActiveBlockRowsMarkedRemoved, result.Failures));
+			}
+
+			await RefreshAllAsync().ConfigureAwait(true);
+		}
+		catch (Exception ex)
+		{
+			SetStatus(string.Format(CultureInfo.InvariantCulture,
+				"Remove all enforcement: FAILED — {0}", ex.GetType().Name));
+		}
+	}
+
+	// ---------------------------------------------------------------------------------------------
 	// Filtering helpers
 	// ---------------------------------------------------------------------------------------------
 
@@ -1106,7 +1212,10 @@ public sealed class FirewallPage : TabPage
 				dto.Provider.ToString(),
 				dto.Status.ToString(),
 				dto.LastError,
-				dto.RuleHandle))
+				dto.RuleHandle,
+				EnforcementReconciler.DescribeStatus(dto.EnforcementStatus),
+				EnforcementReconciler.DescribeConfidence(dto.EnforcementConfidence),
+				dto.RecommendedAction))
 			{
 				_activeBlockRows.Add(ActiveBlockRow.From(dto));
 			}
@@ -1278,6 +1387,9 @@ public sealed class FirewallPage : TabPage
 		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Provider", DataPropertyName = nameof(ActiveBlockRow.ProviderText), Width = 100 });
 		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Rule handle", DataPropertyName = nameof(ActiveBlockRow.RuleHandle), Width = 200 });
 		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Status", DataPropertyName = nameof(ActiveBlockRow.StatusText), Width = 90 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Enforcement", DataPropertyName = nameof(ActiveBlockRow.EnforcementText), Width = 140 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Confidence", DataPropertyName = nameof(ActiveBlockRow.ConfidenceText), Width = 170 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Recommended action", DataPropertyName = nameof(ActiveBlockRow.RecommendedAction), Width = 220 });
 		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Created (UTC)", DataPropertyName = nameof(ActiveBlockRow.CreatedUtcText), Width = 170 });
 		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Expires (UTC)", DataPropertyName = nameof(ActiveBlockRow.ExpiresUtcText), Width = 170 });
 		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Remaining", DataPropertyName = nameof(ActiveBlockRow.RemainingText), Width = 110 });
@@ -1472,6 +1584,12 @@ public sealed class FirewallPage : TabPage
 
 		public string ReasonOrError { get; init; } = string.Empty;
 
+		public string EnforcementText { get; init; } = string.Empty;
+
+		public string ConfidenceText { get; init; } = string.Empty;
+
+		public string RecommendedAction { get; init; } = string.Empty;
+
 		public static ActiveBlockRow From(ActiveBlockDto dto)
 		{
 			StringBuilder sb = new();
@@ -1500,6 +1618,9 @@ public sealed class FirewallPage : TabPage
 				ExpiresUtcText = BlockExpiryFormatter.FormatExpiresUtc(dto.ExpiresUtc),
 				RemainingText = BlockExpiryFormatter.FormatRemaining(dto.ExpiresUtc, DateTime.UtcNow),
 				ReasonOrError = sb.ToString(),
+				EnforcementText = EnforcementReconciler.DescribeStatus(dto.EnforcementStatus),
+				ConfidenceText = EnforcementReconciler.DescribeConfidence(dto.EnforcementConfidence),
+				RecommendedAction = dto.RecommendedAction ?? string.Empty,
 			};
 		}
 	}

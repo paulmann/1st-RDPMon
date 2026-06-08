@@ -105,4 +105,14 @@ public sealed class FirewallOptions
 	/// genuinely unreachable on the host before relying on it and the operator can change it.
 	/// </remarks>
 	public string RouteBlackholeGateway { get; set; } = "10.255.255.254";
+
+	/// <summary>Interval in seconds between live enforcement reconciliation passes; zero or negative
+	/// disables the background reconciliation worker.</summary>
+	/// <remarks>
+	/// The reconciliation worker periodically scans the real firewall and compares it against the
+	/// database-intended blocks so RdpAudit never silently claims an IP is blocked when no backend
+	/// object exists. Defaults to 300 seconds (5 minutes); a row whose enforcement is found missing or
+	/// failed is demoted to <c>Failed</c> so the operator (and the Active Blocks view) sees the truth.
+	/// </remarks>
+	public int ReconciliationIntervalSeconds { get; set; } = 300;
 }

@@ -44,7 +44,24 @@ public sealed record FirewallDiagnosticsInput(
 	string? ThirdPartyFirewallNote,
 	int BlocklistRowCount,
 	int ActiveBlockRowCount,
-	int VerifiedEnforcedCount);
+	int VerifiedEnforcedCount)
+{
+	/// <summary>Per-IP reconciled enforcement lines (IP, status, confidence, recommended action).
+	/// Empty when a live reconciliation pass was not available. Optional so existing callers bind.</summary>
+	public IReadOnlyList<ReconciledEnforcementLine> ReconciledBlocks { get; init; } =
+		Array.Empty<ReconciledEnforcementLine>();
+
+	/// <summary>Orphaned RdpAudit firewall rule names discovered with no backing database row.</summary>
+	public IReadOnlyList<string> OrphanedRuleNames { get; init; } = Array.Empty<string>();
+}
+
+/// <summary>One per-IP reconciled enforcement line for the diagnostics report.</summary>
+public sealed record ReconciledEnforcementLine(
+	string Ip,
+	string Status,
+	string Confidence,
+	string? EnforcementObjectId,
+	string RecommendedAction);
 
 /// <summary>Pure formatter for the Copy firewall diagnostics block.</summary>
 public static class FirewallDiagnosticsReportBuilder
@@ -131,6 +148,34 @@ public static class FirewallDiagnosticsReportBuilder
 				.Append(unenforced.ToString(CultureInfo.InvariantCulture))
 				.AppendLine(" active-block row(s) have NO confirmed firewall enforcement — "
 					+ "a database row alone does not block traffic.");
+		}
+
+		if (input.ReconciledBlocks.Count > 0)
+		{
+			sb.AppendLine();
+			sb.AppendLine("[Per-IP reconciliation]");
+			foreach (ReconciledEnforcementLine line in input.ReconciledBlocks)
+			{
+				sb.Append("  ").Append(line.Ip)
+					.Append(": ").Append(line.Status)
+					.Append(" / ").Append(line.Confidence);
+				if (!string.IsNullOrEmpty(line.EnforcementObjectId))
+				{
+					sb.Append(" [").Append(line.EnforcementObjectId).Append(']');
+				}
+
+				sb.Append(" — ").AppendLine(line.RecommendedAction);
+			}
+		}
+
+		if (input.OrphanedRuleNames.Count > 0)
+		{
+			sb.AppendLine();
+			sb.AppendLine("[Orphaned RdpAudit rules (no backing database row)]");
+			foreach (string ruleName in input.OrphanedRuleNames)
+			{
+				sb.Append("  ").AppendLine(ruleName);
+			}
 		}
 
 		return sb.ToString();

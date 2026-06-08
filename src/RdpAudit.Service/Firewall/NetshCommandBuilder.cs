@@ -243,6 +243,12 @@ public static class NetshCommandBuilder
 	public static IReadOnlyList<string> BuildShowAllProfilesStateArgs() =>
 		new List<string> { "advfirewall", "show", "allprofiles", "state" };
 
+	/// <summary>Builds the argument vector for <c>netsh advfirewall firewall show rule name=all
+	/// verbose</c>. Used by live enforcement reconciliation to enumerate every firewall rule in one
+	/// pass; the caller filters the parsed result to the RdpAudit rule-name prefix.</summary>
+	public static IReadOnlyList<string> BuildShowAllRulesArgs() =>
+		new List<string> { "advfirewall", "firewall", "show", "rule", "name=all", "verbose" };
+
 	/// <summary>Validates a rule name against the conservative ASCII set we accept.</summary>
 	private static void ValidateRuleName(string ruleName)
 	{

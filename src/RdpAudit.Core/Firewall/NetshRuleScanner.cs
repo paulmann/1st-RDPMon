@@ -29,7 +29,20 @@ public sealed record NetshParsedRule(
 	string? Direction,
 	string? Action,
 	string? Protocol,
-	IReadOnlyList<int> LocalPorts);
+	IReadOnlyList<int> LocalPorts,
+	IReadOnlyList<string> RemoteIps);
+
+/// <summary>A discovered RdpAudit inbound block rule, projected from netsh `show rule` output for
+/// live enforcement reconciliation. Carries the concrete parameters the reconciler must compare
+/// against the desired block (direction / action / enabled / protocol / port / remote IP).</summary>
+public sealed record DiscoveredBlockRule(
+	string RuleName,
+	bool Enabled,
+	bool DirectionInbound,
+	bool ActionBlock,
+	string? Protocol,
+	IReadOnlyList<int> LocalPorts,
+	IReadOnlyList<string> RemoteIps);
 
 /// <summary>Why a rule that mentions the requested port was nonetheless rejected by the scanner.</summary>
 public sealed record NetshRulePortMatchExplanation(
@@ -48,6 +61,7 @@ public static class NetshRuleScanner
 	private const string ActionKey = "Action:";
 	private const string ProtocolKey = "Protocol:";
 	private const string LocalPortKey = "LocalPort:";
+	private const string RemoteIpKey = "RemoteIP:";
 	private const string RuleNameKey = "Rule Name:";
 
 	/// <summary>True when <paramref name="netshOutput"/> contains at least one rule block
@@ -137,6 +151,7 @@ public static class NetshRuleScanner
 		string? action = null;
 		string? protocol = null;
 		List<int> ports = new();
+		List<string> remoteIps = new();
 		bool hasAnyField = false;
 
 		foreach (string raw in lines)
@@ -146,7 +161,7 @@ public static class NetshRuleScanner
 			{
 				if (hasAnyField)
 				{
-					yield return new NetshParsedRule(ruleName, enabled, direction, action, protocol, ports);
+					yield return new NetshParsedRule(ruleName, enabled, direction, action, protocol, ports, remoteIps);
 				}
 				ruleName = null;
 				enabled = null;
@@ -154,6 +169,7 @@ public static class NetshRuleScanner
 				action = null;
 				protocol = null;
 				ports = new List<int>();
+				remoteIps = new List<string>();
 				hasAnyField = false;
 				continue;
 			}
@@ -188,12 +204,54 @@ public static class NetshRuleScanner
 				ParsePortList(lp!, ports);
 				hasAnyField = true;
 			}
+			else if (TryReadField(line, RemoteIpKey, out string? rip))
+			{
+				ParseRemoteIpList(rip!, remoteIps);
+				hasAnyField = true;
+			}
 		}
 
 		if (hasAnyField)
 		{
-			yield return new NetshParsedRule(ruleName, enabled, direction, action, protocol, ports);
+			yield return new NetshParsedRule(ruleName, enabled, direction, action, protocol, ports, remoteIps);
 		}
+	}
+
+	/// <summary>Projects every rule block in <paramref name="netshOutput"/> whose name carries the
+	/// supplied RdpAudit rule-name prefix into a <see cref="DiscoveredBlockRule"/>. This is the
+	/// live-scan primitive used by enforcement reconciliation: callers compare the discovered
+	/// parameters against each desired block to derive a status (Active / ParameterMismatch /
+	/// MissingRule) and detect orphaned RdpAudit rules with no backing database row. The match is a
+	/// case-insensitive prefix test on the rule name so only RdpAudit-created rules are returned —
+	/// unrelated admin rules are never touched.</summary>
+	public static IReadOnlyList<DiscoveredBlockRule> DiscoverRdpAuditBlockRules(string netshOutput, string ruleNamePrefix)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(ruleNamePrefix);
+
+		List<DiscoveredBlockRule> discovered = new();
+		foreach (NetshParsedRule rule in ParseRules(netshOutput))
+		{
+			if (rule.RuleName is null)
+			{
+				continue;
+			}
+
+			if (!rule.RuleName.StartsWith(ruleNamePrefix, StringComparison.OrdinalIgnoreCase))
+			{
+				continue;
+			}
+
+			discovered.Add(new DiscoveredBlockRule(
+				RuleName: rule.RuleName,
+				Enabled: rule.Enabled == true,
+				DirectionInbound: IsInboundDirection(rule.Direction),
+				ActionBlock: IsBlockAction(rule.Action),
+				Protocol: rule.Protocol,
+				LocalPorts: rule.LocalPorts,
+				RemoteIps: rule.RemoteIps));
+		}
+
+		return discovered;
 	}
 
 	/// <summary>True when <paramref name="netshOutput"/> (the verbose dump for a single named rule)
@@ -257,6 +315,42 @@ public static class NetshRuleScanner
 		}
 		value = null;
 		return false;
+	}
+
+	/// <summary>Parses a netsh RemoteIP field into bare address tokens. netsh renders remote IPs as
+	/// <c>1.2.3.4/32</c>, <c>1.2.3.4-1.2.3.4</c>, a comma list, or the literal <c>Any</c>. We strip
+	/// the <c>/prefix</c> and collapse single-address ranges so the token matches the canonical IP
+	/// stored on the desired block; <c>Any</c> is preserved verbatim so the reconciler can flag a
+	/// rule that blocks everything (a parameter mismatch for a per-IP block).</summary>
+	internal static void ParseRemoteIpList(string raw, List<string> remoteIps)
+	{
+		foreach (string part in raw.Split(','))
+		{
+			string token = part.Trim();
+			if (token.Length == 0)
+			{
+				continue;
+			}
+
+			int slash = token.IndexOf('/', StringComparison.Ordinal);
+			if (slash > 0)
+			{
+				token = token[..slash].Trim();
+			}
+
+			int dash = token.IndexOf('-', StringComparison.Ordinal);
+			if (dash > 0)
+			{
+				string from = token[..dash].Trim();
+				string to = token[(dash + 1)..].Trim();
+				token = string.Equals(from, to, StringComparison.OrdinalIgnoreCase) ? from : token;
+			}
+
+			if (token.Length > 0)
+			{
+				remoteIps.Add(token);
+			}
+		}
 	}
 
 	private static void ParsePortList(string raw, List<int> ports)
