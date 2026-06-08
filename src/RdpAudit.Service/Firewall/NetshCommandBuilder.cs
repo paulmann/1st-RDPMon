@@ -12,6 +12,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using RdpAudit.Core.Config;
 
 namespace RdpAudit.Service.Firewall;
 
@@ -32,6 +33,16 @@ public static class NetshCommandBuilder
 
 	/// <summary>Prefix used by every RdpAudit-owned rule, never touched on third-party rules.</summary>
 	public const string DefaultRulePrefix = "RdpAudit-Block";
+
+	/// <summary>Firewall group stamped on every RdpAudit-owned rule.</summary>
+	/// <remarks>
+	/// Tagging rules with a stable <c>group=</c> lets operators (and our own verification /
+	/// diagnostics) enumerate every RdpAudit rule via <c>Get-NetFirewallRule -Group RdpAudit</c> or
+	/// <c>netsh advfirewall firewall show rule name=all</c> filtered on Grouping. Without this, the
+	/// operator-reported "Get-NetFirewallRule where Group contains RdpAudit returns no rules" is
+	/// expected even when rules exist, because netsh-added rules carry no group by default.
+	/// </remarks>
+	public const string RdpAuditGroup = "RdpAudit";
 
 	/// <summary>Normalises a base rule prefix to the conservative ASCII set accepted by netsh.</summary>
 	/// <remarks>
@@ -135,22 +146,66 @@ public static class NetshCommandBuilder
 			|| b[0] >= 224;
 	}
 
-	/// <summary>Builds the argument vector for <c>netsh advfirewall firewall add rule</c>.</summary>
-	public static IReadOnlyList<string> BuildAddRuleArgs(string ruleName, string ip, string? description)
+	/// <summary>Builds the argument vector for an all-inbound <c>netsh advfirewall firewall add rule</c>.</summary>
+	/// <remarks>Convenience overload preserving the historical all-inbound behaviour with the
+	/// RdpAudit group now stamped on. Equivalent to
+	/// <see cref="BuildAddRuleArgs(string, string, string?, FirewallBlockScope, int)"/> with
+	/// <see cref="FirewallBlockScope.AllInbound"/>.</remarks>
+	public static IReadOnlyList<string> BuildAddRuleArgs(string ruleName, string ip, string? description) =>
+		BuildAddRuleArgs(ruleName, ip, description, FirewallBlockScope.AllInbound, rdpPort: 0);
+
+	/// <summary>Builds the scope-aware argument vector for <c>netsh advfirewall firewall add rule</c>.</summary>
+	/// <param name="ruleName">Validated per-IP rule name.</param>
+	/// <param name="ip">Attacker IP; re-validated and canonicalised here.</param>
+	/// <param name="description">Optional audit description; sanitised before use.</param>
+	/// <param name="scope">RDP-port-only or all-inbound. Drives the protocol / port arguments.</param>
+	/// <param name="rdpPort">Resolved RDP listener port; required (1..65535) when
+	/// <paramref name="scope"/> is <see cref="FirewallBlockScope.RdpPortOnly"/>. Never hardcoded.</param>
+	/// <remarks>
+	/// Every rule is stamped with <c>group=RdpAudit</c> so operators can enumerate RdpAudit rules by
+	/// Group. For <see cref="FirewallBlockScope.RdpPortOnly"/> the rule restricts to
+	/// <c>protocol=tcp</c> and the resolved <c>localport</c>; for
+	/// <see cref="FirewallBlockScope.AllInbound"/> it uses <c>protocol=any</c>.
+	/// </remarks>
+	public static IReadOnlyList<string> BuildAddRuleArgs(
+		string ruleName,
+		string ip,
+		string? description,
+		FirewallBlockScope scope,
+		int rdpPort)
 	{
 		ValidateRuleName(ruleName);
 		string canonicalIp = NormalizeIp(ip);
 
-		List<string> args = new(10)
+		List<string> args = new(12)
 		{
 			"advfirewall", "firewall", "add", "rule",
 			string.Format(CultureInfo.InvariantCulture, "name={0}", ruleName),
+			string.Format(CultureInfo.InvariantCulture, "group={0}", RdpAuditGroup),
 			"dir=in",
 			"action=block",
 			string.Format(CultureInfo.InvariantCulture, "remoteip={0}", canonicalIp),
-			"protocol=any",
+			"profile=any",
 			"enable=yes",
 		};
+
+		if (scope == FirewallBlockScope.RdpPortOnly)
+		{
+			if (rdpPort < 1 || rdpPort > 65535)
+			{
+				throw new ArgumentOutOfRangeException(
+					nameof(rdpPort),
+					rdpPort,
+					"RdpPortOnly scope requires a resolved RDP listener port in range 1..65535.");
+			}
+
+			args.Add("protocol=tcp");
+			args.Add(string.Format(CultureInfo.InvariantCulture, "localport={0}", rdpPort));
+		}
+		else
+		{
+			args.Add("protocol=any");
+		}
 
 		string safeDescription = SanitizeDescription(description);
 		if (safeDescription.Length > 0)

@@ -190,6 +190,7 @@ public sealed class AttackStatisticsPage : TabPage
 		};
 		ConfigureGridColumns(_grid);
 		_grid.DataSource = _binding;
+		SortableGrid.Enable(_grid, _binding);
 		_grid.RowPrePaint += OnRowPrePaint;
 		_grid.CellMouseDown += OnCellMouseDown;
 		_grid.CellFormatting += OnCellFormatting;
@@ -312,21 +313,24 @@ public sealed class AttackStatisticsPage : TabPage
 		});
 		grid.Columns.Add(new DataGridViewTextBoxColumn
 		{
-			HeaderText = "Total",
+			HeaderText = "Total Events",
 			DataPropertyName = nameof(AttackStatRow.TotalAttempts),
-			Width = 70,
+			Width = 90,
+			ToolTipText = "Total logon-outcome events observed for this IP (sum of session successes and failures).",
 		});
 		grid.Columns.Add(new DataGridViewTextBoxColumn
 		{
-			HeaderText = "Failed",
+			HeaderText = "Session Failed",
 			DataPropertyName = nameof(AttackStatRow.Failed),
-			Width = 70,
+			Width = 100,
+			ToolTipText = "Failed RDP logon-outcome events (Security 4625) counted by the attack-statistics aggregator.",
 		});
 		grid.Columns.Add(new DataGridViewTextBoxColumn
 		{
-			HeaderText = "Successful",
+			HeaderText = "RDP Session Success",
 			DataPropertyName = nameof(AttackStatRow.Successful),
-			Width = 80,
+			Width = 140,
+			ToolTipText = "Successful RDP session establishments (Security 4624 / TS-RCM 1149 / TS-LSM 21/25) for this IP.",
 		});
 		grid.Columns.Add(new DataGridViewTextBoxColumn
 		{
@@ -377,17 +381,19 @@ public sealed class AttackStatisticsPage : TabPage
 		});
 		grid.Columns.Add(new DataGridViewTextBoxColumn
 		{
-			HeaderText = "Fact Failed",
+			HeaderText = "Auth Failed",
 			DataPropertyName = nameof(AttackStatRow.FactFailedLogons),
-			Width = 90,
-			ToolTipText = "Sum of failed logons across all RdpConnectionFacts for this IP.",
+			Width = 100,
+			ToolTipText = "Authoritative failed-authentication count from RdpConnectionFacts for this IP "
+				+ "(preferred source of truth over the aggregator's Session Failed column).",
 		});
 		grid.Columns.Add(new DataGridViewTextBoxColumn
 		{
-			HeaderText = "Fact Success",
+			HeaderText = "Auth Success",
 			DataPropertyName = nameof(AttackStatRow.FactSuccessfulLogons),
-			Width = 90,
-			ToolTipText = "Sum of successful logons across all RdpConnectionFacts for this IP.",
+			Width = 100,
+			ToolTipText = "Authoritative successful-authentication count from RdpConnectionFacts for this IP "
+				+ "(preferred source of truth over the aggregator's RDP Session Success column).",
 		});
 		grid.Columns.Add(new DataGridViewTextBoxColumn
 		{

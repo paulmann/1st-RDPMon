@@ -31,7 +31,8 @@ public class WindowsFirewallProviderTests
 		WindowsFirewallProvider provider = new(
 			NullLogger<WindowsFirewallProvider>.Instance,
 			CreateOptions(),
-			runner);
+			runner,
+			new FakeRdpPortProvider());
 
 		FirewallActionResult result = await provider.BlockAsync(
 			new FirewallBlockRequest("203.0.113.10", "RdpAudit-Block")
@@ -63,7 +64,8 @@ public class WindowsFirewallProviderTests
 		WindowsFirewallProvider provider = new(
 			NullLogger<WindowsFirewallProvider>.Instance,
 			CreateOptions(),
-			runner);
+			runner,
+			new FakeRdpPortProvider());
 
 		FirewallActionResult result = await provider.BlockAsync(
 			new FirewallBlockRequest("not-an-ip", "RdpAudit-Block"),
@@ -87,7 +89,8 @@ public class WindowsFirewallProviderTests
 		WindowsFirewallProvider provider = new(
 			NullLogger<WindowsFirewallProvider>.Instance,
 			CreateOptions(new RdpAuditOptions { Firewall = new FirewallOptions { RefusePrivateAddressBlock = true } }),
-			runner);
+			runner,
+			new FakeRdpPortProvider());
 
 		FirewallActionResult result = await provider.BlockAsync(
 			new FirewallBlockRequest("127.0.0.1", "RdpAudit-Block"),
@@ -111,7 +114,8 @@ public class WindowsFirewallProviderTests
 		WindowsFirewallProvider provider = new(
 			NullLogger<WindowsFirewallProvider>.Instance,
 			CreateOptions(new RdpAuditOptions { Firewall = new FirewallOptions { RefusePrivateAddressBlock = false } }),
-			runner);
+			runner,
+			new FakeRdpPortProvider());
 
 		FirewallActionResult result = await provider.BlockAsync(
 			new FirewallBlockRequest("10.0.0.1", "RdpAudit-Block"),
@@ -135,7 +139,8 @@ public class WindowsFirewallProviderTests
 		WindowsFirewallProvider provider = new(
 			NullLogger<WindowsFirewallProvider>.Instance,
 			CreateOptions(),
-			runner);
+			runner,
+			new FakeRdpPortProvider());
 
 		FirewallActionResult result = await provider.UnblockAsync(
 			"203.0.113.10",
@@ -159,7 +164,8 @@ public class WindowsFirewallProviderTests
 		WindowsFirewallProvider provider = new(
 			NullLogger<WindowsFirewallProvider>.Instance,
 			CreateOptions(),
-			runner);
+			runner,
+			new FakeRdpPortProvider());
 
 		FirewallActionResult result = await provider.UnblockAsync(
 			"203.0.113.10",
@@ -192,12 +198,25 @@ public class WindowsFirewallProviderTests
 		WindowsFirewallProvider provider = new(
 			NullLogger<WindowsFirewallProvider>.Instance,
 			CreateOptions(),
-			runner);
+			runner,
+			new FakeRdpPortProvider());
 
 		FirewallStatusReport report = await provider.GetStatusAsync(CancellationToken.None);
 		Assert.Equal(FirewallProviderStatus.Unreachable, report.Status);
 		Assert.Equal("Windows", report.ProviderId);
 	}
+}
+
+internal sealed class FakeRdpPortProvider : IRdpPortProvider
+{
+	private readonly int _port;
+
+	public FakeRdpPortProvider(int port = 3389)
+	{
+		_port = port;
+	}
+
+	public int GetRdpPort() => _port;
 }
 
 internal sealed class StaticOptionsMonitor<T> : IOptionsMonitor<T>

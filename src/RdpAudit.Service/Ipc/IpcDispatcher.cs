@@ -47,6 +47,7 @@ public sealed class IpcDispatcher
 	private readonly IMikroTikClient? _mikroTikClient;
 	private readonly ConfigRepairReporter? _configRepair;
 	private readonly SecurityAuthProbeService? _securityAuthProbe;
+	private readonly Firewall.IRdpPortProvider? _rdpPortProvider;
 
 	public IpcDispatcher(
 		IDbContextFactory<AuditDbContext> factory,
@@ -63,7 +64,8 @@ public sealed class IpcDispatcher
 		IMikroTikClient? mikroTikClient = null,
 		RdpConfigurationReader? rdpConfigReader = null,
 		ConfigRepairReporter? configRepair = null,
-		SecurityAuthProbeService? securityAuthProbe = null)
+		SecurityAuthProbeService? securityAuthProbe = null,
+		Firewall.IRdpPortProvider? rdpPortProvider = null)
 	{
 		_factory = factory;
 		_metrics = metrics;
@@ -80,6 +82,7 @@ public sealed class IpcDispatcher
 		_rdpConfigReader = rdpConfigReader;
 		_configRepair = configRepair;
 		_securityAuthProbe = securityAuthProbe;
+		_rdpPortProvider = rdpPortProvider;
 	}
 
 	public async Task<IpcResponse> DispatchAsync(IpcRequest request, CancellationToken ct)
@@ -155,6 +158,9 @@ public sealed class IpcDispatcher
 
 				// --- Stage Diag2: Security auth probe ---
 				IpcCommand.RunSecurityAuthProbe => RunSecurityAuthProbeHandler(),
+
+				// --- Stage 8: Firewall enforcement diagnostics ---
+				IpcCommand.GetFirewallDiagnostics => await GetFirewallDiagnosticsAsync(ct).ConfigureAwait(false),
 
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
@@ -467,6 +473,95 @@ public sealed class IpcDispatcher
 		return dto;
 	}
 
+	private async Task<object?> GetFirewallDiagnosticsAsync(CancellationToken ct)
+	{
+		FirewallOptions cfg = _options.CurrentValue.Firewall;
+
+		List<FirewallProviderDiagnostic> providers = new();
+		string routeState = "(not registered)";
+		string ipsecState = "(not registered)";
+		foreach (IFirewallProvider provider in _providers)
+		{
+			FirewallStatusReport report;
+			try
+			{
+				report = await provider.GetStatusAsync(ct).ConfigureAwait(false);
+			}
+			catch (Exception ex)
+			{
+				_logger.LogWarning(ex, "Diagnostics: failed to query provider {ProviderId}", provider.ProviderId);
+				providers.Add(new FirewallProviderDiagnostic(provider.ProviderId, false, 0, "status query failed"));
+				continue;
+			}
+
+			bool available = report.Status == FirewallProviderStatus.Available;
+			providers.Add(new FirewallProviderDiagnostic(
+				provider.ProviderId, available, report.ActiveBlockCount, report.Status + (report.Message is null ? string.Empty : " — " + report.Message)));
+
+			if (string.Equals(provider.ProviderId, FirewallProviderRouting.RouteBlackholeProviderId, StringComparison.Ordinal))
+			{
+				routeState = report.Status + (report.Message is null ? string.Empty : " — " + report.Message);
+			}
+			else if (string.Equals(provider.ProviderId, FirewallProviderRouting.IPsecProviderId, StringComparison.Ordinal))
+			{
+				ipsecState = report.Status + (report.Message is null ? string.Empty : " — " + report.Message);
+			}
+		}
+
+		// Resolve the real RDP listener port without hardcoding 3389: registry-backed provider on
+		// Windows, documented default elsewhere (e.g. when running cross-platform in tests/dev).
+		int rdpPort;
+		bool fromRegistry;
+		if (_rdpPortProvider is not null)
+		{
+			rdpPort = _rdpPortProvider.GetRdpPort();
+			fromRegistry = rdpPort != RdpConfigurationModel.DefaultRdpPort;
+		}
+		else
+		{
+			rdpPort = RdpConfigurationModel.DefaultRdpPort;
+			fromRegistry = false;
+		}
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+		int blocklistRows = await db.BlocklistEntries.CountAsync(b => b.IsEnabled, ct).ConfigureAwait(false);
+		int activeRows = await db.ActiveBlocks
+			.CountAsync(b => b.Status == ActiveBlockStatus.Active || b.Status == ActiveBlockStatus.Pending, ct)
+			.ConfigureAwait(false);
+
+		// Verified enforcement: an Active row whose provider returned a rule handle is treated as
+		// confirmed (VerifyAfterBlock demotes a row whose post-block verification failed to Failed).
+		int verifiedRows = await db.ActiveBlocks
+			.CountAsync(b => b.Status == ActiveBlockStatus.Active && b.RuleHandle != null && b.RuleHandle != string.Empty, ct)
+			.ConfigureAwait(false);
+
+		FirewallDiagnosticsInput input = new(
+			ConfiguredProviderKind: cfg.Provider.ToString(),
+			ConfiguredEnforcementBackend: cfg.EnforcementBackend.ToString(),
+			ConfiguredBlockScope: cfg.BlockScope.ToString(),
+			ResolvedRdpPort: rdpPort,
+			RdpPortFromRegistry: fromRegistry,
+			Providers: providers,
+			RdpAuditGroupBlockRuleCount: verifiedRows,
+			EnabledAllowInboundTcpPorts: Array.Empty<int>(),
+			RdpAuditAllowRuleForResolvedPort: false,
+			RouteBackendState: routeState,
+			IPsecBackendState: ipsecState,
+			ThirdPartyFirewallSuspected: false,
+			ThirdPartyFirewallNote: null,
+			BlocklistRowCount: blocklistRows,
+			ActiveBlockRowCount: activeRows,
+			VerifiedEnforcedCount: verifiedRows);
+
+		return new FirewallDiagnosticsDto
+		{
+			Status = IpcResultStatus.Success,
+			ReportText = FirewallDiagnosticsReportBuilder.Build(input),
+			Message = "Firewall enforcement diagnostics snapshot. Combine with the client-side netsh / "
+				+ "provider probe shown above for the full picture.",
+		};
+	}
+
 	private async Task<object?> ListBlocklistAsync(CancellationToken ct)
 	{
 		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
@@ -697,9 +792,14 @@ public sealed class IpcDispatcher
 		{
 			Id = r.Id,
 			Login = r.Login,
+			DisplayLogin = string.IsNullOrEmpty(r.DisplayLogin) ? r.Login : r.DisplayLogin,
 			Note = r.Note,
 			Enabled = r.Enabled,
 			AddedUtc = r.AddedUtc,
+			TriggerCount = r.TriggerCount,
+			FirstTriggeredUtc = r.FirstTriggeredUtc,
+			LastTriggeredUtc = r.LastTriggeredUtc,
+			LastSourceIp = r.LastSourceIp,
 		});
 	}
 
@@ -707,6 +807,7 @@ public sealed class IpcDispatcher
 	{
 		LoginRuleMutationRequest req = DeserializeLoginRuleRequest(payload, "AddLoginRule");
 		string login = NormalizeAndValidateLogin(req.Login);
+		string displayLogin = req.Login.Trim();
 
 		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
 		LoginRule? existing = await db.LoginRules
@@ -717,6 +818,7 @@ public sealed class IpcDispatcher
 			db.LoginRules.Add(new LoginRule
 			{
 				Login = login,
+				DisplayLogin = displayLogin,
 				Note = string.IsNullOrWhiteSpace(req.Note) ? "Configurator manual add" : req.Note,
 				Enabled = true,
 				AddedUtc = DateTime.UtcNow,
@@ -725,6 +827,10 @@ public sealed class IpcDispatcher
 		else
 		{
 			existing.Enabled = true;
+			if (string.IsNullOrEmpty(existing.DisplayLogin))
+			{
+				existing.DisplayLogin = displayLogin;
+			}
 			if (!string.IsNullOrWhiteSpace(req.Note))
 			{
 				existing.Note = req.Note;

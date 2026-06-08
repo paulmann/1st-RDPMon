@@ -27,4 +27,20 @@ public sealed class LoginRuleDto
 
 	[Key(4)]
 	public DateTime AddedUtc { get; set; }
+
+	/// <summary>Original-case login spelling for display; falls back to <see cref="Login"/> when null.</summary>
+	[Key(5)]
+	public string? DisplayLogin { get; set; }
+
+	[Key(6)]
+	public long TriggerCount { get; set; }
+
+	[Key(7)]
+	public DateTime? FirstTriggeredUtc { get; set; }
+
+	[Key(8)]
+	public DateTime? LastTriggeredUtc { get; set; }
+
+	[Key(9)]
+	public string? LastSourceIp { get; set; }
 }

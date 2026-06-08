@@ -96,4 +96,59 @@ public class NetshRuleScannerTests
 	{
 		Assert.False(NetshRuleScanner.ContainsAllowInboundForPort("No rules match the specified criteria.\n", 3389));
 	}
+
+	private const string BlockInboundRule =
+		"Rule Name:                            RdpAudit-Block-203.0.113.10\n" +
+		"----------------------------------------------------------------------\n" +
+		"Enabled:                              Yes\n" +
+		"Direction:                            In\n" +
+		"Profiles:                             Domain,Private,Public\n" +
+		"Grouping:                             RdpAudit\n" +
+		"RemoteIP:                             203.0.113.10/32\n" +
+		"Protocol:                             Any\n" +
+		"Action:                               Block\n" +
+		"\n";
+
+	[Fact]
+	public void ContainsEnabledInboundBlockRule_FindsEnabledInboundBlock()
+	{
+		Assert.True(NetshRuleScanner.ContainsEnabledInboundBlockRule(BlockInboundRule));
+	}
+
+	[Fact]
+	public void ContainsEnabledInboundBlockRule_DisabledRuleRejected()
+	{
+		string output = BlockInboundRule.Replace(
+			"Enabled:                              Yes",
+			"Enabled:                              No",
+			StringComparison.Ordinal);
+		Assert.False(NetshRuleScanner.ContainsEnabledInboundBlockRule(output));
+	}
+
+	[Fact]
+	public void ContainsEnabledInboundBlockRule_OutboundRuleRejected()
+	{
+		string output = BlockInboundRule.Replace(
+			"Direction:                            In",
+			"Direction:                            Out",
+			StringComparison.Ordinal);
+		Assert.False(NetshRuleScanner.ContainsEnabledInboundBlockRule(output));
+	}
+
+	[Fact]
+	public void ContainsEnabledInboundBlockRule_AllowActionRejected()
+	{
+		string output = BlockInboundRule.Replace(
+			"Action:                               Block",
+			"Action:                               Allow",
+			StringComparison.Ordinal);
+		Assert.False(NetshRuleScanner.ContainsEnabledInboundBlockRule(output));
+	}
+
+	[Fact]
+	public void ContainsEnabledInboundBlockRule_NoRulesMatchOutput_ReturnsFalse()
+	{
+		Assert.False(NetshRuleScanner.ContainsEnabledInboundBlockRule("No rules match the specified criteria.\n"));
+		Assert.False(NetshRuleScanner.ContainsEnabledInboundBlockRule(string.Empty));
+	}
 }

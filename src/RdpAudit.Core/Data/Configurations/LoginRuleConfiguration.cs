@@ -20,7 +20,10 @@ public sealed class LoginRuleConfiguration : IEntityTypeConfiguration<LoginRule>
 		b.HasKey(x => x.Id);
 		b.Property(x => x.Id).ValueGeneratedOnAdd();
 		b.Property(x => x.Login).IsRequired().HasMaxLength(256);
+		b.Property(x => x.DisplayLogin).HasMaxLength(256);
 		b.Property(x => x.Note).HasMaxLength(512);
+		b.Property(x => x.TriggerCount).HasDefaultValue(0L);
+		b.Property(x => x.LastSourceIp).HasMaxLength(45);
 		b.HasIndex(x => x.Login).IsUnique();
 		b.HasIndex(x => x.Enabled);
 	}

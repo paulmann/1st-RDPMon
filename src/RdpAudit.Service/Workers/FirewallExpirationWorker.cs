@@ -143,11 +143,11 @@ public sealed class FirewallExpirationWorker : BackgroundService
 			return;
 		}
 
-		IFirewallProvider? provider = ResolveProvider(block.Provider);
+		IFirewallProvider? provider = ResolveProvider(block.Provider, _options.CurrentValue.Firewall.EnforcementBackend);
 		if (provider is null)
 		{
 			block.Status = ActiveBlockStatus.Failed;
-			block.LastError = "No firewall provider registered for the configured provider kind.";
+			block.LastError = "No firewall provider registered for the configured provider kind / backend.";
 			_logger.LogWarning(
 				"Expiration failed for {Ip}: no provider for kind {Kind}",
 				block.Ip,
@@ -190,17 +190,13 @@ public sealed class FirewallExpirationWorker : BackgroundService
 		}
 	}
 
-	private IFirewallProvider? ResolveProvider(FirewallProviderKind kind)
+	private IFirewallProvider? ResolveProvider(FirewallProviderKind kind, FirewallEnforcementBackend backend)
 	{
 		// Each ActiveBlock row carries exactly one provider kind by Stage 9 — the auto-block worker
 		// splits Both into one row per provider so the expiration worker never needs to fan out here.
-		string id = kind switch
-		{
-			FirewallProviderKind.Windows => "Windows",
-			FirewallProviderKind.MikroTik => "MikroTik",
-			_ => string.Empty,
-		};
-
+		// The local Windows kind is dispatched to the configured enforcement backend so the row is
+		// unblocked by the same provider that installed it.
+		string id = FirewallProviderRouting.ResolveProviderId(kind, backend);
 		if (id.Length == 0)
 		{
 			return null;

@@ -96,4 +96,14 @@ public enum IpcCommand
 	/// canonical way to disambiguate "Security Armed but zero events" symptoms from policy /
 	/// permission / bookmark / backlog failure modes on a real host.</summary>
 	RunSecurityAuthProbe = 44,
+
+	// --- Stage 8 firewall-diagnostics addition (append-only). ---
+
+	/// <summary>Returns a plain-text firewall enforcement diagnostics report: configured provider /
+	/// backend / scope, resolved RDP listener port, per-provider availability, RdpAudit-group inbound
+	/// block rules present in the Windows firewall store, enabled allow-inbound TCP ports, route /
+	/// IPsec backend state, third-party firewall (e.g. Kaspersky) interference note, and a
+	/// reconciliation of active-block database rows against verified firewall enforcement. Used by the
+	/// Configurator's Firewall tab "Copy firewall diagnostics" button.</summary>
+	GetFirewallDiagnostics = 45,
 }

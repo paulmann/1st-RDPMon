@@ -149,6 +149,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 		};
 		ConfigureSessionGrid(_grid);
 		_grid.DataSource = _binding;
+		SortableGrid.Enable(_grid, _binding);
 		_grid.RowPrePaint += OnRowPrePaint;
 		_grid.CellMouseDown += OnCellMouseDown;
 

@@ -69,4 +69,40 @@ public sealed class FirewallOptions
 	/// considering the same IP again. Defaults to 60 seconds; lower values risk thrashing.
 	/// </remarks>
 	public int AutoBlockDebounceSeconds { get; set; } = 60;
+
+	/// <summary>Scope of the inbound block rule: RDP listener port only, or all inbound traffic.</summary>
+	/// <remarks>
+	/// Defaults to <see cref="FirewallBlockScope.AllInbound"/>: a host actively under brute-force
+	/// rarely has a legitimate reason to accept any other inbound traffic from the attacker IP, and
+	/// blocking only the RDP port leaves lateral-movement surface open. Operators who run other
+	/// services to/from the same source can switch to <see cref="FirewallBlockScope.RdpPortOnly"/>.
+	/// When <see cref="FirewallBlockScope.RdpPortOnly"/> is selected the rule's remote/local port is
+	/// the resolved RDP listener port (never a hardcoded 3389).
+	/// </remarks>
+	public FirewallBlockScope BlockScope { get; set; } = FirewallBlockScope.AllInbound;
+
+	/// <summary>Selected enforcement backend used to realise a block beyond the DB blocklist row.</summary>
+	/// <remarks>
+	/// Orthogonal to <see cref="Provider"/> (which selects Windows / MikroTik / Both): the backend
+	/// selects <em>how</em> the local Windows host enforces a block. Defaults to
+	/// <see cref="FirewallEnforcementBackend.WindowsFirewall"/> for backward compatibility.
+	/// </remarks>
+	public FirewallEnforcementBackend EnforcementBackend { get; set; } = FirewallEnforcementBackend.WindowsFirewall;
+
+	/// <summary>After installing a block rule, re-query the firewall to confirm the rule exists.</summary>
+	/// <remarks>
+	/// Defaults to true: the operator-reported failure mode is "blocklist row exists but no rule was
+	/// created". Verification turns a silent failure into a <c>Failed</c> ActiveBlock with an
+	/// actionable message instead of a falsely-<c>Active</c> row.
+	/// </remarks>
+	public bool VerifyAfterBlock { get; set; } = true;
+
+	/// <summary>Blackhole gateway IP used by the experimental route-blackhole enforcement backend.</summary>
+	/// <remarks>
+	/// The route-blackhole backend adds a per-IP host route pointing the attacker IP at an
+	/// unreachable next-hop so outbound replies are dropped. The suggested default
+	/// <c>10.255.255.254</c> is a documented placeholder; the backend MUST verify the gateway is
+	/// genuinely unreachable on the host before relying on it and the operator can change it.
+	/// </remarks>
+	public string RouteBlackholeGateway { get; set; } = "10.255.255.254";
 }
