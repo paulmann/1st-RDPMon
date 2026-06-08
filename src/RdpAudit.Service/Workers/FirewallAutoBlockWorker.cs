@@ -191,6 +191,11 @@ public sealed class FirewallAutoBlockWorker : BackgroundService
 
 			await ApplyBlockAsync(db, alert, decision, cfg, ct).ConfigureAwait(false);
 			TouchDebounce(decision.NormalizedIp, cfg.AutoBlockDebounceSeconds);
+
+			if (string.Equals(decision.ReasonTag, "InstantLogin", StringComparison.Ordinal))
+			{
+				await RecordTripWireFiringAsync(db, alert, decision, ct).ConfigureAwait(false);
+			}
 		}
 
 		await db.SaveChangesAsync(ct).ConfigureAwait(false);
@@ -236,9 +241,11 @@ public sealed class FirewallAutoBlockWorker : BackgroundService
 		}
 
 		DateTime nowUtc = DateTime.UtcNow;
-		DateTime? expiresUtc = cfg.DefaultBlockDurationMinutes > 0
-			? nowUtc.AddMinutes(cfg.DefaultBlockDurationMinutes)
-			: null;
+		// Auto-blocks ALWAYS expire: a runaway or stale policy must never leave a host permanently
+		// firewalled off an IP it can no longer justify. A non-positive configured duration falls back
+		// to AutoBlockPolicy.FallbackBlockDurationMinutes rather than producing a permanent block —
+		// only manual operator blocks are allowed to be "Never".
+		DateTime expiresUtc = nowUtc.AddMinutes(AutoBlockPolicy.ResolveBlockDurationMinutes(cfg.DefaultBlockDurationMinutes));
 		string reason = string.Format(
 			CultureInfo.InvariantCulture,
 			"{0}: alert {1}",
@@ -282,7 +289,7 @@ public sealed class FirewallAutoBlockWorker : BackgroundService
 		}
 
 		string ruleName = string.IsNullOrWhiteSpace(cfg.BlockRuleName) ? "RdpAudit-Block" : cfg.BlockRuleName;
-		TimeSpan? duration = expiresUtc.HasValue ? expiresUtc.Value - nowUtc : null;
+		TimeSpan duration = expiresUtc - nowUtc;
 		FirewallBlockRequest request = new(ip, ruleName)
 		{
 			Duration = duration,
@@ -308,15 +315,16 @@ public sealed class FirewallAutoBlockWorker : BackgroundService
 			};
 			db.ActiveBlocks.Add(active);
 
-			IFirewallProvider? provider = ResolveProvider(target);
+			IFirewallProvider? provider = ResolveProvider(target, cfg.EnforcementBackend);
 			if (provider is null)
 			{
 				active.Status = ActiveBlockStatus.Failed;
-				active.LastError = "No firewall provider registered for the configured provider kind.";
+				active.LastError = "No firewall provider registered for the configured provider kind / backend.";
 				_logger.LogWarning(
-					"Auto-block failed for {Ip}: no provider for kind {Kind}",
+					"Auto-block failed for {Ip}: no provider for kind {Kind} backend {Backend}",
 					ip,
-					target);
+					target,
+					cfg.EnforcementBackend);
 				continue;
 			}
 
@@ -357,15 +365,49 @@ public sealed class FirewallAutoBlockWorker : BackgroundService
 		}
 	}
 
-	private IFirewallProvider? ResolveProvider(FirewallProviderKind kind)
+	/// <summary>Increments per-rule trip-wire telemetry (TriggerCount / First / Last / LastSourceIp) for
+	/// the enabled <see cref="LoginRule"/> whose login matched the firing alert. Config-only trip-wires
+	/// (<see cref="FirewallOptions.InstantBlockLogins"/>) have no DB row and are silently ignored.</summary>
+	private async Task RecordTripWireFiringAsync(
+		AuditDbContext db,
+		Alert alert,
+		AutoBlockDecision decision,
+		CancellationToken ct)
 	{
-		string id = kind switch
+		string? login = decision.LoginForJournal;
+		if (string.IsNullOrWhiteSpace(login))
 		{
-			FirewallProviderKind.Windows => "Windows",
-			FirewallProviderKind.MikroTik => "MikroTik",
-			_ => string.Empty,
-		};
+			return;
+		}
 
+		string trimmed = login.Trim();
+		LoginRule? rule = await db.LoginRules
+			.FirstOrDefaultAsync(r => r.Enabled && r.Login == trimmed, ct).ConfigureAwait(false);
+
+		// The policy folds DB logins to their stored (lower-cased) key, so a direct match should hit;
+		// fall back to a case-insensitive client-side match for any legacy mixed-case rows.
+		if (rule is null)
+		{
+			List<LoginRule> enabled = await db.LoginRules
+				.Where(r => r.Enabled).ToListAsync(ct).ConfigureAwait(false);
+			rule = enabled.Find(r => string.Equals(r.Login, trimmed, StringComparison.OrdinalIgnoreCase));
+		}
+
+		if (rule is null)
+		{
+			return;
+		}
+
+		DateTime nowUtc = DateTime.UtcNow;
+		rule.TriggerCount++;
+		rule.FirstTriggeredUtc ??= nowUtc;
+		rule.LastTriggeredUtc = nowUtc;
+		rule.LastSourceIp = decision.NormalizedIp;
+	}
+
+	private IFirewallProvider? ResolveProvider(FirewallProviderKind kind, FirewallEnforcementBackend backend)
+	{
+		string id = FirewallProviderRouting.ResolveProviderId(kind, backend);
 		if (id.Length == 0)
 		{
 			return null;
@@ -423,6 +465,18 @@ internal readonly record struct AutoBlockDecision(
 /// </remarks>
 internal static class AutoBlockPolicy
 {
+	/// <summary>Duration applied to an auto-block when the operator left
+	/// <see cref="FirewallOptions.DefaultBlockDurationMinutes"/> at zero / negative. Auto-blocks must
+	/// always expire (see <see cref="ResolveBlockDurationMinutes"/>); only manual blocks may be
+	/// permanent, so this guarantees a bounded, self-healing auto-block.</summary>
+	public const int FallbackBlockDurationMinutes = 60;
+
+	/// <summary>Resolves the effective auto-block duration in minutes. A positive configured value is
+	/// honoured verbatim; zero or negative falls back to <see cref="FallbackBlockDurationMinutes"/> so
+	/// an auto-block is never permanent.</summary>
+	public static int ResolveBlockDurationMinutes(int configuredMinutes)
+		=> configuredMinutes > 0 ? configuredMinutes : FallbackBlockDurationMinutes;
+
 	public static AutoBlockDecision Decide(
 		Alert alert,
 		FirewallOptions cfg,

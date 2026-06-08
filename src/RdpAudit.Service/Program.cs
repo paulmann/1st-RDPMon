@@ -166,8 +166,16 @@ public static class Program
 		services.AddSingleton<ISecretProtector>(_ => CreateSecretProtector());
 		services.AddSingleton<WindowsFirewallProvider>();
 		services.AddSingleton<MikroTikFirewallProvider>();
+		services.AddSingleton<IPsecBlockProvider>();
 		services.AddSingleton<IFirewallProvider>(sp => sp.GetRequiredService<WindowsFirewallProvider>());
 		services.AddSingleton<IFirewallProvider>(sp => sp.GetRequiredService<MikroTikFirewallProvider>());
+		services.AddSingleton<IFirewallProvider>(sp => sp.GetRequiredService<IPsecBlockProvider>());
+		if (OperatingSystem.IsWindows())
+		{
+			services.AddSingleton<RouteBlackholeProvider>();
+			services.AddSingleton<IFirewallProvider>(sp => sp.GetRequiredService<RouteBlackholeProvider>());
+			services.AddSingleton<IRdpPortProvider, RegistryRdpPortProvider>();
+		}
 		if (OperatingSystem.IsWindows())
 		{
 			services.AddSingleton<RdpSessionManager>();

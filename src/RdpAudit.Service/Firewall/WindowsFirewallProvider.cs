@@ -34,25 +34,29 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 	private readonly ILogger<WindowsFirewallProvider> _logger;
 	private readonly IOptionsMonitor<RdpAuditOptions> _options;
 	private readonly INetshRunner _runner;
+	private readonly IRdpPortProvider _portProvider;
 
 	public WindowsFirewallProvider(
 		ILogger<WindowsFirewallProvider> logger,
 		IOptionsMonitor<RdpAuditOptions> options)
-		: this(logger, options, new NetshRunner())
+		: this(logger, options, new NetshRunner(), new RegistryRdpPortProvider())
 	{
 	}
 
 	internal WindowsFirewallProvider(
 		ILogger<WindowsFirewallProvider> logger,
 		IOptionsMonitor<RdpAuditOptions> options,
-		INetshRunner runner)
+		INetshRunner runner,
+		IRdpPortProvider portProvider)
 	{
 		ArgumentNullException.ThrowIfNull(logger);
 		ArgumentNullException.ThrowIfNull(options);
 		ArgumentNullException.ThrowIfNull(runner);
+		ArgumentNullException.ThrowIfNull(portProvider);
 		_logger = logger;
 		_options = options;
 		_runner = runner;
+		_portProvider = portProvider;
 	}
 
 	public string ProviderId => "Windows";
@@ -157,13 +161,33 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 		string ruleName = NetshCommandBuilder.BuildRuleName(request.RuleName, canonicalIp);
 		string description = BuildAuditDescription(request.Reason, request.Duration);
 
+		// Resolve the block scope and the real RDP listener port. RdpPortOnly requires a concrete
+		// port; the resolver never hardcodes 3389 (registry value, or documented Microsoft default).
+		FirewallBlockScope scope = cfg.BlockScope;
+		int rdpPort = scope == FirewallBlockScope.RdpPortOnly ? _portProvider.GetRdpPort() : 0;
+
+		IReadOnlyList<string> addArgs;
+		try
+		{
+			addArgs = NetshCommandBuilder.BuildAddRuleArgs(ruleName, canonicalIp, description, scope, rdpPort);
+		}
+		catch (ArgumentOutOfRangeException ex)
+		{
+			_logger.LogWarning(ex, "Block refused: could not resolve a valid RDP port for RdpPortOnly scope");
+			return new FirewallActionResult
+			{
+				Status = FirewallActionStatus.InvalidRequest,
+				ProviderId = ProviderId,
+				RuleId = ruleName,
+				Message = "RdpPortOnly scope requires a resolved RDP listener port; resolution failed.",
+			};
+		}
+
 		// Idempotency: best-effort delete first so we do not stack multiple identical rules in
 		// the firewall store. Errors here are non-fatal — the add below is the real success.
 		await _runner.RunAsync(NetshCommandBuilder.BuildDeleteRuleArgs(ruleName), ct).ConfigureAwait(false);
 
-		NetshResult addResult = await _runner.RunAsync(
-			NetshCommandBuilder.BuildAddRuleArgs(ruleName, canonicalIp, description),
-			ct).ConfigureAwait(false);
+		NetshResult addResult = await _runner.RunAsync(addArgs, ct).ConfigureAwait(false);
 
 		if (!addResult.Success)
 		{
@@ -182,13 +206,45 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 			};
 		}
 
-		_logger.LogInformation("Firewall block rule installed: {RuleName} for {Ip}", ruleName, canonicalIp);
+		// Verification: a non-zero exit is a clear failure, but netsh (or a managing third-party
+		// firewall such as Kaspersky) can return zero while no rule actually lands. Re-query the
+		// named rule and confirm an enabled inbound block rule exists before declaring success.
+		if (cfg.VerifyAfterBlock)
+		{
+			NetshResult verify = await _runner.RunAsync(
+				NetshCommandBuilder.BuildShowRuleArgs(ruleName),
+				ct).ConfigureAwait(false);
+
+			bool confirmed = verify.Success
+				&& NetshRuleScanner.ContainsEnabledInboundBlockRule(verify.StdOut);
+			if (!confirmed)
+			{
+				_logger.LogWarning(
+					"Firewall block could not be verified for {Ip}: rule {RuleName} not found after add (a managing third-party firewall may have rejected the write)",
+					canonicalIp,
+					ruleName);
+				return new FirewallActionResult
+				{
+					Status = FirewallActionStatus.Unavailable,
+					ProviderId = ProviderId,
+					RuleId = ruleName,
+					Message = "Block rule reported success but could not be verified in the firewall store; a managing third-party firewall may have rejected it.",
+				};
+			}
+		}
+
+		_logger.LogInformation(
+			"Firewall block rule installed and verified: {RuleName} for {Ip} scope={Scope} port={Port}",
+			ruleName,
+			canonicalIp,
+			scope,
+			rdpPort);
 		return new FirewallActionResult
 		{
 			Status = FirewallActionStatus.Success,
 			ProviderId = ProviderId,
 			RuleId = ruleName,
-			Message = "Block rule installed.",
+			Message = cfg.VerifyAfterBlock ? "Block rule installed and verified." : "Block rule installed.",
 		};
 	}
 

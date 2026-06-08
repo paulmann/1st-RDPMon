@@ -298,6 +298,7 @@ public sealed class FirewallPage : TabPage
 
 		_blocklistGrid = MakeAddressGrid();
 		_blocklistGrid.DataSource = _blocklistRows;
+		SortableGrid.Enable(_blocklistGrid, _blocklistRows);
 		AttachReputationMenu(_blocklistGrid, () => SelectedRow(_blocklistGrid, _blocklistRows)?.Address);
 		_blocklistFilter = MakeFilterBox("Filter IP / reason / source…", () => ApplyBlocklistFilter());
 		_blocklistInput = MakeInputBox("IP to add to blocklist (e.g. 203.0.113.10)");
@@ -307,6 +308,7 @@ public sealed class FirewallPage : TabPage
 
 		_whitelistGrid = MakeAddressGrid();
 		_whitelistGrid.DataSource = _whitelistRows;
+		SortableGrid.Enable(_whitelistGrid, _whitelistRows);
 		AttachReputationMenu(_whitelistGrid, () => SelectedRow(_whitelistGrid, _whitelistRows)?.Address);
 		_whitelistFilter = MakeFilterBox("Filter IP / note / source…", () => ApplyWhitelistFilter());
 		_whitelistInput = MakeInputBox("IP to add to whitelist (e.g. 198.51.100.5)");
@@ -316,6 +318,7 @@ public sealed class FirewallPage : TabPage
 
 		_loginRulesGrid = MakeLoginRulesGrid();
 		_loginRulesGrid.DataSource = _loginRuleRows;
+		SortableGrid.Enable(_loginRulesGrid, _loginRuleRows);
 		_loginRulesFilter = MakeFilterBox("Filter login / note…", () => ApplyLoginRuleFilter());
 		_loginRuleInput = MakeInputBox("Login to trip-wire (e.g. administrator)");
 		Button loginAdd = MakeButton("Add login", async (_, _) => await OnAddLoginRuleAsync().ConfigureAwait(true));
@@ -325,6 +328,7 @@ public sealed class FirewallPage : TabPage
 
 		_activeBlocksGrid = MakeActiveBlocksGrid();
 		_activeBlocksGrid.DataSource = _activeBlockRows;
+		SortableGrid.Enable(_activeBlocksGrid, _activeBlockRows);
 		AttachReputationMenu(_activeBlocksGrid, () => SelectedRow(_activeBlocksGrid, _activeBlockRows)?.Ip);
 		_activeBlocksFilter = MakeFilterBox("Filter IP / reason / provider / status…", () => ApplyActiveBlockFilter());
 		Button activeUnblock = MakeButton("Unblock selected", async (_, _) => await OnUnblockActiveAsync().ConfigureAwait(true));
@@ -393,7 +397,7 @@ public sealed class FirewallPage : TabPage
 		_providerRefreshButton.Click += (_, _) => RefreshProviderDiagnostics();
 
 		_providerCopyButton = new Button { Text = "Copy diagnostics", AutoSize = true };
-		_providerCopyButton.Click += (_, _) => CopyProviderDiagnostics();
+		_providerCopyButton.Click += async (_, _) => await CopyProviderDiagnosticsAsync().ConfigureAwait(true);
 
 		diagnosticsLayout.Controls.Add(_providerKindLabel, 0, 0);
 		diagnosticsLayout.SetColumnSpan(_providerKindLabel, 2);
@@ -490,13 +494,34 @@ public sealed class FirewallPage : TabPage
 		}
 	}
 
-	private void CopyProviderDiagnostics()
+	private async Task CopyProviderDiagnosticsAsync()
 	{
 		try
 		{
-			string payload = _lastProviderDiagnostics?.BuildDiagnosticsText() ?? "(no diagnostics captured yet)";
+			string clientPart = _lastProviderDiagnostics?.BuildDiagnosticsText() ?? "(no client-side diagnostics captured yet)";
+
+			string servicePart;
+			try
+			{
+				FirewallDiagnosticsDto? dto = await _ipc
+					.SendAsync<FirewallDiagnosticsDto>(IpcCommand.GetFirewallDiagnostics)
+					.ConfigureAwait(true);
+				servicePart = dto is null
+					? "(service-side firewall diagnostics unreachable)"
+					: dto.ReportText;
+			}
+			catch (Exception ex)
+			{
+				servicePart = "(service-side firewall diagnostics failed: " + ex.GetType().Name + " — " + ex.Message + ")";
+			}
+
+			string payload = "=== Client-side (Configurator) firewall provider probe ===" + Environment.NewLine
+				+ clientPart + Environment.NewLine + Environment.NewLine
+				+ "=== Service-side firewall enforcement diagnostics ===" + Environment.NewLine
+				+ servicePart;
+
 			Clipboard.SetText(payload);
-			SetStatus("Firewall provider diagnostics copied to clipboard.");
+			SetStatus("Firewall diagnostics (client + service) copied to clipboard.");
 		}
 		catch (Exception ex)
 		{
@@ -1058,7 +1083,7 @@ public sealed class FirewallPage : TabPage
 		_loginRuleRows.Clear();
 		foreach (LoginRuleDto dto in _loginRulesAll)
 		{
-			if (filter.Matches(dto.Login, dto.Note, dto.Enabled ? "enabled" : "disabled"))
+			if (filter.Matches(dto.Login, dto.DisplayLogin, dto.Note, dto.Enabled ? "enabled" : "disabled"))
 			{
 				_loginRuleRows.Add(LoginRuleRow.From(dto));
 			}
@@ -1224,10 +1249,14 @@ public sealed class FirewallPage : TabPage
 			SelectionMode = DataGridViewSelectionMode.FullRowSelect,
 			MultiSelect = false,
 		};
-		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Id", DataPropertyName = nameof(LoginRuleRow.Id), Width = 70 });
-		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Login", DataPropertyName = nameof(LoginRuleRow.Login), Width = 200 });
-		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Enabled", DataPropertyName = nameof(LoginRuleRow.EnabledText), Width = 90 });
-		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Added (UTC)", DataPropertyName = nameof(LoginRuleRow.AddedUtcText), Width = 170 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Id", DataPropertyName = nameof(LoginRuleRow.Id), Width = 60 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Login", DataPropertyName = nameof(LoginRuleRow.DisplayLogin), Width = 180 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Enabled", DataPropertyName = nameof(LoginRuleRow.EnabledText), Width = 70 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Trigger Count", DataPropertyName = nameof(LoginRuleRow.TriggerCount), Width = 100 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "First Triggered (UTC)", DataPropertyName = nameof(LoginRuleRow.FirstTriggeredText), Width = 160 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Last Triggered (UTC)", DataPropertyName = nameof(LoginRuleRow.LastTriggeredText), Width = 160 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Last Source IP", DataPropertyName = nameof(LoginRuleRow.LastSourceIp), Width = 130 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Added (UTC)", DataPropertyName = nameof(LoginRuleRow.AddedUtcText), Width = 160 });
 		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Note", DataPropertyName = nameof(LoginRuleRow.Note), AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
 		return g;
 	}
@@ -1251,6 +1280,7 @@ public sealed class FirewallPage : TabPage
 		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Status", DataPropertyName = nameof(ActiveBlockRow.StatusText), Width = 90 });
 		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Created (UTC)", DataPropertyName = nameof(ActiveBlockRow.CreatedUtcText), Width = 170 });
 		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Expires (UTC)", DataPropertyName = nameof(ActiveBlockRow.ExpiresUtcText), Width = 170 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Remaining", DataPropertyName = nameof(ActiveBlockRow.RemainingText), Width = 110 });
 		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Reason / error", DataPropertyName = nameof(ActiveBlockRow.ReasonOrError), AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
 		return g;
 	}
@@ -1373,7 +1403,7 @@ public sealed class FirewallPage : TabPage
 			Source = dto.Source,
 			Note = dto.Note,
 			AddedUtcText = FormatUtc(dto.AddedUtc),
-			ExpiresUtcText = FormatUtc(dto.ExpiresUtc),
+			ExpiresUtcText = BlockExpiryFormatter.FormatExpiresUtc(dto.ExpiresUtc),
 		};
 	}
 
@@ -1382,11 +1412,23 @@ public sealed class FirewallPage : TabPage
 	{
 		public long Id { get; init; }
 
+		/// <summary>Normalized matching key (case-insensitive); retained for selection / mutation.</summary>
 		public string Login { get; init; } = string.Empty;
+
+		/// <summary>Original-case spelling shown in the grid.</summary>
+		public string DisplayLogin { get; init; } = string.Empty;
 
 		public bool Enabled { get; init; }
 
 		public string EnabledText => Enabled ? "yes" : "no";
+
+		public long TriggerCount { get; init; }
+
+		public string FirstTriggeredText { get; init; } = string.Empty;
+
+		public string LastTriggeredText { get; init; } = string.Empty;
+
+		public string? LastSourceIp { get; init; }
 
 		public string AddedUtcText { get; init; } = string.Empty;
 
@@ -1396,7 +1438,12 @@ public sealed class FirewallPage : TabPage
 		{
 			Id = dto.Id,
 			Login = dto.Login,
+			DisplayLogin = string.IsNullOrEmpty(dto.DisplayLogin) ? dto.Login : dto.DisplayLogin,
 			Enabled = dto.Enabled,
+			TriggerCount = dto.TriggerCount,
+			FirstTriggeredText = FormatUtc(dto.FirstTriggeredUtc),
+			LastTriggeredText = FormatUtc(dto.LastTriggeredUtc),
+			LastSourceIp = dto.LastSourceIp,
 			AddedUtcText = FormatUtc(dto.AddedUtc),
 			Note = dto.Note,
 		};
@@ -1420,6 +1467,8 @@ public sealed class FirewallPage : TabPage
 		public string CreatedUtcText { get; init; } = string.Empty;
 
 		public string ExpiresUtcText { get; init; } = string.Empty;
+
+		public string RemainingText { get; init; } = string.Empty;
 
 		public string ReasonOrError { get; init; } = string.Empty;
 
@@ -1448,7 +1497,8 @@ public sealed class FirewallPage : TabPage
 				RuleHandle = dto.RuleHandle,
 				StatusText = dto.Status.ToString(),
 				CreatedUtcText = FormatUtc(dto.CreatedUtc),
-				ExpiresUtcText = FormatUtc(dto.ExpiresUtc),
+				ExpiresUtcText = BlockExpiryFormatter.FormatExpiresUtc(dto.ExpiresUtc),
+				RemainingText = BlockExpiryFormatter.FormatRemaining(dto.ExpiresUtc, DateTime.UtcNow),
 				ReasonOrError = sb.ToString(),
 			};
 		}

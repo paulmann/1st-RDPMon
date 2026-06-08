@@ -53,6 +53,7 @@ public sealed class AbuseIpDbPage : TabPage
 	private readonly Button _saveButton;
 	private readonly Button _testButton;
 	private readonly Button _refreshButton;
+	private readonly Button _clearButton;
 	private readonly Label _statusLabel;
 	private readonly Label _credentialLabel;
 	private readonly Label _endpointLabel;
@@ -110,6 +111,9 @@ public sealed class AbuseIpDbPage : TabPage
 		_refreshButton = new Button { Text = "Refresh status", Width = 140 };
 		_refreshButton.Click += async (_, _) => await RefreshAsync().ConfigureAwait(true);
 
+		_clearButton = new Button { Text = "Clear key", Width = 120 };
+		_clearButton.Click += async (_, _) => await OnClearAsync().ConfigureAwait(true);
+
 		_statusLabel = new Label { Text = "Loading…", AutoSize = false, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
 		_credentialLabel = new Label { Text = "Credential: ?", AutoSize = false, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
 		_endpointLabel = new Label { Text = "Endpoint: (loading)", AutoSize = false, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
@@ -156,6 +160,7 @@ public sealed class AbuseIpDbPage : TabPage
 		buttons.Controls.Add(_saveButton);
 		buttons.Controls.Add(_testButton);
 		buttons.Controls.Add(_refreshButton);
+		buttons.Controls.Add(_clearButton);
 		layout.Controls.Add(buttons, 1, 2);
 
 		Label warning = new()
@@ -331,6 +336,63 @@ public sealed class AbuseIpDbPage : TabPage
 		finally
 		{
 			_saveButton.Enabled = true;
+		}
+	}
+
+	private async Task OnClearAsync()
+	{
+		_clearButton.Enabled = false;
+		_statusLabel.Text = "Clearing stored API key…";
+
+		try
+		{
+			JsonNode? settings = await _ipc.SendAsync<JsonNode>(IpcCommand.GetSettings).ConfigureAwait(true);
+			JsonObject section;
+			JsonObject root;
+			if (settings is JsonObject obj)
+			{
+				root = new JsonObject { [Core.Config.RdpAuditOptions.SectionName] = obj.DeepClone() };
+				section = (JsonObject)root[Core.Config.RdpAuditOptions.SectionName]!;
+			}
+			else
+			{
+				root = new JsonObject { [Core.Config.RdpAuditOptions.SectionName] = new JsonObject() };
+				section = (JsonObject)root[Core.Config.RdpAuditOptions.SectionName]!;
+			}
+
+			if (section["AbuseIpDb"] is not JsonObject abuse)
+			{
+				abuse = new JsonObject();
+				section["AbuseIpDb"] = abuse;
+			}
+
+			// Explicit empty key clears the stored credential; reporting is forced off without a key.
+			abuse["ApiKey"] = string.Empty;
+			abuse["ReportAttacks"] = false;
+			abuse["Enabled"] = false;
+
+			object? response = await _ipc
+				.SendAsync<object>(IpcCommand.SaveSettings, root.ToJsonString(JsonOptions.Default))
+				.ConfigureAwait(true);
+
+			if (response is null)
+			{
+				_statusLabel.Text = "Clear FAILED: service unreachable.";
+				return;
+			}
+
+			_apiKeyInput.Clear();
+			_reportEnabled.Checked = false;
+			_statusLabel.Text = "Stored API key cleared. Reporting disabled.";
+			await RefreshAsync().ConfigureAwait(true);
+		}
+		catch (Exception ex)
+		{
+			_statusLabel.Text = "Clear FAILED: " + ex.GetType().Name + " — " + ex.Message;
+		}
+		finally
+		{
+			_clearButton.Enabled = true;
 		}
 	}
 

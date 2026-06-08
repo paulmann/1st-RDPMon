@@ -169,4 +169,20 @@ public class AutoBlockPolicyTests
 
 		Assert.Equal(AutoBlockAction.Skip, decision.Action);
 	}
+
+	[Fact]
+	public void ResolveBlockDurationMinutes_PositiveConfig_HonouredVerbatim()
+	{
+		Assert.Equal(120, AutoBlockPolicy.ResolveBlockDurationMinutes(120));
+	}
+
+	[Theory]
+	[InlineData(0)]
+	[InlineData(-1)]
+	[InlineData(-9999)]
+	public void ResolveBlockDurationMinutes_NonPositiveConfig_FallsBackToBoundedDefault(int configured)
+	{
+		Assert.Equal(AutoBlockPolicy.FallbackBlockDurationMinutes, AutoBlockPolicy.ResolveBlockDurationMinutes(configured));
+		Assert.True(AutoBlockPolicy.ResolveBlockDurationMinutes(configured) > 0, "auto-blocks must always expire");
+	}
 }

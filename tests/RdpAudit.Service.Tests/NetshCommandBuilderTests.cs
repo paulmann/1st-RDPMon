@@ -8,6 +8,7 @@
 // Site:    https://Deynekin.com
 
 using System.Net;
+using RdpAudit.Core.Config;
 using RdpAudit.Service.Firewall;
 using Xunit;
 
@@ -102,11 +103,13 @@ public class NetshCommandBuilderTests
 		Assert.Equal("add", args[2]);
 		Assert.Equal("rule", args[3]);
 		Assert.Equal("name=RdpAudit-Block-203.0.113.10", args[4]);
-		Assert.Equal("dir=in", args[5]);
-		Assert.Equal("action=block", args[6]);
-		Assert.Equal("remoteip=203.0.113.10", args[7]);
-		Assert.Equal("protocol=any", args[8]);
-		Assert.Equal("enable=yes", args[9]);
+		Assert.Equal("group=RdpAudit", args[5]);
+		Assert.Equal("dir=in", args[6]);
+		Assert.Equal("action=block", args[7]);
+		Assert.Equal("remoteip=203.0.113.10", args[8]);
+		Assert.Equal("profile=any", args[9]);
+		Assert.Equal("enable=yes", args[10]);
+		Assert.Equal("protocol=any", args[11]);
 		Assert.Contains(args, a => a.StartsWith("description=", StringComparison.Ordinal));
 	}
 
@@ -158,5 +161,52 @@ public class NetshCommandBuilderTests
 	{
 		Assert.Throws<ArgumentException>(() =>
 			NetshCommandBuilder.BuildAddRuleArgs(ruleName, "1.2.3.4", null));
+	}
+
+	[Fact]
+	public void BuildAddRuleArgs_AllInbound_StampsGroupAndProfileAndProtocolAny()
+	{
+		IReadOnlyList<string> args = NetshCommandBuilder.BuildAddRuleArgs(
+			"RdpAudit-Block-203.0.113.10",
+			"203.0.113.10",
+			"reason",
+			FirewallBlockScope.AllInbound,
+			rdpPort: 0);
+
+		Assert.Contains("group=RdpAudit", args);
+		Assert.Contains("profile=any", args);
+		Assert.Contains("protocol=any", args);
+		Assert.DoesNotContain(args, a => a.StartsWith("localport=", StringComparison.Ordinal));
+	}
+
+	[Fact]
+	public void BuildAddRuleArgs_RdpPortOnly_RestrictsToTcpAndResolvedPort()
+	{
+		IReadOnlyList<string> args = NetshCommandBuilder.BuildAddRuleArgs(
+			"RdpAudit-Block-203.0.113.10",
+			"203.0.113.10",
+			"reason",
+			FirewallBlockScope.RdpPortOnly,
+			rdpPort: 3390);
+
+		Assert.Contains("group=RdpAudit", args);
+		Assert.Contains("protocol=tcp", args);
+		Assert.Contains("localport=3390", args);
+		Assert.DoesNotContain("protocol=any", args);
+	}
+
+	[Theory]
+	[InlineData(0)]
+	[InlineData(-1)]
+	[InlineData(65536)]
+	public void BuildAddRuleArgs_RdpPortOnly_RejectsOutOfRangePort(int rdpPort)
+	{
+		Assert.Throws<ArgumentOutOfRangeException>(() =>
+			NetshCommandBuilder.BuildAddRuleArgs(
+				"RdpAudit-Block-203.0.113.10",
+				"203.0.113.10",
+				"reason",
+				FirewallBlockScope.RdpPortOnly,
+				rdpPort));
 	}
 }

@@ -196,6 +196,28 @@ public static class NetshRuleScanner
 		}
 	}
 
+	/// <summary>True when <paramref name="netshOutput"/> (the verbose dump for a single named rule)
+	/// contains at least one <em>enabled, inbound, block</em> rule. Used to verify that a block rule
+	/// RdpAudit just installed actually exists in the firewall store — turning a silent netsh
+	/// success into a confirmed enforcement, or an actionable failure when no block rule is present
+	/// (e.g. a third-party firewall such as Kaspersky silently swallowed the write).</summary>
+	public static bool ContainsEnabledInboundBlockRule(string netshOutput)
+	{
+		foreach (NetshParsedRule rule in ParseRules(netshOutput))
+		{
+			if (rule.Enabled == true
+				&& IsInboundDirection(rule.Direction)
+				&& IsBlockAction(rule.Action))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static bool IsBlockAction(string? value)
+		=> value is not null && value.Contains("Block", StringComparison.OrdinalIgnoreCase);
+
 	private static bool Matches(NetshParsedRule rule, int port)
 	{
 		return rule.Enabled == true
