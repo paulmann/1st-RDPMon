@@ -77,6 +77,9 @@ public class IpcCommandStabilityTests
 	[InlineData(IpcCommand.RunToolsDiagnostics, 52)]
 	[InlineData(IpcCommand.RunTemporaryFirewallRuleProbe, 53)]
 	[InlineData(IpcCommand.DedupeBlocklistEntries, 54)]
+	[InlineData(IpcCommand.ClearAllBlocklist, 55)]
+	[InlineData(IpcCommand.ClearAllFirewallRules, 56)]
+	[InlineData(IpcCommand.ClearAllApplicationData, 57)]
 	public void Ordinal_IsStable(IpcCommand command, int expected)
 	{
 		Assert.Equal(expected, (int)command);

@@ -51,6 +51,7 @@ public sealed class IpcDispatcher
 	private readonly Firewall.IRdpPortProvider? _rdpPortProvider;
 	private readonly EnforcementReconciliationService? _reconciliation;
 	private readonly ToolsDiagnosticsService? _toolsDiagnostics;
+	private readonly ApplicationDataPurgeService? _dataPurge;
 
 	public IpcDispatcher(
 		IDbContextFactory<AuditDbContext> factory,
@@ -70,7 +71,8 @@ public sealed class IpcDispatcher
 		SecurityAuthProbeService? securityAuthProbe = null,
 		Firewall.IRdpPortProvider? rdpPortProvider = null,
 		EnforcementReconciliationService? reconciliation = null,
-		ToolsDiagnosticsService? toolsDiagnostics = null)
+		ToolsDiagnosticsService? toolsDiagnostics = null,
+		ApplicationDataPurgeService? dataPurge = null)
 	{
 		_factory = factory;
 		_metrics = metrics;
@@ -90,6 +92,7 @@ public sealed class IpcDispatcher
 		_rdpPortProvider = rdpPortProvider;
 		_reconciliation = reconciliation;
 		_toolsDiagnostics = toolsDiagnostics;
+		_dataPurge = dataPurge;
 	}
 
 	public async Task<IpcResponse> DispatchAsync(IpcRequest request, CancellationToken ct)
@@ -183,6 +186,11 @@ public sealed class IpcDispatcher
 
 				// --- v1.3.1: DB maintenance ---
 				IpcCommand.DedupeBlocklistEntries => await DedupeBlocklistEntriesAsync(ct).ConfigureAwait(false),
+
+				// --- v1.3.2: guarded cleanup operations ---
+				IpcCommand.ClearAllBlocklist => await ClearAllBlocklistAsync(ct).ConfigureAwait(false),
+				IpcCommand.ClearAllFirewallRules => await ClearAllFirewallRulesAsync(ct).ConfigureAwait(false),
+				IpcCommand.ClearAllApplicationData => await ClearAllApplicationDataAsync(request.Payload, ct).ConfigureAwait(false),
 
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
@@ -1416,6 +1424,58 @@ public sealed class IpcDispatcher
 		}
 
 		return await _reconciliation.RemoveAllEnforcementAsync(ct).ConfigureAwait(false);
+	}
+
+	/// <summary>Server-side guard phrase for the destructive full application-data purge. The client must
+	/// echo this exact phrase (typed by the operator) or the purge is refused — a second barrier behind the
+	/// DEBUG gate and the typed-confirmation dialog so the data is never wiped by an accidental call.</summary>
+	private const string ClearAllDataConfirmationPhrase = "CLEAR ALL RDP AUDIT DATA";
+
+	/// <summary>Full blacklist cleanup (Req A): soft-disables every enabled BlocklistEntry and synchronizes
+	/// enforcement for the cleared IPs (ActiveBlocks Removed + RdpAudit firewall rules removed).</summary>
+	private async Task<object?> ClearAllBlocklistAsync(CancellationToken ct)
+	{
+		if (_reconciliation is null)
+		{
+			throw new IpcException("Enforcement reconciliation service is not available in this build.");
+		}
+
+		return await _reconciliation.ClearAllBlocklistAsync(ct).ConfigureAwait(false);
+	}
+
+	/// <summary>DEBUG-gated full firewall cleanup (Req B): removes every RdpAudit-owned firewall rule and
+	/// synchronizes ActiveBlock rows to Removed. Never touches the BlocklistEntry table.</summary>
+	private async Task<object?> ClearAllFirewallRulesAsync(CancellationToken ct)
+	{
+		if (_reconciliation is null)
+		{
+			throw new IpcException("Enforcement reconciliation service is not available in this build.");
+		}
+
+		return await _reconciliation.ClearAllRdpAuditFirewallAsync(ct).ConfigureAwait(false);
+	}
+
+	/// <summary>DEBUG-gated full application-data cleanup (Req C): transactionally clears the accumulated
+	/// operational tables (preserving schema / migrations / config / bookmarks) and reclaims SQLite space.
+	/// Requires the exact typed confirmation phrase in the payload; refuses otherwise.</summary>
+	private async Task<object?> ClearAllApplicationDataAsync(string? payload, CancellationToken ct)
+	{
+		if (_dataPurge is null)
+		{
+			throw new IpcException("Application data purge service is not available in this build.");
+		}
+
+		string confirmation = ParseTestIpPayload(payload);
+		if (!string.Equals(confirmation, ClearAllDataConfirmationPhrase, StringComparison.Ordinal))
+		{
+			return new AppDataPurgeResultDto
+			{
+				Status = IpcResultStatus.Refused,
+				Message = "Application-data purge refused: the exact confirmation phrase was not supplied.",
+			};
+		}
+
+		return await _dataPurge.PurgeAllAsync(ct).ConfigureAwait(false);
 	}
 
 	private async Task<object?> UnblockActiveBlockAsync(string? payload, CancellationToken ct)

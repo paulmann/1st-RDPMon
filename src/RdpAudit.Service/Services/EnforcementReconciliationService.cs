@@ -636,6 +636,325 @@ public sealed class EnforcementReconciliationService
 		return result;
 	}
 
+	/// <summary>Full blacklist cleanup (Req A): soft-disables every currently-enabled BlocklistEntry
+	/// (kept for audit, never hard-deleted), then synchronizes enforcement for every IP left without an
+	/// enabled entry — marking its Active / Pending / Failed ActiveBlock rows Removed inside the same
+	/// transaction, and after the DB state is durably committed removing the RdpAudit-created firewall
+	/// rules that backed those IPs plus any safe RdpAudit-owned orphan rules. Only rules carrying the
+	/// RdpAudit prefix are ever scanned or removed, so unrelated admin rules are never touched. Every step
+	/// is recorded in <see cref="BlocklistClearResultDto.DebugLog"/>; per-step failures are counted and the
+	/// pass continues best-effort so a single backend error never aborts the whole cleanup.</summary>
+	public async Task<BlocklistClearResultDto> ClearAllBlocklistAsync(CancellationToken ct)
+	{
+		BlocklistClearResultDto result = new();
+		System.Text.StringBuilder log = new();
+		void Trace(string line) => log.Append('[')
+			.Append(_time.GetUtcNow().UtcDateTime.ToString("O", CultureInfo.InvariantCulture))
+			.Append("] ").Append(line).Append('\n');
+
+		FirewallOptions cfg = _options.CurrentValue.Firewall;
+		HashSet<string> clearedIps = new(StringComparer.OrdinalIgnoreCase);
+
+		Trace("ClearAllBlocklist starting.");
+
+		try
+		{
+			await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+			await using Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx =
+				await db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+
+			List<BlocklistEntry> enabled = await db.BlocklistEntries
+				.Where(b => b.IsEnabled)
+				.ToListAsync(ct).ConfigureAwait(false);
+			Trace(string.Format(CultureInfo.InvariantCulture,
+				"Found {0} enabled BlocklistEntry row(s).", enabled.Count));
+
+			foreach (BlocklistEntry row in enabled)
+			{
+				row.IsEnabled = false;
+				result.BlocklistRowsAffected++;
+				if (!string.IsNullOrEmpty(row.Ip))
+				{
+					clearedIps.Add(row.Ip);
+				}
+			}
+
+			Trace(string.Format(CultureInfo.InvariantCulture,
+				"Soft-disabled {0} row(s) across {1} distinct IP(s).", result.BlocklistRowsAffected, clearedIps.Count));
+
+			// For each cleared IP that has no remaining enabled row, mark its reconcilable ActiveBlock
+			// rows Removed in the same transaction. (After the bulk disable above none remain enabled,
+			// so every cleared IP qualifies.)
+			if (clearedIps.Count > 0)
+			{
+				List<ActiveBlock> blocks = await db.ActiveBlocks
+					.Where(b => clearedIps.Contains(b.Ip)
+						&& (b.Status == ActiveBlockStatus.Active
+							|| b.Status == ActiveBlockStatus.Pending
+							|| b.Status == ActiveBlockStatus.Failed))
+					.ToListAsync(ct).ConfigureAwait(false);
+				foreach (ActiveBlock block in blocks)
+				{
+					block.Status = ActiveBlockStatus.Removed;
+					block.LastError = "Removed by full blacklist cleanup.";
+					result.ActiveBlocksRemoved++;
+				}
+
+				Trace(string.Format(CultureInfo.InvariantCulture,
+					"Marked {0} ActiveBlock row(s) Removed.", result.ActiveBlocksRemoved));
+			}
+
+			await db.SaveChangesAsync(ct).ConfigureAwait(false);
+			await tx.CommitAsync(ct).ConfigureAwait(false);
+			Trace("DB transaction committed.");
+		}
+		catch (OperationCanceledException)
+		{
+			throw;
+		}
+		catch (Exception ex)
+		{
+			_logger.LogError(ex, "ClearAllBlocklist DB phase failed");
+			result.Errors++;
+			result.Status = IpcResultStatus.Unavailable;
+			result.Message = "Database error while clearing the blacklist; no firewall change was made.";
+			Trace("DB phase exception: " + ex.GetType().Name + ": " + ex.Message);
+			result.DebugLog = log.ToString();
+			return result;
+		}
+
+		result.IpsSynchronized = clearedIps.Count;
+
+		// Firewall phase: remove the RdpAudit-created rules backing the cleared IPs plus safe orphans.
+		// Runs after the DB state is durably committed so a backend failure cannot leave an enabled row
+		// with no rule. A scan failure or per-rule failure is counted, never thrown.
+		if (clearedIps.Count > 0)
+		{
+			try
+			{
+				await RemoveLiveFirewallForIpsAsync(clearedIps, cfg, result, Trace, ct).ConfigureAwait(false);
+			}
+			catch (OperationCanceledException)
+			{
+				throw;
+			}
+			catch (Exception ex)
+			{
+				_logger.LogWarning(ex, "ClearAllBlocklist firewall phase failed");
+				result.Errors++;
+				Trace("Firewall phase exception: " + ex.GetType().Name + ": " + ex.Message);
+			}
+		}
+
+		result.Status = result.Errors > 0 ? IpcResultStatus.Unavailable : IpcResultStatus.Success;
+		result.Message = string.Format(CultureInfo.InvariantCulture,
+			"Disabled {0} blacklist row(s) across {1} IP(s); marked {2} active block(s) Removed; removed {3} firewall rule(s) and {4} orphan rule(s). Errors: {5}.",
+			result.BlocklistRowsAffected, result.IpsSynchronized, result.ActiveBlocksRemoved,
+			result.FirewallRulesRemoved, result.OrphanRulesRemoved, result.Errors);
+		Trace("Result: " + result.Message);
+		result.DebugLog = log.ToString();
+		_logger.LogInformation(
+			"ClearAllBlocklist completed: rows={Rows} ips={Ips} activeBlocks={Abr} firewall={Fwr} orphans={Orph} errors={Err}",
+			result.BlocklistRowsAffected, result.IpsSynchronized, result.ActiveBlocksRemoved,
+			result.FirewallRulesRemoved, result.OrphanRulesRemoved, result.Errors);
+		return result;
+	}
+
+	/// <summary>DEBUG-gated full firewall cleanup (Req B): removes every RdpAudit-owned firewall rule
+	/// discovered live (matched strictly by the RdpAudit prefix) and synchronizes the database by marking
+	/// every Active / Pending / Failed ActiveBlock row Removed. Unrelated admin rules are never touched and
+	/// the BlocklistEntry table is never modified. Per-rule failures are counted and the pass continues
+	/// best-effort; each step is recorded in <see cref="FirewallClearResultDto.DebugLog"/>.</summary>
+	public async Task<FirewallClearResultDto> ClearAllRdpAuditFirewallAsync(CancellationToken ct)
+	{
+		FirewallClearResultDto result = new();
+		System.Text.StringBuilder log = new();
+		void Trace(string line) => log.Append('[')
+			.Append(_time.GetUtcNow().UtcDateTime.ToString("O", CultureInfo.InvariantCulture))
+			.Append("] ").Append(line).Append('\n');
+
+		FirewallOptions cfg = _options.CurrentValue.Firewall;
+		string rulePrefix = NetshCommandBuilder.NormalizeRulePrefix(cfg.BlockRuleName);
+
+		Trace("ClearAllRdpAuditFirewall starting; prefix=" + rulePrefix + ".");
+
+		IFirewallProvider? windows = FindProvider(FirewallProviderRouting.WindowsProviderId);
+		FirewallScanResult scan = await _scanner.ScanRdpAuditBlockRulesAsync(rulePrefix, ct).ConfigureAwait(false);
+
+		if (!scan.Scannable)
+		{
+			result.Status = IpcResultStatus.Unavailable;
+			result.Message = scan.Note ?? "Firewall could not be scanned; no rules removed.";
+			Trace("Firewall not scannable: " + result.Message);
+			result.DebugLog = log.ToString();
+			return result;
+		}
+
+		if (windows is null)
+		{
+			result.Status = IpcResultStatus.Unavailable;
+			result.Message = "Windows firewall provider is not registered; cannot remove rules.";
+			Trace(result.Message);
+			result.DebugLog = log.ToString();
+			return result;
+		}
+
+		result.FirewallRulesFound = scan.Rules.Count;
+		Trace(string.Format(CultureInfo.InvariantCulture,
+			"Scanned firewall ({0}); found {1} RdpAudit rule(s).", scan.Backend, result.FirewallRulesFound));
+
+		foreach (DiscoveredBlockRule rule in scan.Rules)
+		{
+			ct.ThrowIfCancellationRequested();
+			string ip = rule.RemoteIps.Count > 0 ? rule.RemoteIps[0] : string.Empty;
+			if (ip.Length == 0)
+			{
+				Trace("Skipping rule " + rule.RuleName + " (no remote IP parsed).");
+				continue;
+			}
+
+			try
+			{
+				FirewallActionResult action = await windows.UnblockAsync(ip, cfg.BlockRuleName, ct).ConfigureAwait(false);
+				if (action.Status is FirewallActionStatus.Success or FirewallActionStatus.NotFound)
+				{
+					result.FirewallRulesRemoved++;
+					Trace(string.Format(CultureInfo.InvariantCulture,
+						"Removed firewall rule {0} ({1}); status={2}.", rule.RuleName, ip, action.Status));
+				}
+				else
+				{
+					result.Errors++;
+					Trace(string.Format(CultureInfo.InvariantCulture,
+						"Provider returned {0} removing rule {1} ({2}).", action.Status, rule.RuleName, ip));
+				}
+			}
+			catch (OperationCanceledException)
+			{
+				throw;
+			}
+			catch (Exception ex)
+			{
+				result.Errors++;
+				Trace(string.Format(CultureInfo.InvariantCulture,
+					"Failed to remove rule {0}: {1}.", rule.RuleName, ex.GetType().Name));
+				_logger.LogWarning(ex, "ClearAllRdpAuditFirewall failed to remove rule {RuleName}", rule.RuleName);
+			}
+		}
+
+		try
+		{
+			await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+			List<ActiveBlock> activeRows = await db.ActiveBlocks
+				.Where(b => b.Status == ActiveBlockStatus.Active
+					|| b.Status == ActiveBlockStatus.Pending
+					|| b.Status == ActiveBlockStatus.Failed)
+				.ToListAsync(ct).ConfigureAwait(false);
+			foreach (ActiveBlock row in activeRows)
+			{
+				row.Status = ActiveBlockStatus.Removed;
+				row.LastError = "Removed by full firewall cleanup.";
+				result.ActiveBlocksUpdated++;
+			}
+
+			await db.SaveChangesAsync(ct).ConfigureAwait(false);
+			Trace(string.Format(CultureInfo.InvariantCulture,
+				"Marked {0} ActiveBlock row(s) Removed.", result.ActiveBlocksUpdated));
+		}
+		catch (OperationCanceledException)
+		{
+			throw;
+		}
+		catch (Exception ex)
+		{
+			result.Errors++;
+			Trace("ActiveBlock sync exception: " + ex.GetType().Name + ": " + ex.Message);
+			_logger.LogWarning(ex, "ClearAllRdpAuditFirewall ActiveBlock sync failed");
+		}
+
+		result.Status = result.Errors > 0 ? IpcResultStatus.Unavailable : IpcResultStatus.Success;
+		result.Message = string.Format(CultureInfo.InvariantCulture,
+			"Found {0} RdpAudit firewall rule(s); removed {1}; marked {2} active block(s) Removed. Errors: {3}.",
+			result.FirewallRulesFound, result.FirewallRulesRemoved, result.ActiveBlocksUpdated, result.Errors);
+		Trace("Result: " + result.Message);
+		result.DebugLog = log.ToString();
+		_logger.LogInformation(
+			"ClearAllRdpAuditFirewall completed: found={Found} removed={Removed} activeBlocks={Abr} errors={Err}",
+			result.FirewallRulesFound, result.FirewallRulesRemoved, result.ActiveBlocksUpdated, result.Errors);
+		return result;
+	}
+
+	/// <summary>Removes every live RdpAudit firewall rule whose remote IP is in <paramref name="ips"/>
+	/// through the owning provider, counting the first removal per IP as a firewall rule and any further
+	/// matches as orphan rules. Only RdpAudit-prefixed rules are scanned, so unrelated admin rules are
+	/// never touched. Per-rule failures are counted into <see cref="BlocklistClearResultDto.Errors"/> and
+	/// never thrown, so one bad rule cannot abort the whole cleanup.</summary>
+	private async Task RemoveLiveFirewallForIpsAsync(
+		HashSet<string> ips, FirewallOptions cfg, BlocklistClearResultDto result, Action<string> trace, CancellationToken ct)
+	{
+		string rulePrefix = NetshCommandBuilder.NormalizeRulePrefix(cfg.BlockRuleName);
+		IFirewallProvider? windows = FindProvider(FirewallProviderRouting.WindowsProviderId);
+		if (windows is null)
+		{
+			trace("Windows firewall provider not registered; skipping live rule removal.");
+			return;
+		}
+
+		FirewallScanResult scan = await _scanner.ScanRdpAuditBlockRulesAsync(rulePrefix, ct).ConfigureAwait(false);
+		if (!scan.Scannable)
+		{
+			trace("Firewall not scannable (" + (scan.Note ?? "no detail") + "); skipping live rule removal.");
+			return;
+		}
+
+		HashSet<string> firstRemovedForIp = new(StringComparer.OrdinalIgnoreCase);
+		foreach (DiscoveredBlockRule rule in scan.Rules)
+		{
+			ct.ThrowIfCancellationRequested();
+			string? matchIp = rule.RemoteIps
+				.FirstOrDefault(x => ips.Contains(x));
+			if (matchIp is null)
+			{
+				continue;
+			}
+
+			try
+			{
+				FirewallActionResult action = await windows.UnblockAsync(matchIp, cfg.BlockRuleName, ct).ConfigureAwait(false);
+				if (action.Status is FirewallActionStatus.Success or FirewallActionStatus.NotFound)
+				{
+					if (firstRemovedForIp.Add(matchIp))
+					{
+						result.FirewallRulesRemoved++;
+					}
+					else
+					{
+						result.OrphanRulesRemoved++;
+					}
+
+					trace(string.Format(CultureInfo.InvariantCulture,
+						"Removed firewall rule {0} for {1} (status={2}).", rule.RuleName, matchIp, action.Status));
+				}
+				else
+				{
+					result.Errors++;
+					trace(string.Format(CultureInfo.InvariantCulture,
+						"Provider returned {0} removing rule {1} for {2}.", action.Status, rule.RuleName, matchIp));
+				}
+			}
+			catch (OperationCanceledException)
+			{
+				throw;
+			}
+			catch (Exception ex)
+			{
+				result.Errors++;
+				trace(string.Format(CultureInfo.InvariantCulture,
+					"Failed to remove rule {0} for {1}: {2}.", rule.RuleName, matchIp, ex.GetType().Name));
+			}
+		}
+	}
+
 	/// <summary>Removes exactly one selected BlockList row by its stable surrogate id and synchronizes
 	/// the ActiveBlock / live firewall rule only when that row was the last enabled BlockList row for its
 	/// IP. The row is soft-disabled (kept for audit, never hard-deleted). Behaviour:

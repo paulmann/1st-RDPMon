@@ -208,6 +208,7 @@ public static class Program
 		}
 		services.AddSingleton<EnforcementReconciliationService>();
 		services.AddSingleton<ToolsDiagnosticsService>();
+		services.AddSingleton<ApplicationDataPurgeService>();
 		if (OperatingSystem.IsWindows())
 		{
 			services.AddSingleton<RdpSessionManager>();

@@ -162,4 +162,31 @@ public enum IpcCommand
 	/// annotated with an audit trail rather than hard-deleted, so the action is reversible and traceable.
 	/// Returns a structured report of the IPs collapsed and rows affected.</summary>
 	DedupeBlocklistEntries = 54,
+
+	// --- v1.3.2 guarded cleanup operations (append-only). ---
+
+	/// <summary>Full blacklist cleanup: soft-disables every currently-enabled BlocklistEntry (per the
+	/// reversible audit-trail convention, never hard-deleting rows), then synchronizes enforcement for
+	/// every IP that no longer has an enabled entry — marking its Active / Pending ActiveBlock rows
+	/// Removed and removing the RdpAudit-created firewall rules that backed them, plus any safe
+	/// RdpAudit-owned orphan rules. Never touches unrelated / non-RdpAudit firewall rules. Returns a
+	/// structured report with rows affected, active blocks removed, firewall and orphan rules removed,
+	/// failures and a debug log.</summary>
+	ClearAllBlocklist = 55,
+
+	/// <summary>DEBUG-gated full firewall cleanup: removes every RdpAudit-owned firewall rule (matched
+	/// strictly by the RdpAudit group / name convention) and synchronizes ActiveBlock rows to the
+	/// non-enforced (Removed) state. Never deletes unrelated admin-created rules and never touches the
+	/// BlocklistEntry table. Returns a structured report with rules found / removed, active blocks
+	/// updated, failures and a debug log.</summary>
+	ClearAllFirewallRules = 56,
+
+	/// <summary>DEBUG-gated full application-data cleanup: transactionally clears the accumulated
+	/// RdpAudit operational tables (raw events, auth-attempt facts, connection facts, active blocks,
+	/// blocklist / whitelist entries, alerts, sessions, addresses, correlations, attack stats, abuse
+	/// report history) while preserving schema, migrations and configuration. On SQLite it follows the
+	/// purge with a WAL checkpoint and VACUUM to reclaim space. Requires a typed confirmation phrase on
+	/// the client. Returns a structured report with per-table row counts cleared, vacuum / checkpoint
+	/// flags, failures and a debug log.</summary>
+	ClearAllApplicationData = 57,
 }

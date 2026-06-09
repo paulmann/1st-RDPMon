@@ -36,6 +36,9 @@ public class IpcConstantsTimeoutTests
 		IpcCommand.AddToBlocklist,
 		IpcCommand.RemoveFromBlocklist,
 		IpcCommand.UnblockActiveBlock,
+		IpcCommand.ClearAllBlocklist,
+		IpcCommand.ClearAllFirewallRules,
+		IpcCommand.ClearAllApplicationData,
 	};
 
 	public static TheoryData<IpcCommand> CheapCommands => new()
