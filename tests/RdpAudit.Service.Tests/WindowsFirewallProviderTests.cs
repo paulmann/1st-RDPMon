@@ -24,10 +24,33 @@ public class WindowsFirewallProviderTests
 		return new StaticOptionsMonitor<RdpAuditOptions>(opts);
 	}
 
+	private static NetshResult NetshSuccess() => new(0, string.Empty, string.Empty);
+
+	private static NetshResult NetshShowRule(string stdOut) => new(0, stdOut, string.Empty);
+
+	// Minimal verbose `show rule` dump that satisfies the v1.2.4 post-block verification gate:
+	// an enabled, inbound, block rule. Mirrors the locale-stable English keys netsh emits.
+	private static string EnabledInboundBlockDump(string ruleName)
+		=> "Rule Name:                            " + ruleName + "\n"
+			+ "----------------------------------------------------------------------\n"
+			+ "Enabled:                              Yes\n"
+			+ "Direction:                            In\n"
+			+ "Profiles:                             Domain,Private,Public\n"
+			+ "LocalIP:                              Any\n"
+			+ "RemoteIP:                             Any\n"
+			+ "Protocol:                             TCP\n"
+			+ "Action:                               Block\n"
+			+ "\n";
+
 	[Fact]
 	public async Task Block_ValidPublicAddress_AddsRuleAndReturnsSuccess()
 	{
 		FakeNetshRunner runner = new();
+		// Script the v1.2.4 verify-after-block sequence: delete (idempotent cleanup), add, then the
+		// post-add `show rule` query whose verbose dump confirms an enabled inbound block rule landed.
+		runner.Responses.Enqueue(NetshSuccess());
+		runner.Responses.Enqueue(NetshSuccess());
+		runner.Responses.Enqueue(NetshShowRule(EnabledInboundBlockDump("RdpAudit-Block-203.0.113.10")));
 		WindowsFirewallProvider provider = new(
 			NullLogger<WindowsFirewallProvider>.Instance,
 			CreateOptions(),
@@ -46,8 +69,8 @@ public class WindowsFirewallProviderTests
 		{
 			Assert.Equal(FirewallActionStatus.Success, result.Status);
 			Assert.Equal("RdpAudit-Block-203.0.113.10", result.RuleId);
-			// 1 delete (idempotent prefix-cleanup) + 1 add.
-			Assert.Equal(2, runner.Calls.Count);
+			// 1 delete (idempotent prefix-cleanup) + 1 add + 1 verify (show rule).
+			Assert.Equal(3, runner.Calls.Count);
 			Assert.Contains("add", runner.Calls[1]);
 			Assert.Contains("remoteip=203.0.113.10", runner.Calls[1]);
 		}
@@ -111,6 +134,10 @@ public class WindowsFirewallProviderTests
 	public async Task Block_LoopbackAddress_AllowedWhenPolicyDisabled()
 	{
 		FakeNetshRunner runner = new();
+		// delete + add + verify; the verify dump confirms an enabled inbound block rule landed.
+		runner.Responses.Enqueue(NetshSuccess());
+		runner.Responses.Enqueue(NetshSuccess());
+		runner.Responses.Enqueue(NetshShowRule(EnabledInboundBlockDump("RdpAudit-Block-10.0.0.1")));
 		WindowsFirewallProvider provider = new(
 			NullLogger<WindowsFirewallProvider>.Instance,
 			CreateOptions(new RdpAuditOptions { Firewall = new FirewallOptions { RefusePrivateAddressBlock = false } }),
@@ -204,6 +231,68 @@ public class WindowsFirewallProviderTests
 		FirewallStatusReport report = await provider.GetStatusAsync(CancellationToken.None);
 		Assert.Equal(FirewallProviderStatus.Unreachable, report.Status);
 		Assert.Equal("Windows", report.ProviderId);
+	}
+
+	[Fact]
+	public async Task Block_AddRuleNonZeroExit_ReturnsUnavailable()
+	{
+		FakeNetshRunner runner = new();
+		// delete (success) then add fails with a non-zero exit — the firewall service / netsh could
+		// not run the add, so the provider must surface Unavailable without attempting verification.
+		runner.Responses.Enqueue(NetshSuccess());
+		runner.Responses.Enqueue(new NetshResult(1, string.Empty, "The requested operation requires elevation."));
+		WindowsFirewallProvider provider = new(
+			NullLogger<WindowsFirewallProvider>.Instance,
+			CreateOptions(),
+			runner,
+			new FakeRdpPortProvider());
+
+		FirewallActionResult result = await provider.BlockAsync(
+			new FirewallBlockRequest("203.0.113.10", "RdpAudit-Block"),
+			CancellationToken.None);
+
+		if (OperatingSystem.IsWindows())
+		{
+			Assert.Equal(FirewallActionStatus.Unavailable, result.Status);
+			// delete + add only; verification is never reached once the add fails.
+			Assert.Equal(2, runner.Calls.Count);
+		}
+		else
+		{
+			Assert.Equal(FirewallActionStatus.Unavailable, result.Status);
+		}
+	}
+
+	[Fact]
+	public async Task Block_VerificationFindsNoRule_ReturnsUnavailable()
+	{
+		FakeNetshRunner runner = new();
+		// delete + add both report success, but the post-add `show rule` query returns an empty dump
+		// (a managing third-party firewall silently swallowed the write). The provider must not claim
+		// success when the rule cannot be verified in the firewall store.
+		runner.Responses.Enqueue(NetshSuccess());
+		runner.Responses.Enqueue(NetshSuccess());
+		runner.Responses.Enqueue(NetshShowRule(string.Empty));
+		WindowsFirewallProvider provider = new(
+			NullLogger<WindowsFirewallProvider>.Instance,
+			CreateOptions(),
+			runner,
+			new FakeRdpPortProvider());
+
+		FirewallActionResult result = await provider.BlockAsync(
+			new FirewallBlockRequest("203.0.113.10", "RdpAudit-Block"),
+			CancellationToken.None);
+
+		if (OperatingSystem.IsWindows())
+		{
+			Assert.Equal(FirewallActionStatus.Unavailable, result.Status);
+			// delete + add + verify.
+			Assert.Equal(3, runner.Calls.Count);
+		}
+		else
+		{
+			Assert.Equal(FirewallActionStatus.Unavailable, result.Status);
+		}
 	}
 }
 
