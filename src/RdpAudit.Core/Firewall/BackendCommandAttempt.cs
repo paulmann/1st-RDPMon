@@ -64,6 +64,36 @@ public sealed record BackendCommandAttempt(
 		return trimmed.Length <= max ? trimmed : trimmed[..max] + "…";
 	}
 
+	/// <summary>Renders exactly one well-formed backend command line for operator display, built from
+	/// the same structured executable / argument vector used for execution. <see cref="CommandLabel"/>
+	/// is a short human label (e.g. <c>"New-NetFirewallRule -Group RdpAudit"</c>) and <see cref="Arguments"/>
+	/// is the full argument line; naively concatenating the two duplicates the verb
+	/// (<c>"New-NetFirewallRule -Group RdpAudit New-NetFirewallRule -Name …"</c>). This method instead
+	/// joins <see cref="Executable"/> and <see cref="Arguments"/> — the actual invocation — and falls back
+	/// to the label only when neither is populated. The result never contains a duplicated leading verb.</summary>
+	public string RenderCommandLine()
+	{
+		bool hasExe = !string.IsNullOrWhiteSpace(Executable);
+		bool hasArgs = !string.IsNullOrWhiteSpace(Arguments);
+
+		if (hasExe && hasArgs)
+		{
+			return Executable + " " + Arguments;
+		}
+
+		if (hasArgs)
+		{
+			return Arguments;
+		}
+
+		if (hasExe)
+		{
+			return Executable;
+		}
+
+		return CommandLabel;
+	}
+
 	/// <summary>Builds a single-line operator-facing diagnostic. When the command exited non-zero with
 	/// empty stderr the stdout preview is included so a silent exit=1 still carries a failure signal.</summary>
 	public string BuildDiagnostic()

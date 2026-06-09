@@ -32,17 +32,20 @@ public sealed class MainForm : Form
 		StartPosition = FormStartPosition.CenterScreen;
 
 		// Owner-drawn tabs: each page label is prefixed with a glyph for fast visual scanning, and the
-		// selected tab is rendered bold on a highlighted background so the active page is obvious at a
-		// glance. DrawMode=OwnerDrawFixed keeps tab sizing native (no layout shift / flicker); only the
-		// per-tab paint is customized. SizeMode=Fixed gives every tab a stable width so the bold selected
-		// label does not reflow neighbouring tabs.
+		// selected tab is rendered bold on a highlighted background with an accent bar so the active page
+		// is obvious at a glance. DrawMode=OwnerDrawFixed keeps tab sizing native (no layout shift /
+		// flicker); only the per-tab paint is customized. SizeMode=Fixed gives every tab a stable width so
+		// the bold selected label does not reflow neighbours. Multiline=true lets the full row of tabs wrap
+		// onto additional rows instead of clipping behind scroll arrows when the window is narrow or DPI is
+		// high — every page stays reachable without horizontal scrolling.
 		_tabs = new TabControl
 		{
 			Dock = DockStyle.Fill,
 			DrawMode = TabDrawMode.OwnerDrawFixed,
 			SizeMode = TabSizeMode.Fixed,
-			ItemSize = new Size(150, 26),
-			Padding = new Point(8, 3),
+			Multiline = true,
+			ItemSize = new Size(160, 30),
+			Padding = new Point(10, 4),
 		};
 		_tabs.TabPages.Add(new OverviewPage(_ipc) { Text = "\U0001F4CA Overview" });
 		_tabs.TabPages.Add(new PrerequisitesPage { Text = "✅ Prerequisites" });
@@ -98,6 +101,14 @@ public sealed class MainForm : Form
 		using (SolidBrush backBrush = new(back))
 		{
 			e.Graphics.FillRectangle(backBrush, bounds);
+		}
+
+		// A thick accent bar along the top edge of the selected tab gives the active page a strong,
+		// glanceable cue that survives high-contrast themes where Highlight/Control differ only subtly.
+		if (selected)
+		{
+			using SolidBrush accentBrush = new(SystemColors.HotTrack);
+			e.Graphics.FillRectangle(accentBrush, bounds.Left, bounds.Top, bounds.Width, 4);
 		}
 
 		using Font font = new(Font, selected ? FontStyle.Bold : FontStyle.Regular);

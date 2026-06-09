@@ -154,4 +154,12 @@ public enum IpcCommand
 	/// create a temporary block rule, verify it landed, then clean it up — reporting each step's exact
 	/// command, exit code, stdout/stderr, rule name, rule handle and scanner backend.</summary>
 	RunTemporaryFirewallRuleProbe = 53,
+
+	// --- v1.3.1 DB maintenance (append-only). ---
+
+	/// <summary>Collapses duplicate BlocklistEntry rows that share the same IP down to a single canonical
+	/// row (preferring an enabled row, then the oldest by AddedUtc). Duplicates are soft-disabled and
+	/// annotated with an audit trail rather than hard-deleted, so the action is reversible and traceable.
+	/// Returns a structured report of the IPs collapsed and rows affected.</summary>
+	DedupeBlocklistEntries = 54,
 }

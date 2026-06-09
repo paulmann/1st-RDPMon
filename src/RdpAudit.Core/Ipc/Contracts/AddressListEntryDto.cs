@@ -36,4 +36,10 @@ public sealed class AddressListEntryDto
 	/// </summary>
 	[Key(5)]
 	public long Id { get; set; }
+
+	/// <summary>True when the underlying row is enabled. Blocklist listings include disabled rows so the
+	/// operator can see (and target by Id) a soft-disabled duplicate; defaults true for lists that have
+	/// no enabled/disabled distinction (e.g. whitelist).</summary>
+	[Key(6)]
+	public bool IsEnabled { get; set; } = true;
 }
