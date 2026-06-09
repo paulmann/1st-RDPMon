@@ -17,6 +17,96 @@ namespace RdpAudit.Core.Data.Migrations
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.10");
 
+            modelBuilder.Entity("RdpAudit.Core.Models.AbuseIpDbReportHistory", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("AbuseCategories")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Action")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("Classification")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CommentHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CommentPreview")
+                        .HasMaxLength(512)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("CooldownExpiresUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ErrorMessage")
+                        .HasMaxLength(2048)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("FailedCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("FirstSeenUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("HttpStatusCode")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("IpAddress")
+                        .IsRequired()
+                        .HasMaxLength(45)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("LastSeenUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Reason")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReportId")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("ReportedAtUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ResultCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("RuleId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Source")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("Succeeded")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("SuccessfulCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("UsernamesSample")
+                        .HasMaxLength(512)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ReportedAtUtc");
+
+                    b.HasIndex("IpAddress", "Succeeded", "ReportedAtUtc");
+
+                    b.ToTable("AbuseIpDbReportHistory", (string)null);
+                });
+
             modelBuilder.Entity("RdpAudit.Core.Models.AbuseReport", b =>
                 {
                     b.Property<long>("Id")
@@ -53,59 +143,6 @@ namespace RdpAudit.Core.Data.Migrations
                     b.HasIndex("Ip", "ReportedUtc");
 
                     b.ToTable("AbuseReports", (string)null);
-                });
-
-            modelBuilder.Entity("RdpAudit.Core.Models.AbuseIpDbReportHistory", b =>
-                {
-                    b.Property<long>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("AbuseCategories")
-                        .IsRequired()
-                        .HasMaxLength(256)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("CommentHash")
-                        .HasMaxLength(64)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ErrorMessage")
-                        .HasMaxLength(2048)
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("HttpStatusCode")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("IpAddress")
-                        .IsRequired()
-                        .HasMaxLength(45)
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime>("ReportedAtUtc")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ResultCode")
-                        .HasMaxLength(64)
-                        .HasColumnType("TEXT");
-
-                    b.Property<long?>("RuleId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("Source")
-                        .HasMaxLength(64)
-                        .HasColumnType("TEXT");
-
-                    b.Property<bool>("Succeeded")
-                        .HasColumnType("INTEGER");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ReportedAtUtc");
-
-                    b.HasIndex("IpAddress", "Succeeded", "ReportedAtUtc");
-
-                    b.ToTable("AbuseIpDbReportHistory", (string)null);
                 });
 
             modelBuilder.Entity("RdpAudit.Core.Models.ActiveBlock", b =>
