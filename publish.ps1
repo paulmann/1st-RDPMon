@@ -25,8 +25,14 @@
 
 [CmdletBinding()]
 param(
-	[string]$Version = "1.2.1",
+	[string]$Version = "1.3.0",
 	[string]$Configuration = "Release",
+	# Build SHA stamped into AssemblyInformationalVersion as SemVer build metadata (after '+').
+	# Left empty here on purpose: when not supplied it is auto-resolved from `git rev-parse HEAD`
+	# (short form) so every published binary records exactly which commit produced it, and the
+	# Configurator can warn when the installed/running Service was built from a different commit.
+	# Pass an explicit value (or '-' to disable) only when building outside a git checkout.
+	[string]$SourceRevisionId = "",
 	[switch]$Force,
 	[switch]$SelfTest
 )
@@ -35,6 +41,50 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $publishRoot = Join-Path $PSScriptRoot "publish"
+
+# -----------------------------------------------------------------------------
+# Build SHA resolution
+# -----------------------------------------------------------------------------
+# Resolves the short commit SHA for the working tree so it can be stamped into the
+# binary as SemVer build metadata. Best-effort: a missing git, a detached/empty repo
+# or any failure degrades to an empty string (the build then omits the +sha suffix)
+# rather than aborting the publish. Appends "-dirty" when the tree has uncommitted
+# changes so a binary built from a modified checkout is never mistaken for a clean tag.
+function Resolve-SourceRevisionId {
+	param([string]$Override)
+
+	if (-not [string]::IsNullOrWhiteSpace($Override)) {
+		# Explicit '-' means "no SHA" (building outside a git checkout on purpose).
+		if ($Override -eq '-') { return "" }
+		return $Override
+	}
+
+	$git = Get-Command git -ErrorAction SilentlyContinue
+	if ($null -eq $git) {
+		Write-Diag "git not found on PATH; publishing without a SourceRevisionId."
+		return ""
+	}
+
+	try {
+		$sha = (& git -C $PSScriptRoot rev-parse --short=12 HEAD 2>$null)
+		if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sha)) {
+			Write-Diag "git rev-parse HEAD did not yield a SHA; publishing without a SourceRevisionId."
+			return ""
+		}
+		$sha = $sha.Trim()
+
+		# Flag a dirty working tree so a locally-modified build is visibly distinct.
+		$status = (& git -C $PSScriptRoot status --porcelain 2>$null)
+		if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($status)) {
+			$sha = $sha + "-dirty"
+		}
+
+		return $sha
+	} catch {
+		Write-Diag ("SHA resolution failed: " + $_.Exception.Message)
+		return ""
+	}
+}
 
 # -----------------------------------------------------------------------------
 # Diagnostic plumbing
@@ -382,21 +432,29 @@ function Remove-PublishOutput {
 function Publish-Project {
 	param(
 		[Parameter(Mandatory = $true)][string]$Project,
-		[Parameter(Mandatory = $true)][string]$Subdir
+		[Parameter(Mandatory = $true)][string]$Subdir,
+		[string]$RevisionId = ""
 	)
 
 	$target = Join-Path $publishRoot $Subdir
 	Write-Host "Publishing $Project -> $target" -ForegroundColor Cyan
 
-	dotnet publish $Project `
-		-c $Configuration `
-		-r win-x64 `
-		--self-contained true `
-		-p:PublishSingleFile=true `
-		-p:IncludeNativeLibrariesForSelfExtract=true `
-		-p:EnableCompressionInSingleFile=true `
-		-p:VersionPrefix=$Version `
-		-o $target
+	$publishArgs = @(
+		$Project,
+		"-c", $Configuration,
+		"-r", "win-x64",
+		"--self-contained", "true",
+		"-p:PublishSingleFile=true",
+		"-p:IncludeNativeLibrariesForSelfExtract=true",
+		"-p:EnableCompressionInSingleFile=true",
+		"-p:VersionPrefix=$Version"
+	)
+	if (-not [string]::IsNullOrWhiteSpace($RevisionId)) {
+		$publishArgs += "-p:SourceRevisionId=$RevisionId"
+	}
+	$publishArgs += @("-o", $target)
+
+	dotnet publish @publishArgs
 
 	if ($LASTEXITCODE -ne 0) {
 		throw "publish failed: $Project (exit $LASTEXITCODE)"
@@ -568,7 +626,14 @@ if ($SelfTest) {
 
 Remove-PublishOutput -Path $publishRoot
 
-Publish-Project -Project "src/RdpAudit.Service/RdpAudit.Service.csproj"           -Subdir "Service"
-Publish-Project -Project "src/RdpAudit.Configurator/RdpAudit.Configurator.csproj" -Subdir "Configurator"
+$resolvedRevision = Resolve-SourceRevisionId -Override $SourceRevisionId
+if (-not [string]::IsNullOrWhiteSpace($resolvedRevision)) {
+	Write-Host ("Stamping build SHA: {0}+{1}" -f $Version, $resolvedRevision) -ForegroundColor Cyan
+} else {
+	Write-Host ("Publishing {0} without a build SHA (no git checkout or SHA disabled)." -f $Version) -ForegroundColor DarkYellow
+}
+
+Publish-Project -Project "src/RdpAudit.Service/RdpAudit.Service.csproj"           -Subdir "Service"      -RevisionId $resolvedRevision
+Publish-Project -Project "src/RdpAudit.Configurator/RdpAudit.Configurator.csproj" -Subdir "Configurator" -RevisionId $resolvedRevision
 
 Write-Host "Done -> $publishRoot" -ForegroundColor Green
