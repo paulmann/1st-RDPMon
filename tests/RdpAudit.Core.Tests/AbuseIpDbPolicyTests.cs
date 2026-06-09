@@ -283,4 +283,13 @@ public class AbuseIpDbPolicyTests
 		Assert.False(d.ShouldReport);
 		Assert.Equal(AbuseIpDbSuppressionReason.WithinDedupWindow, d.Reason);
 	}
+
+	[Fact]
+	public void Defaults_DedupeOn_CooldownTwentyFourHours()
+	{
+		// Req 4: "1 report per 1 IP" is enabled by default with a 24-hour cooldown.
+		AbuseIpDbOptions defaults = new();
+		Assert.True(defaults.ReportDedupeEnabled);
+		Assert.Equal(24, defaults.ReportCooldownHours);
+	}
 }
