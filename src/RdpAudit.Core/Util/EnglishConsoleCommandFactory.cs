@@ -63,6 +63,14 @@ public enum TrustedEnglishConsoleTool
 	/// <summary>gpresult /scope computer /r — computer-scope group policy summary. Output
 	/// is locale-stable when chcp 437 is in effect; only used for parsed checks.</summary>
 	GpresultScopeComputer = 6,
+
+	/// <summary>netsh advfirewall firewall show rule name={ruleName} verbose — verbose dump for a
+	/// SINGLE named rule used by the Windows firewall provider's post-block verification. Routing it
+	/// through the English console keeps the parsed keys ("Rule Name:", "Enabled:", "Direction:",
+	/// "Action:") in Latin script on a localised host, where Direct mode would emit translated /
+	/// mojibake field labels that the netsh text scanner cannot match. The rule name is a typed,
+	/// validated token (conservative ASCII set), not raw operator input.</summary>
+	NetshShowNamedRuleVerbose = 7,
 }
 
 /// <summary>Typed arguments accepted by tools that take dynamic but strictly-validated input.</summary>
@@ -71,6 +79,11 @@ public sealed record EnglishConsoleArgs
 	/// <summary>Subcategory GUID for <see cref="TrustedEnglishConsoleTool.AuditpolGetSubcategoryCsv"/>.
 	/// Must be a parseable Guid; the factory validates this and refuses anything else.</summary>
 	public string? SubcategoryGuid { get; init; }
+
+	/// <summary>Firewall rule name for <see cref="TrustedEnglishConsoleTool.NetshShowNamedRuleVerbose"/>.
+	/// Must match the conservative ASCII rule-name set; the factory validates this and refuses anything
+	/// else so no token can break out of the cmd <c>/c</c> command string.</summary>
+	public string? RuleName { get; init; }
 }
 
 /// <summary>Composed cmd.exe spawn parameters for a trusted English-console command.</summary>
@@ -149,6 +162,14 @@ public static class EnglishConsoleCommandFactory
 			case TrustedEnglishConsoleTool.GpresultScopeComputer:
 				return ("gpresult.exe /scope computer /r", "gpresult /scope computer /r");
 
+			case TrustedEnglishConsoleTool.NetshShowNamedRuleVerbose:
+				{
+					string ruleName = ValidateRuleName(args?.RuleName);
+					return (
+						"netsh.exe advfirewall firewall show rule name=" + QuoteForCmd(ruleName) + " verbose",
+						"netsh advfirewall firewall show rule name=" + ruleName + " verbose");
+				}
+
 			default:
 				throw new ArgumentOutOfRangeException(nameof(tool), tool, "Unknown trusted English-console tool.");
 		}
@@ -172,5 +193,43 @@ public static class EnglishConsoleCommandFactory
 		// Use the {B}-form ("{0CCE9215-69AE-11D9-BED3-505054503030}") — the on-disk auditpol
 		// reference shape. Upper-cased so the interpolated token is deterministic.
 		return parsed.ToString("B", CultureInfo.InvariantCulture).ToUpperInvariant();
+	}
+
+	/// <summary>Validates a firewall rule name for interpolation into the netsh show-rule command
+	/// string. Accepts only the conservative ASCII set the rule-name builder produces (letters,
+	/// digits, '-', '_', '.', ':') so no shell-significant character can reach the cmd /c command —
+	/// a defense-in-depth match to the producer-side validation. Refuses null / empty / over-long
+	/// input.</summary>
+	internal static string ValidateRuleName(string? value)
+	{
+		if (string.IsNullOrWhiteSpace(value))
+		{
+			throw new ArgumentException("Rule name is required for NetshShowNamedRuleVerbose.", nameof(value));
+		}
+
+		if (value.Length > 200)
+		{
+			throw new ArgumentException("Rule name exceeds 200 characters.", nameof(value));
+		}
+
+		foreach (char c in value)
+		{
+			if (!(char.IsAsciiLetterOrDigit(c) || c == '-' || c == '_' || c == '.' || c == ':'))
+			{
+				throw new ArgumentException("Rule name contains characters not permitted in a firewall rule name.", nameof(value));
+			}
+		}
+
+		return value;
+	}
+
+	/// <summary>Wraps a token in double quotes for the inner cmd <c>/c</c> command, doubling any
+	/// embedded double quote (cmd's own escaping convention). Defense-in-depth: the only callers pass
+	/// values already restricted to a shell-inert ASCII set, so this never has to neutralise a real
+	/// metacharacter — it simply guarantees the token is treated as a single argument.</summary>
+	internal static string QuoteForCmd(string value)
+	{
+		value ??= string.Empty;
+		return "\"" + value.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
 	}
 }

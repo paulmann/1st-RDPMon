@@ -111,15 +111,24 @@ public sealed class NetshRunner : INetshRunner
 					timeout: _timeout,
 					ct: ct)
 				.ConfigureAwait(false);
-			return new NetshResult(
-				englishConsoleProbe.TimedOut ? -1 : englishConsoleProbe.ExitCode,
-				englishConsoleProbe.StdOut,
-				englishConsoleProbe.StdErr,
-				Executable: englishConsoleProbe.Executable,
-				CommandLabel: englishConsoleProbe.CommandLabel,
-				DurationMs: (long)englishConsoleProbe.Duration.TotalMilliseconds,
-				TimedOut: englishConsoleProbe.TimedOut,
-				EnglishConsoleMode: englishConsoleProbe.EnglishConsoleMode);
+			return ToNetshResult(englishConsoleProbe);
+		}
+
+		// Recognise the parse-dependent single-rule "show rule name=<X> verbose" verification query
+		// and route it through the English console so the parsed keys ("Rule Name:", "Enabled:",
+		// "Direction:", "Action:") are emitted in Latin script on a localised host. Direct mode would
+		// produce translated / mojibake labels the netsh text scanner cannot match — the operator-
+		// reported "rule created but verification fails" symptom on a Russian Windows install.
+		if (TryGetShowNamedRule(args, out string? namedRule))
+		{
+			ExternalCommandResult englishConsoleShow = await _runner
+				.RunEnglishConsoleAsync(
+					TrustedEnglishConsoleTool.NetshShowNamedRuleVerbose,
+					args: new EnglishConsoleArgs { RuleName = namedRule },
+					timeout: _timeout,
+					ct: ct)
+				.ConfigureAwait(false);
+			return ToNetshResult(englishConsoleShow);
 		}
 
 		string label = "netsh " + string.Join(' ', args);
@@ -131,16 +140,21 @@ public sealed class NetshRunner : INetshRunner
 				timeout: _timeout,
 				ct: ct)
 			.ConfigureAwait(false);
-		return new NetshResult(
-			direct.TimedOut ? -1 : direct.ExitCode,
-			direct.StdOut,
-			direct.StdErr,
-			Executable: direct.Executable,
-			CommandLabel: direct.CommandLabel,
-			DurationMs: (long)direct.Duration.TotalMilliseconds,
-			TimedOut: direct.TimedOut,
-			EnglishConsoleMode: direct.EnglishConsoleMode);
+		return ToNetshResult(direct);
 	}
+
+	/// <summary>Projects an <see cref="ExternalCommandResult"/> onto the netsh outcome record, mapping a
+	/// timeout to a -1 exit code and preserving the runner mode / locale flag.</summary>
+	private static NetshResult ToNetshResult(ExternalCommandResult result) =>
+		new(
+			result.TimedOut ? -1 : result.ExitCode,
+			result.StdOut,
+			result.StdErr,
+			Executable: result.Executable,
+			CommandLabel: result.CommandLabel,
+			DurationMs: (long)result.Duration.TotalMilliseconds,
+			TimedOut: result.TimedOut,
+			EnglishConsoleMode: result.EnglishConsoleMode);
 
 	/// <summary>True when the argument vector matches <see cref="NetshCommandBuilder.BuildShowAllProfilesStateArgs"/>.</summary>
 	private static bool IsShowAllProfilesState(IReadOnlyList<string> args)
@@ -159,6 +173,46 @@ public sealed class NetshRunner : INetshRunner
 			}
 		}
 
+		return true;
+	}
+
+	/// <summary>Recognises the single-rule verification vector
+	/// <c>advfirewall firewall show rule name=&lt;X&gt; verbose</c> as produced by
+	/// <see cref="NetshCommandBuilder.BuildShowRuleArgs"/> and extracts the rule name. The
+	/// <c>name=all</c> reconciliation dump (<see cref="NetshCommandBuilder.BuildShowAllRulesArgs"/>) is
+	/// deliberately NOT matched here — it is routed through the dedicated
+	/// <see cref="TrustedEnglishConsoleTool.NetshShowAllRulesVerbose"/> tool by its own callers.</summary>
+	private static bool TryGetShowNamedRule(IReadOnlyList<string> args, out string? ruleName)
+	{
+		ruleName = null;
+		if (args.Count != 6)
+		{
+			return false;
+		}
+
+		if (!string.Equals(args[0], "advfirewall", StringComparison.Ordinal)
+			|| !string.Equals(args[1], "firewall", StringComparison.Ordinal)
+			|| !string.Equals(args[2], "show", StringComparison.Ordinal)
+			|| !string.Equals(args[3], "rule", StringComparison.Ordinal)
+			|| !string.Equals(args[5], "verbose", StringComparison.Ordinal))
+		{
+			return false;
+		}
+
+		const string namePrefix = "name=";
+		if (!args[4].StartsWith(namePrefix, StringComparison.Ordinal))
+		{
+			return false;
+		}
+
+		string candidate = args[4][namePrefix.Length..];
+		// The reconciliation "name=all" dump is handled elsewhere; never treat it as a single rule.
+		if (candidate.Length == 0 || string.Equals(candidate, "all", StringComparison.OrdinalIgnoreCase))
+		{
+			return false;
+		}
+
+		ruleName = candidate;
 		return true;
 	}
 }

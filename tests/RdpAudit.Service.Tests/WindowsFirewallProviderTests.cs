@@ -11,6 +11,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using RdpAudit.Core.Config;
 using RdpAudit.Core.Firewall;
+using RdpAudit.Core.Util;
 using RdpAudit.Service.Firewall;
 using Xunit;
 
@@ -264,6 +265,74 @@ public class WindowsFirewallProviderTests
 	}
 
 	[Fact]
+	public async Task Block_PowerShellRunnerWired_UsesNewNetFirewallRuleStampingGroup()
+	{
+		if (!OperatingSystem.IsWindows())
+		{
+			return;
+		}
+
+		FakeNetshRunner runner = new();
+		// delete (idempotent prefix-cleanup) then the post-add verify dump. No netsh `add` should run
+		// because the PowerShell create path succeeds and is preferred.
+		runner.Responses.Enqueue(NetshSuccess());
+		runner.Responses.Enqueue(NetshShowRule(EnabledInboundBlockDump("RdpAudit-Block-203.0.113.10")));
+		CapturingCommandRunner ps = new();
+		WindowsFirewallProvider provider = new(
+			NullLogger<WindowsFirewallProvider>.Instance,
+			CreateOptions(),
+			runner,
+			new FakeRdpPortProvider(),
+			ps);
+
+		FirewallActionResult result = await provider.BlockAsync(
+			new FirewallBlockRequest("203.0.113.10", "RdpAudit-Block") { Reason = "unit-test" },
+			CancellationToken.None);
+
+		Assert.Equal(FirewallActionStatus.Success, result.Status);
+		Assert.Equal(BackendRunnerMode.PowerShellJson, result.BackendAttempt!.RunnerMode);
+		// The PowerShell create path is the supported way to stamp the firewall Group.
+		Assert.Contains("New-NetFirewallRule", ps.LastScript, StringComparison.Ordinal);
+		Assert.Contains("-Group 'RdpAudit'", ps.LastScript, StringComparison.Ordinal);
+		Assert.Contains("-RemoteAddress '203.0.113.10'", ps.LastScript, StringComparison.Ordinal);
+		// netsh `add` must NOT be invoked once the PowerShell create succeeds.
+		Assert.DoesNotContain(runner.Calls, call => call.Contains("add"));
+	}
+
+	[Fact]
+	public async Task Block_PowerShellCreateFails_FallsBackToNetshAddWithoutGroup()
+	{
+		if (!OperatingSystem.IsWindows())
+		{
+			return;
+		}
+
+		FakeNetshRunner runner = new();
+		// delete + add (fallback) + verify.
+		runner.Responses.Enqueue(NetshSuccess());
+		runner.Responses.Enqueue(NetshSuccess());
+		runner.Responses.Enqueue(NetshShowRule(EnabledInboundBlockDump("RdpAudit-Block-203.0.113.10")));
+		CapturingCommandRunner ps = new() { ExitCode = 1, StdErr = "New-NetFirewallRule failed." };
+		WindowsFirewallProvider provider = new(
+			NullLogger<WindowsFirewallProvider>.Instance,
+			CreateOptions(),
+			runner,
+			new FakeRdpPortProvider(),
+			ps);
+
+		FirewallActionResult result = await provider.BlockAsync(
+			new FirewallBlockRequest("203.0.113.10", "RdpAudit-Block") { Reason = "unit-test" },
+			CancellationToken.None);
+
+		Assert.Equal(FirewallActionStatus.Success, result.Status);
+		// PowerShell was tried, then the netsh add fallback ran — and it carries no group=/grouping=.
+		IReadOnlyList<string>? addCall = runner.Calls.FirstOrDefault(c => c.Contains("add"));
+		Assert.NotNull(addCall);
+		Assert.DoesNotContain(addCall!, a => a.StartsWith("group=", StringComparison.OrdinalIgnoreCase));
+		Assert.DoesNotContain(addCall!, a => a.StartsWith("grouping=", StringComparison.OrdinalIgnoreCase));
+	}
+
+	[Fact]
 	public async Task Block_VerificationFindsNoRule_ReturnsUnavailable()
 	{
 		FakeNetshRunner runner = new();
@@ -293,6 +362,29 @@ public class WindowsFirewallProviderTests
 		{
 			Assert.Equal(FirewallActionStatus.Unavailable, result.Status);
 		}
+	}
+}
+
+internal sealed class CapturingCommandRunner : IExternalCommandRunner
+{
+	public string LastScript { get; private set; } = string.Empty;
+
+	public int ExitCode { get; set; }
+
+	public string StdErr { get; set; } = string.Empty;
+
+	public Task<ExternalCommandResult> RunEnglishConsoleAsync(
+		TrustedEnglishConsoleTool tool, EnglishConsoleArgs? args, TimeSpan timeout, CancellationToken ct) =>
+		Task.FromResult(new ExternalCommandResult(tool.ToString(), "cmd.exe", 0, string.Empty, string.Empty, false, TimeSpan.Zero, true));
+
+	public Task<ExternalCommandResult> RunDirectAsync(
+		string commandLabel, string executable, IReadOnlyList<string> arguments, TimeSpan timeout, CancellationToken ct)
+	{
+		// Capture the -Command script (the last argument the provider passes to powershell.exe).
+		LastScript = arguments.Count > 0 ? arguments[^1] : string.Empty;
+		string stdOut = ExitCode == 0 ? "RdpAudit-Block-203.0.113.10" : string.Empty;
+		return Task.FromResult(new ExternalCommandResult(
+			commandLabel, executable, ExitCode, stdOut, StdErr, false, TimeSpan.FromMilliseconds(1), false));
 	}
 }
 
