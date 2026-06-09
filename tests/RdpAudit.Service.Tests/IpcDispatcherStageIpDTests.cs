@@ -448,6 +448,82 @@ public class IpcDispatcherStageIpDTests
 	}
 
 	[Fact]
+	public async Task GetAttackStats_FlagsUnresolvedSentinelRow_AndSeparatesCounters()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			await using (AuditDbContext db = factory.CreateDbContext())
+			{
+				// A genuine public attacker IP.
+				db.AttackStats.Add(new AttackStat
+				{
+					Ip = "77.37.192.246",
+					TotalAttempts = 8,
+					Failed = 8,
+					Successful = 0,
+					FirstSeenUtc = Now.AddHours(-1),
+					LastSeenUtc = Now,
+					ThreatScore = 70,
+					Top10AttemptedLogins = "[]",
+					LastUpdatedUtc = Now,
+				});
+				// The unresolved-IP sentinel aggregate row (0.0.0.0). Must never look like a real attacker.
+				db.AttackStats.Add(new AttackStat
+				{
+					Ip = AttackStatsAggregator.SentinelUnresolvedIp,
+					TotalAttempts = 4,
+					Failed = 4,
+					Successful = 0,
+					FirstSeenUtc = Now.AddHours(-2),
+					LastSeenUtc = Now.AddMinutes(-1),
+					ThreatScore = 30,
+					Top10AttemptedLogins = "[]",
+					LastUpdatedUtc = Now,
+				});
+
+				// Window summary derives from AuthAttemptFacts: 3 failures with a real IP, 2 with none.
+				for (int i = 0; i < 3; i++)
+				{
+					db.AuthAttemptFacts.Add(MakeFailureFact("77.37.192.246", "admin", Now.AddMinutes(-i)));
+				}
+				for (int i = 0; i < 2; i++)
+				{
+					AuthAttemptFact f = MakeFailureFact("", "admin", Now.AddMinutes(-10 - i));
+					f.SourceIp = string.Empty;
+					db.AuthAttemptFacts.Add(f);
+				}
+				await db.SaveChangesAsync();
+			}
+
+			IpcDispatcher dispatcher = CreateDispatcher(factory);
+			AttackStatsDto dto = await CallAsync<AttackStatsDto>(dispatcher,
+				IpcCommand.GetAttackStats,
+				new AttackStatsRequest { SinceUtc = Now.AddDays(-1), UntilUtc = Now.AddMinutes(1) });
+
+			AttackStatEntryDto real = dto.Entries.Single(e => e.Ip == "77.37.192.246");
+			Assert.False(real.IsUnresolved);
+			Assert.Equal("Public", real.Classification);
+			Assert.Equal("77.37.192.246", real.DisplayIp);
+
+			AttackStatEntryDto sentinel = dto.Entries.Single(e => e.Ip == AttackStatsAggregator.SentinelUnresolvedIp);
+			Assert.True(sentinel.IsUnresolved);
+			Assert.Equal("Unresolved", sentinel.Classification);
+			Assert.Equal(AttackStatsAggregator.SentinelDisplayLabel, sentinel.DisplayIp);
+
+			// Debug counters: 2 unresolved failures, and the resolved-IP population excludes the sentinel.
+			Assert.Equal(2, dto.UnresolvedFailedLogons);
+			Assert.Equal(5, dto.FailedLogons);
+			Assert.Equal(1, dto.DistinctResolvedSourceIps);
+			Assert.Equal(2, dto.DistinctSourceIps);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
 	public async Task EnrichSessionsHistoricalContext_FillsCountersAndAttemptedNames()
 	{
 		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();

@@ -54,4 +54,18 @@ public sealed class AttackStatsDto
 	/// <summary>Limit the server clamped the response to (number of rows in <see cref="Entries"/>).</summary>
 	[Key(11)]
 	public int AppliedLimit { get; set; }
+
+	// --- Req 12 additions (append-only). Surface the unresolved-IP slice as its own debug counter so
+	// operators can see brute-force pressure that arrived without a usable source address, separate
+	// from the real-attacker IP population in DistinctSourceIps. ---
+
+	/// <summary>Count of failed / denied attempts in the window whose source IP could not be resolved
+	/// (NLA stripped the address). These are aggregated under the sentinel row, never as a real IP.</summary>
+	[Key(12)]
+	public long UnresolvedFailedLogons { get; set; }
+
+	/// <summary>Distinct count of genuinely resolved source IPs in the window — i.e.
+	/// <see cref="DistinctSourceIps"/> minus the unresolved sentinel, when present.</summary>
+	[Key(13)]
+	public long DistinctResolvedSourceIps { get; set; }
 }

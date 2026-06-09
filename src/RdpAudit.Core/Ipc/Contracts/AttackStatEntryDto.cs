@@ -78,4 +78,22 @@ public sealed class AttackStatEntryDto
 	/// <summary>Earliest <c>FirstSeenUtc</c> across all <c>RdpConnectionFacts</c> for this IP; null when none exist.</summary>
 	[Key(17)]
 	public DateTime? FactFirstSeenUtc { get; set; }
+
+	// --- Req 12 additions (append-only keys). Separate the unresolved-IP sentinel aggregate row from
+	// real attacker IPs so the UI never presents "0.0.0.0 (unresolved)" as a genuine remote attacker.
+
+	/// <summary>True when this row is the unresolved-IP sentinel aggregate (no real source address),
+	/// not a genuine attacker. The UI must render it as a separate / excluded category.</summary>
+	[Key(18)]
+	public bool IsUnresolved { get; set; }
+
+	/// <summary>Operator-facing reportability classification of the source IP
+	/// (Public / Private / Loopback / Unresolved / …). Empty string when unknown.</summary>
+	[Key(19)]
+	public string Classification { get; set; } = string.Empty;
+
+	/// <summary>Operator-facing display label for the source IP — the sentinel row shows
+	/// <c>(unresolved)</c> instead of the raw <c>0.0.0.0</c> address.</summary>
+	[Key(20)]
+	public string DisplayIp { get; set; } = string.Empty;
 }
