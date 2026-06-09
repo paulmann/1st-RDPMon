@@ -2955,6 +2955,8 @@ public sealed class IpcDispatcher
 			.ToListAsync(ct)
 			.ConfigureAwait(false);
 
+		HashSet<string> whitelist = await LoadWhitelistSetAsync(db, ct).ConfigureAwait(false);
+
 		ConnectionFactsDto dto = new()
 		{
 			Status = IpcResultStatus.Success,
@@ -2968,10 +2970,19 @@ public sealed class IpcDispatcher
 
 		foreach (RdpConnectionFact row in rows)
 		{
-			dto.Facts.Add(ProjectFact(row));
+			dto.Facts.Add(ProjectFact(row, whitelist));
 		}
 
 		return dto;
+	}
+
+	private static async Task<HashSet<string>> LoadWhitelistSetAsync(AuditDbContext db, CancellationToken ct)
+	{
+		List<string> ips = await db.WhitelistEntries.AsNoTracking()
+			.Select(w => w.Ip)
+			.ToListAsync(ct)
+			.ConfigureAwait(false);
+		return new HashSet<string>(ips, StringComparer.OrdinalIgnoreCase);
 	}
 
 	private async Task<object?> GetConnectionFactsForIpAsync(string? payload, CancellationToken ct)
@@ -3038,9 +3049,11 @@ public sealed class IpcDispatcher
 			dto.HasActiveFact = aggregate.AnyActive;
 		}
 
+		HashSet<string> whitelist = await LoadWhitelistSetAsync(db, ct).ConfigureAwait(false);
+
 		foreach (RdpConnectionFact row in rows)
 		{
-			dto.Facts.Add(ProjectFact(row));
+			dto.Facts.Add(ProjectFact(row, whitelist));
 		}
 
 		dto.Message = string.Format(CultureInfo.InvariantCulture,
@@ -3049,27 +3062,42 @@ public sealed class IpcDispatcher
 		return dto;
 	}
 
-	private static ConnectionFactDto ProjectFact(RdpConnectionFact row) => new()
+	private static ConnectionFactDto ProjectFact(RdpConnectionFact row, HashSet<string>? whitelist = null)
 	{
-		Id = row.Id,
-		Ip = row.Ip,
-		UserName = row.UserName,
-		Domain = row.Domain,
-		WtsSessionId = row.WtsSessionId,
-		LogonId = row.LogonId,
-		FirstSeenUtc = row.FirstSeenUtc,
-		LastSeenUtc = row.LastSeenUtc,
-		ConnectedUtc = row.ConnectedUtc,
-		AuthenticatedUtc = row.AuthenticatedUtc,
-		DisconnectedUtc = row.DisconnectedUtc,
-		ReconnectedUtc = row.ReconnectedUtc,
-		LoggedOffUtc = row.LoggedOffUtc,
-		FailedLogons = row.FailedLogons,
-		SuccessfulLogons = row.SuccessfulLogons,
-		ObservedEventIds = row.ObservedEventIds,
-		UserNamesAttempted = row.UserNamesAttempted,
-		IsActive = row.IsActive,
-	};
+		Func<string, bool>? isWhitelisted = whitelist is null
+			? null
+			: ip => whitelist.Contains(ip);
+
+		IpReportabilityResult classification = IpReportability.Classify(row.Ip, isWhitelisted);
+
+		return new ConnectionFactDto
+		{
+			Id = row.Id,
+			Ip = row.Ip,
+			UserName = row.UserName,
+			Domain = row.Domain,
+			WtsSessionId = row.WtsSessionId,
+			LogonId = row.LogonId,
+			FirstSeenUtc = row.FirstSeenUtc,
+			LastSeenUtc = row.LastSeenUtc,
+			ConnectedUtc = row.ConnectedUtc,
+			AuthenticatedUtc = row.AuthenticatedUtc,
+			DisconnectedUtc = row.DisconnectedUtc,
+			ReconnectedUtc = row.ReconnectedUtc,
+			LoggedOffUtc = row.LoggedOffUtc,
+			FailedLogons = row.FailedLogons,
+			SuccessfulLogons = row.SuccessfulLogons,
+			ObservedEventIds = row.ObservedEventIds,
+			UserNamesAttempted = row.UserNamesAttempted,
+			IsActive = row.IsActive,
+			Classification = IpReportability.Describe(classification.Classification),
+			IsPublic = classification.IsPublic,
+			IsWhitelisted = classification.Classification == IpReportClassification.Whitelisted,
+			IsReportableToAbuseIPDB = classification.IsReportable,
+			IsEligibleForAutoBlock = classification.IsReportable
+				&& classification.Classification != IpReportClassification.Whitelisted,
+		};
+	}
 
 	private static ConnectionFactsRequest ParseConnectionFactsRequest(string? payload)
 	{
@@ -3146,6 +3174,21 @@ public sealed class IpcDispatcher
 
 	/// <summary>Build the LLM-friendly diagnostics snapshot exposed via IpcCommand.GetDiagnostics.
 	/// All DB lookups go through Microsoft.Data.Sqlite via EF Core — no external sqlite3.exe.</summary>
+	/// <summary>Returns the distinct items of <paramref name="source"/>, preserving first-occurrence order.</summary>
+	internal static List<string> DistinctPreserveOrder(IEnumerable<string> source, IEqualityComparer<string> comparer)
+	{
+		HashSet<string> seen = new(comparer);
+		List<string> result = new();
+		foreach (string item in source)
+		{
+			if (seen.Add(item))
+			{
+				result.Add(item);
+			}
+		}
+		return result;
+	}
+
 	private async Task<DiagnosticsSnapshotDto> GetDiagnosticsAsync(CancellationToken ct)
 	{
 		DiagnosticsSnapshotDto dto = new()
@@ -3175,8 +3218,12 @@ public sealed class IpcDispatcher
 		// Effective channels/event IDs come from the live options snapshot — the post-configure
 		// repair has already run by the time options are materialised here.
 		RdpAuditOptions opts = _options.CurrentValue;
-		dto.EnabledChannels.AddRange(opts.Monitoring.EnabledChannels);
-		dto.EnabledEventIds.AddRange(opts.Monitoring.EnabledEventIds);
+		// Deduplicate channels case-insensitively: repeated post-configure repair passes can append the
+		// same channel name multiple times (e.g. "Security" 8×), which inflated the effective-channel
+		// list (7 unique channels appeared as 56). Event IDs are deduplicated numerically. Order is
+		// preserved (first occurrence wins) so the operator sees a stable, readable list.
+		dto.EnabledChannels.AddRange(DistinctPreserveOrder(opts.Monitoring.EnabledChannels, StringComparer.OrdinalIgnoreCase));
+		dto.EnabledEventIds.AddRange(opts.Monitoring.EnabledEventIds.Distinct());
 		dto.DatabasePath = opts.Storage.ResolveDatabasePath();
 
 		// Service install path — best-effort runtime discovery via AppContext.BaseDirectory
@@ -3194,8 +3241,8 @@ public sealed class IpcDispatcher
 		if (_configRepair?.LastReport is { } report)
 		{
 			dto.MonitoringConfigRepairChanged = report.Changed;
-			dto.MonitoringConfigRepairAddedChannels.AddRange(report.AddedChannels);
-			dto.MonitoringConfigRepairAddedEventIds.AddRange(report.AddedEventIds);
+			dto.MonitoringConfigRepairAddedChannels.AddRange(DistinctPreserveOrder(report.AddedChannels, StringComparer.OrdinalIgnoreCase));
+			dto.MonitoringConfigRepairAddedEventIds.AddRange(report.AddedEventIds.Distinct());
 			dto.MonitoringConfigRepairReason = report.Reason;
 			dto.MonitoringConfigRepairUtc = _configRepair.LastReportUtc;
 			dto.MonitoringConfigRepairChangedRunCount = _configRepair.ChangedRunCount;

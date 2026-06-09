@@ -71,4 +71,26 @@ public sealed class ConnectionFactDto
 
 	[Key(17)]
 	public bool IsActive { get; set; }
+
+	// --- Stage RDP-Diag additions (append-only). Live reportability classification of the remote IP. ---
+
+	/// <summary>Coarse reportability classification of the remote IP (Public / Private / Loopback / …).</summary>
+	[Key(18)]
+	public string Classification { get; set; } = string.Empty;
+
+	/// <summary>True when the remote IP is a globally routable public address.</summary>
+	[Key(19)]
+	public bool IsPublic { get; set; }
+
+	/// <summary>True when the remote IP is on the operator whitelist.</summary>
+	[Key(20)]
+	public bool IsWhitelisted { get; set; }
+
+	/// <summary>True when the remote IP may be reported to AbuseIPDB (public, not whitelisted, not reserved).</summary>
+	[Key(21)]
+	public bool IsReportableToAbuseIPDB { get; set; }
+
+	/// <summary>True when the remote IP is eligible for auto-block (reportable and not whitelisted).</summary>
+	[Key(22)]
+	public bool IsEligibleForAutoBlock { get; set; }
 }

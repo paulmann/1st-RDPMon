@@ -156,6 +156,25 @@ public class ConnectionFactsExportFormatterTests
 	}
 
 	[Fact]
+	public void Csv_HeaderCarriesReportabilityColumns()
+	{
+		ConnectionFactsForIpDto dto = SampleDto();
+		dto.Facts[0].Classification = "Public";
+		dto.Facts[0].IsPublic = true;
+		dto.Facts[0].IsWhitelisted = false;
+		dto.Facts[0].IsReportableToAbuseIPDB = true;
+		dto.Facts[0].IsEligibleForAutoBlock = true;
+
+		string body = ConnectionFactsExportFormatter.Format(dto, ConnectionFactsExportFormat.Csv);
+		string[] lines = body.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+
+		Assert.EndsWith("IsActive,Classification,IsPublic,IsWhitelisted,IsReportableToAbuseIPDB,IsEligibleForAutoBlock",
+			lines[0], StringComparison.Ordinal);
+		// First fact row reflects the reportability cells (…,yes,Public,yes,no,yes,yes).
+		Assert.Contains(",Public,yes,no,yes,yes", body, StringComparison.Ordinal);
+	}
+
+	[Fact]
 	public void Csv_EscapesCommasAndQuotes()
 	{
 		string body = ConnectionFactsExportFormatter.Format(SampleDto(), ConnectionFactsExportFormat.Csv);
