@@ -104,13 +104,6 @@ public sealed class AbuseIpDbPage : TabPage
 			Enabled = false,
 		};
 
-		_dedupeEnabled = new CheckBox
-		{
-			Text = "1 report per 1 IP",
-			AutoSize = true,
-		};
-		_dedupeEnabled.CheckedChanged += (_, _) => _cooldownHours.Enabled = _dedupeEnabled.Checked;
-
 		_cooldownHours = new NumericUpDown
 		{
 			Minimum = 1,
@@ -119,6 +112,13 @@ public sealed class AbuseIpDbPage : TabPage
 			Width = 90,
 			Enabled = false,
 		};
+
+		_dedupeEnabled = new CheckBox
+		{
+			Text = "1 report per 1 IP",
+			AutoSize = true,
+		};
+		_dedupeEnabled.CheckedChanged += (_, _) => _cooldownHours.Enabled = _dedupeEnabled.Checked;
 
 		_saveButton = new Button { Text = "Save settings", Width = 140 };
 		_saveButton.Click += async (_, _) => await OnSaveAsync().ConfigureAwait(true);
