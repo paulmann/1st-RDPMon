@@ -151,8 +151,26 @@ namespace RdpAudit.Core.Data.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("BackendCommand")
+                        .HasMaxLength(2048)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("BackendStderrPreview")
+                        .HasMaxLength(1024)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("BackendStdoutPreview")
+                        .HasMaxLength(1024)
+                        .HasColumnType("TEXT");
+
                     b.Property<DateTime>("CreatedUtc")
                         .HasColumnType("TEXT");
+
+                    b.Property<long?>("DurationMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("ExitCode")
+                        .HasColumnType("INTEGER");
 
                     b.Property<DateTime?>("ExpiresUtc")
                         .HasColumnType("TEXT");
@@ -160,6 +178,9 @@ namespace RdpAudit.Core.Data.Migrations
                     b.Property<string>("Ip")
                         .IsRequired()
                         .HasMaxLength(45)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("LastAttemptUtc")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("LastError")
@@ -178,8 +199,19 @@ namespace RdpAudit.Core.Data.Migrations
                         .HasMaxLength(256)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("ScannerBackend")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
                     b.Property<int>("Status")
                         .HasColumnType("INTEGER");
+
+                    b.Property<bool?>("TimedOut")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("VerifierReason")
+                        .HasMaxLength(512)
+                        .HasColumnType("TEXT");
 
                     b.HasKey("Id");
 

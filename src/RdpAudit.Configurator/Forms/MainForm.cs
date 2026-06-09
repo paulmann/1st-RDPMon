@@ -44,6 +44,7 @@ public sealed class MainForm : Form
 		_tabs.TabPages.Add(new AbuseIpDbPage(_ipc) { Text = "AbuseIPDB" });
 		_tabs.TabPages.Add(new MikroTikPage(_ipc) { Text = "MikroTik" });
 		_tabs.TabPages.Add(new DiagnosticsPage(_ipc) { Text = "Diagnostic" });
+		_tabs.TabPages.Add(new ToolsDiagPage(_ipc) { Text = "Tools Diag" });
 
 		Controls.Add(_tabs);
 

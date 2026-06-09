@@ -48,6 +48,55 @@ public sealed class ReconciledBlockDto
 
 	[Key(9)]
 	public string RecommendedAction { get; set; } = string.Empty;
+
+	/// <summary>Per-IP last provider error, surfaced so the Repair grid never shows a bare
+	/// "Failed / Failed". Null when the last attempt succeeded or no attempt was recorded.</summary>
+	[Key(10)]
+	public string? LastError { get; set; }
+
+	/// <summary>UTC timestamp of the most recent block / repair attempt for this IP.</summary>
+	[Key(11)]
+	public DateTime? LastAttemptUtc { get; set; }
+
+	/// <summary>Backend command line of the most recent attempt (e.g. the netsh argument vector).</summary>
+	[Key(12)]
+	public string? BackendCommand { get; set; }
+
+	/// <summary>Bounded stdout preview of the most recent backend attempt.</summary>
+	[Key(13)]
+	public string? BackendStdoutPreview { get; set; }
+
+	/// <summary>Bounded stderr preview of the most recent backend attempt.</summary>
+	[Key(14)]
+	public string? BackendStderrPreview { get; set; }
+
+	/// <summary>Process exit code of the most recent backend attempt; null when none captured.</summary>
+	[Key(15)]
+	public int? ExitCode { get; set; }
+
+	/// <summary>True when the most recent backend attempt hit its hard timeout.</summary>
+	[Key(16)]
+	public bool? TimedOut { get; set; }
+
+	/// <summary>Wall-clock duration in milliseconds of the most recent backend attempt.</summary>
+	[Key(17)]
+	public long? DurationMs { get; set; }
+
+	/// <summary>Rule name created / verified by the most recent attempt.</summary>
+	[Key(18)]
+	public string? RuleName { get; set; }
+
+	/// <summary>Backend rule handle of the most recent attempt.</summary>
+	[Key(19)]
+	public string? RuleHandle { get; set; }
+
+	/// <summary>Scanner / runner backend used for the most recent attempt (e.g. NetshText).</summary>
+	[Key(20)]
+	public string? ScannerBackend { get; set; }
+
+	/// <summary>Human-readable reason the post-block verifier reached its verdict on the most recent attempt.</summary>
+	[Key(21)]
+	public string? VerifierReason { get; set; }
 }
 
 /// <summary>Aggregate reconciliation report: reconciled desired blocks plus orphaned RdpAudit rules

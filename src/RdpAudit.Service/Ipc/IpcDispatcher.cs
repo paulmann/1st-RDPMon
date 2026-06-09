@@ -50,6 +50,7 @@ public sealed class IpcDispatcher
 	private readonly SecurityAuthProbeService? _securityAuthProbe;
 	private readonly Firewall.IRdpPortProvider? _rdpPortProvider;
 	private readonly EnforcementReconciliationService? _reconciliation;
+	private readonly ToolsDiagnosticsService? _toolsDiagnostics;
 
 	public IpcDispatcher(
 		IDbContextFactory<AuditDbContext> factory,
@@ -68,7 +69,8 @@ public sealed class IpcDispatcher
 		ConfigRepairReporter? configRepair = null,
 		SecurityAuthProbeService? securityAuthProbe = null,
 		Firewall.IRdpPortProvider? rdpPortProvider = null,
-		EnforcementReconciliationService? reconciliation = null)
+		EnforcementReconciliationService? reconciliation = null,
+		ToolsDiagnosticsService? toolsDiagnostics = null)
 	{
 		_factory = factory;
 		_metrics = metrics;
@@ -87,6 +89,7 @@ public sealed class IpcDispatcher
 		_securityAuthProbe = securityAuthProbe;
 		_rdpPortProvider = rdpPortProvider;
 		_reconciliation = reconciliation;
+		_toolsDiagnostics = toolsDiagnostics;
 	}
 
 	public async Task<IpcResponse> DispatchAsync(IpcRequest request, CancellationToken ct)
@@ -173,6 +176,10 @@ public sealed class IpcDispatcher
 				IpcCommand.RemoveAllEnforcement => await RemoveAllEnforcementAsync(ct).ConfigureAwait(false),
 				IpcCommand.RepairBlocklistEnforcement => await RepairBlocklistEnforcementAsync(request.Payload, ct).ConfigureAwait(false),
 				IpcCommand.RepairAllEnabledBlocklistEnforcement => await RepairAllEnabledBlocklistEnforcementAsync(ct).ConfigureAwait(false),
+
+				// --- v1.2.9: Tools Diag tab ---
+				IpcCommand.RunToolsDiagnostics => await RunToolsDiagnosticsAsync(ct).ConfigureAwait(false),
+				IpcCommand.RunTemporaryFirewallRuleProbe => await RunTemporaryFirewallRuleProbeAsync(request.Payload, ct).ConfigureAwait(false),
 
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
@@ -594,7 +601,21 @@ public sealed class IpcDispatcher
 					Status: EnforcementReconciler.DescribeStatus(b.Status),
 					Confidence: EnforcementReconciler.DescribeConfidence(b.Confidence),
 					EnforcementObjectId: b.EnforcementObjectId,
-					RecommendedAction: b.RecommendedAction));
+					RecommendedAction: b.RecommendedAction)
+				{
+					LastError = b.LastError,
+					LastAttemptUtc = b.LastAttemptUtc,
+					BackendCommand = b.BackendCommand,
+					BackendStdoutPreview = b.BackendStdoutPreview,
+					BackendStderrPreview = b.BackendStderrPreview,
+					ExitCode = b.ExitCode,
+					TimedOut = b.TimedOut,
+					DurationMs = b.DurationMs,
+					RuleName = b.RuleName,
+					RuleHandle = b.RuleHandle,
+					ScannerBackend = b.ScannerBackend,
+					VerifierReason = b.VerifierReason,
+				});
 
 				if (b.Confidence == EnforcementConfidence.ExistsButProviderMayBypass)
 				{
@@ -652,6 +673,68 @@ public sealed class IpcDispatcher
 			Message = "Firewall enforcement diagnostics snapshot with live reconciliation. Combine with the "
 				+ "client-side netsh / provider probe shown above for the full picture.",
 		};
+	}
+
+	private async Task<object?> RunToolsDiagnosticsAsync(CancellationToken ct)
+	{
+		if (_toolsDiagnostics is null)
+		{
+			return new ToolsDiagnosticsDto
+			{
+				Status = IpcResultStatus.Unavailable,
+				GeneratedUtc = DateTime.UtcNow,
+				Message = "Tools Diag service is not registered on this host.",
+				ReportText = "Tools Diag service is not registered on this host.",
+			};
+		}
+
+		return await _toolsDiagnostics.RunDiagnosticsAsync(ct).ConfigureAwait(false);
+	}
+
+	private async Task<object?> RunTemporaryFirewallRuleProbeAsync(string? payload, CancellationToken ct)
+	{
+		if (_toolsDiagnostics is null)
+		{
+			return new TemporaryFirewallProbeDto
+			{
+				Status = IpcResultStatus.Unavailable,
+				GeneratedUtc = DateTime.UtcNow,
+				Message = "Tools Diag service is not registered on this host.",
+				ReportText = "Tools Diag service is not registered on this host.",
+			};
+		}
+
+		string testIp = ParseTestIpPayload(payload);
+		return await _toolsDiagnostics.RunTemporaryFirewallRuleProbeAsync(testIp, ct).ConfigureAwait(false);
+	}
+
+	/// <summary>Unwraps the temporary-probe test IP from the IPC payload. The client sends the IP as a
+	/// JSON string; accept either a JSON-encoded string or a raw token.</summary>
+	private static string ParseTestIpPayload(string? payload)
+	{
+		if (string.IsNullOrWhiteSpace(payload))
+		{
+			return string.Empty;
+		}
+
+		string body = payload.Trim();
+		if (body.Length > 0 && body[0] == '"')
+		{
+			try
+			{
+				string? unwrapped = JsonSerializer.Deserialize<string>(body, JsonOptions.Default);
+				if (!string.IsNullOrWhiteSpace(unwrapped))
+				{
+					return unwrapped.Trim();
+				}
+			}
+			catch (JsonException)
+			{
+				// Not a wrapped JSON string — fall through and use the raw token.
+			}
+		}
+
+		return body;
 	}
 
 	private async Task<object?> ListBlocklistAsync(CancellationToken ct)

@@ -76,7 +76,42 @@ public sealed class EnforcementReconciliationService
 			.ToListAsync(ct).ConfigureAwait(false);
 
 		ReconciliationReport report = await BuildReportAsync(rows, cfg, rulePrefix, nowUtc, ct).ConfigureAwait(false);
-		return MapReport(report);
+		ReconciliationReportDto dto = MapReport(report);
+
+		// Join the persisted per-attempt backend detail back onto each reconciled block by id so the
+		// diagnostics report can show exactly what the last block attempt ran (never a bare Failed/Failed).
+		Dictionary<long, ActiveBlock> rowsById = new();
+		foreach (ActiveBlock row in rows)
+		{
+			rowsById[row.Id] = row;
+		}
+
+		foreach (ReconciledBlockDto block in dto.Blocks)
+		{
+			if (rowsById.TryGetValue(block.ActiveBlockId, out ActiveBlock? row))
+			{
+				EnrichWithPersistedDetail(block, row);
+			}
+		}
+
+		return dto;
+	}
+
+	/// <summary>Copies the persisted per-attempt backend diagnostics from an ActiveBlock row onto its
+	/// reconciled DTO so callers (diagnostics report, Repair grid) see the last attempt's detail.</summary>
+	private static void EnrichWithPersistedDetail(ReconciledBlockDto block, ActiveBlock row)
+	{
+		block.LastError ??= row.LastError;
+		block.LastAttemptUtc ??= row.LastAttemptUtc;
+		block.BackendCommand ??= row.BackendCommand;
+		block.BackendStdoutPreview ??= row.BackendStdoutPreview;
+		block.BackendStderrPreview ??= row.BackendStderrPreview;
+		block.ExitCode ??= row.ExitCode;
+		block.TimedOut ??= row.TimedOut;
+		block.DurationMs ??= row.DurationMs;
+		block.RuleHandle ??= row.RuleHandle;
+		block.ScannerBackend ??= row.ScannerBackend;
+		block.VerifierReason ??= row.VerifierReason;
 	}
 
 	/// <summary>Reconciles the supplied rows and returns the full reconciled set as ActiveBlockDto so
@@ -120,6 +155,15 @@ public sealed class EnforcementReconciliationService
 				Reason = row.Reason,
 				Status = row.Status,
 				LastError = row.LastError,
+				LastAttemptUtc = row.LastAttemptUtc,
+				BackendCommand = row.BackendCommand,
+				BackendStdoutPreview = row.BackendStdoutPreview,
+				BackendStderrPreview = row.BackendStderrPreview,
+				ExitCode = row.ExitCode,
+				TimedOut = row.TimedOut,
+				DurationMs = row.DurationMs,
+				ScannerBackend = row.ScannerBackend,
+				VerifierReason = row.VerifierReason,
 			};
 
 			if (byId.TryGetValue(row.Id, out ReconciledBlock? rb))
@@ -175,18 +219,23 @@ public sealed class EnforcementReconciliationService
 
 		IFirewallProvider? provider = ResolveProvider(cfg, row.Provider);
 		string? repairError = null;
+		FirewallActionResult? lastAction = null;
 		if (provider is null)
 		{
 			repairError = "No firewall provider is registered for this block's backend.";
+			row.LastAttemptUtc = _time.GetUtcNow().UtcDateTime;
+			row.LastError = repairError;
+			await db.SaveChangesAsync(ct).ConfigureAwait(false);
 		}
 		else
 		{
 			FirewallBlockRequest request = new(row.Ip, cfg.BlockRuleName) { Reason = row.Reason };
 			FirewallActionResult action = await provider.BlockAsync(request, ct).ConfigureAwait(false);
+			lastAction = action;
 			if (action.Status == FirewallActionStatus.Success)
 			{
 				row.Status = ActiveBlockStatus.Active;
-				row.RuleHandle = action.RuleId ?? row.RuleHandle;
+				row.RuleHandle = action.RuleHandle ?? action.RuleId ?? row.RuleHandle;
 				row.LastError = null;
 			}
 			else
@@ -196,6 +245,7 @@ public sealed class EnforcementReconciliationService
 				repairError = action.Message ?? ("Provider returned " + action.Status + ".");
 			}
 
+			PersistBackendAttempt(row, action);
 			await db.SaveChangesAsync(ct).ConfigureAwait(false);
 		}
 
@@ -215,7 +265,77 @@ public sealed class EnforcementReconciliationService
 		{
 			dto.Detail = repairError;
 		}
+
+		// Carry the persisted per-IP backend detail so the Repair grid never shows a bare Failed/Failed.
+		dto.LastError = row.LastError;
+		dto.LastAttemptUtc = row.LastAttemptUtc;
+		dto.BackendCommand = row.BackendCommand;
+		dto.BackendStdoutPreview = row.BackendStdoutPreview;
+		dto.BackendStderrPreview = row.BackendStderrPreview;
+		dto.ExitCode = row.ExitCode;
+		dto.TimedOut = row.TimedOut;
+		dto.DurationMs = row.DurationMs;
+		dto.RuleHandle = row.RuleHandle;
+		dto.ScannerBackend = row.ScannerBackend;
+		dto.VerifierReason = row.VerifierReason;
+		if (lastAction is not null)
+		{
+			dto.RuleName = lastAction.RuleId;
+			dto.RuleHandle ??= lastAction.RuleHandle;
+			dto.VerifierReason ??= lastAction.VerifierReason;
+		}
+
 		return dto;
+	}
+
+	/// <summary>Persists the backend-command detail of one block attempt onto the ActiveBlock row so
+	/// per-IP diagnostics survive across reconciliation passes. When the backend exited non-zero with an
+	/// empty stderr the stdout preview is folded into LastError so a silent exit=1 still carries detail.</summary>
+	private void PersistBackendAttempt(ActiveBlock row, FirewallActionResult action)
+	{
+		row.LastAttemptUtc = _time.GetUtcNow().UtcDateTime;
+		row.VerifierReason = action.VerifierReason;
+
+		BackendCommandAttempt? attempt = action.BackendAttempt;
+		if (attempt is null)
+		{
+			row.BackendCommand = null;
+			row.BackendStdoutPreview = null;
+			row.BackendStderrPreview = null;
+			row.ExitCode = null;
+			row.TimedOut = null;
+			row.DurationMs = null;
+			row.ScannerBackend = null;
+			return;
+		}
+
+		row.BackendCommand = Truncate(attempt.CommandLabel + " " + attempt.Arguments, 2048);
+		row.BackendStdoutPreview = Truncate(attempt.StdoutPreview, 1024);
+		row.BackendStderrPreview = Truncate(attempt.StderrPreview, 1024);
+		row.ExitCode = attempt.ExitCode;
+		row.TimedOut = attempt.TimedOut;
+		row.DurationMs = attempt.DurationMs;
+		row.ScannerBackend = attempt.ScannerBackend;
+
+		// exit=1 with empty stderr: the only failure signal is stdout — make sure LastError carries it.
+		if (action.Status != FirewallActionStatus.Success
+			&& attempt.StderrPreview.Length == 0
+			&& attempt.StdoutPreview.Length > 0
+			&& (string.IsNullOrEmpty(row.LastError) || !row.LastError!.Contains(attempt.StdoutPreview, StringComparison.Ordinal)))
+		{
+			string prefix = string.IsNullOrEmpty(row.LastError) ? string.Empty : row.LastError + " ";
+			row.LastError = Truncate(prefix + "stdout: " + attempt.StdoutPreview, 2048);
+		}
+	}
+
+	private static string? Truncate(string? value, int max)
+	{
+		if (string.IsNullOrEmpty(value))
+		{
+			return value;
+		}
+
+		return value!.Length <= max ? value : value[..max];
 	}
 
 	/// <summary>

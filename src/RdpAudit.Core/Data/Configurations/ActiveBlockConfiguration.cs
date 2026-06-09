@@ -25,6 +25,11 @@ public sealed class ActiveBlockConfiguration : IEntityTypeConfiguration<ActiveBl
 		b.Property(x => x.Reason).IsRequired().HasMaxLength(1024);
 		b.Property(x => x.Status).HasConversion<int>();
 		b.Property(x => x.LastError).HasMaxLength(2048);
+		b.Property(x => x.BackendCommand).HasMaxLength(2048);
+		b.Property(x => x.BackendStdoutPreview).HasMaxLength(1024);
+		b.Property(x => x.BackendStderrPreview).HasMaxLength(1024);
+		b.Property(x => x.ScannerBackend).HasMaxLength(64);
+		b.Property(x => x.VerifierReason).HasMaxLength(512);
 		b.HasIndex(x => new { x.Provider, x.Ip }).IsUnique();
 		b.HasIndex(x => x.ExpiresUtc);
 		b.HasIndex(x => x.Status);
