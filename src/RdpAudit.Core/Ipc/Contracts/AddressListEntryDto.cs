@@ -28,4 +28,12 @@ public sealed class AddressListEntryDto
 	/// <summary>Origin of the entry (e.g. "Configurator", "AutoBlock", "Config:Blacklist").</summary>
 	[Key(4)]
 	public string? Source { get; set; }
+
+	/// <summary>
+	/// Stable surrogate row key for the underlying table (BlocklistEntry.Id / WhitelistEntry.Id).
+	/// Zero when the producing list has no surrogate key. Carried so mutation commands can target a
+	/// specific row deterministically instead of matching by address text alone.
+	/// </summary>
+	[Key(5)]
+	public long Id { get; set; }
 }

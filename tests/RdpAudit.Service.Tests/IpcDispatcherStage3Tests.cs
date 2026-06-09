@@ -232,6 +232,130 @@ public class IpcDispatcherStage3Tests
 	}
 
 	[Fact]
+	public async Task RemoveFromBlocklist_ById_DisablesOnlyTheTargetedRow()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			long targetId;
+			await using (AuditDbContext seed = factory.CreateDbContext())
+			{
+				// Two enabled rows share the same address (e.g. Manual + AutoBlock). Removing by Id
+				// must disable exactly one of them, not both.
+				BlocklistEntry manual = new()
+				{
+					Ip = "203.0.113.11",
+					Reason = "manual",
+					AddedUtc = DateTime.UtcNow,
+					Source = BlocklistSource.Manual,
+					IsEnabled = true,
+				};
+				BlocklistEntry auto = new()
+				{
+					Ip = "203.0.113.11",
+					Reason = "auto",
+					AddedUtc = DateTime.UtcNow,
+					Source = BlocklistSource.Auto,
+					IsEnabled = true,
+				};
+				seed.BlocklistEntries.Add(manual);
+				seed.BlocklistEntries.Add(auto);
+				await seed.SaveChangesAsync();
+				targetId = manual.Id;
+			}
+
+			IpcDispatcher dispatcher = CreateDispatcher(factory, new RdpAuditOptions(), Array.Empty<IFirewallProvider>());
+			AddressListMutationRequest req = new() { Id = targetId, Address = "203.0.113.11" };
+			IpcResponse response = await dispatcher.DispatchAsync(new IpcRequest
+			{
+				Command = IpcCommand.RemoveFromBlocklist,
+				Payload = JsonSerializer.Serialize(req, JsonOptions.Default),
+			}, CancellationToken.None);
+
+			Assert.True(response.Success);
+			Assert.NotNull(response.Payload);
+			using JsonDocument doc = JsonDocument.Parse(response.Payload!);
+			Assert.Equal(1, doc.RootElement.GetProperty("removed").GetInt32());
+
+			await using AuditDbContext db = factory.CreateDbContext();
+			BlocklistEntry disabled = await db.BlocklistEntries.SingleAsync(b => b.Id == targetId);
+			Assert.False(disabled.IsEnabled);
+			Assert.Equal(1, await db.BlocklistEntries.CountAsync(b => b.IsEnabled));
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task RemoveFromBlocklist_NoMatchingRow_ReturnsControlledError()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			IpcDispatcher dispatcher = CreateDispatcher(factory, new RdpAuditOptions(), Array.Empty<IFirewallProvider>());
+			AddressListMutationRequest req = new() { Id = 999, Address = "203.0.113.11" };
+			IpcResponse response = await dispatcher.DispatchAsync(new IpcRequest
+			{
+				Command = IpcCommand.RemoveFromBlocklist,
+				Payload = JsonSerializer.Serialize(req, JsonOptions.Default),
+			}, CancellationToken.None);
+
+			Assert.False(response.Success);
+			Assert.NotNull(response.Error);
+			Assert.Contains("nothing was removed", response.Error!, StringComparison.Ordinal);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task ListBlocklist_ProjectsStableRowId()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			long expectedId;
+			await using (AuditDbContext seed = factory.CreateDbContext())
+			{
+				BlocklistEntry row = new()
+				{
+					Ip = "203.0.113.12",
+					Reason = "manual",
+					AddedUtc = DateTime.UtcNow,
+					Source = BlocklistSource.Manual,
+					IsEnabled = true,
+				};
+				seed.BlocklistEntries.Add(row);
+				await seed.SaveChangesAsync();
+				expectedId = row.Id;
+			}
+
+			IpcDispatcher dispatcher = CreateDispatcher(factory, new RdpAuditOptions(), Array.Empty<IFirewallProvider>());
+			IpcResponse response = await dispatcher.DispatchAsync(new IpcRequest
+			{
+				Command = IpcCommand.ListBlocklist,
+			}, CancellationToken.None);
+
+			Assert.True(response.Success);
+			Assert.NotNull(response.Payload);
+			List<AddressListEntryDto>? rows =
+				JsonSerializer.Deserialize<List<AddressListEntryDto>>(response.Payload!, JsonOptions.Default);
+			Assert.NotNull(rows);
+			AddressListEntryDto dto = Assert.Single(rows!);
+			Assert.Equal(expectedId, dto.Id);
+			Assert.Equal("203.0.113.12", dto.Address);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
 	public async Task GetFirewallStatus_ReturnsDtoWithCounters()
 	{
 		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();

@@ -67,6 +67,12 @@ public class IpcCommandStabilityTests
 	[InlineData(IpcCommand.GetRdpConfiguration, 42)]
 	[InlineData(IpcCommand.GetDiagnostics, 43)]
 	[InlineData(IpcCommand.RunSecurityAuthProbe, 44)]
+	[InlineData(IpcCommand.GetFirewallDiagnostics, 45)]
+	[InlineData(IpcCommand.ReconcileEnforcement, 46)]
+	[InlineData(IpcCommand.RepairActiveBlock, 47)]
+	[InlineData(IpcCommand.RemoveAllEnforcement, 48)]
+	[InlineData(IpcCommand.RepairBlocklistEnforcement, 49)]
+	[InlineData(IpcCommand.RepairAllEnabledBlocklistEnforcement, 50)]
 	public void Ordinal_IsStable(IpcCommand command, int expected)
 	{
 		Assert.Equal(expected, (int)command);

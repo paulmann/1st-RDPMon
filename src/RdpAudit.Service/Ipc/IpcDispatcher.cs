@@ -169,6 +169,8 @@ public sealed class IpcDispatcher
 				IpcCommand.ReconcileEnforcement => await ReconcileEnforcementAsync(ct).ConfigureAwait(false),
 				IpcCommand.RepairActiveBlock => await RepairActiveBlockAsync(request.Payload, ct).ConfigureAwait(false),
 				IpcCommand.RemoveAllEnforcement => await RemoveAllEnforcementAsync(ct).ConfigureAwait(false),
+				IpcCommand.RepairBlocklistEnforcement => await RepairBlocklistEnforcementAsync(request.Payload, ct).ConfigureAwait(false),
+				IpcCommand.RepairAllEnabledBlocklistEnforcement => await RepairAllEnabledBlocklistEnforcementAsync(ct).ConfigureAwait(false),
 
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
@@ -654,6 +656,7 @@ public sealed class IpcDispatcher
 
 		return rows.ConvertAll(b => new AddressListEntryDto
 		{
+			Id = b.Id,
 			Address = b.Ip ?? b.Login ?? string.Empty,
 			Note = b.Reason,
 			AddedUtc = b.AddedUtc,
@@ -729,18 +732,50 @@ public sealed class IpcDispatcher
 	private async Task<object?> RemoveFromBlocklistAsync(string? payload, CancellationToken ct)
 	{
 		AddressListMutationRequest req = DeserializeMutation(payload, "RemoveFromBlocklist");
-		string ip = NormalizeAndValidateAddress(req.Address);
 
-		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-		List<BlocklistEntry> rows = await db.BlocklistEntries
-			.Where(b => b.Ip == ip && b.IsEnabled).ToListAsync(ct).ConfigureAwait(false);
-		foreach (BlocklistEntry row in rows)
+		// Prefer the stable surrogate key so we delete exactly the selected row even when several
+		// rows share an address (e.g. one Manual + one AutoBlock). Fall back to address matching for
+		// legacy callers that do not carry an Id.
+		string? ip = null;
+		List<BlocklistEntry> rows;
+		await using (AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false))
 		{
-			row.IsEnabled = false;
+			if (req.Id > 0)
+			{
+				_logger.LogDebug("RemoveFromBlocklist by Id={Id} (address hint '{Address}')", req.Id, req.Address);
+				rows = await db.BlocklistEntries
+					.Where(b => b.Id == req.Id && b.IsEnabled).ToListAsync(ct).ConfigureAwait(false);
+			}
+			else
+			{
+				ip = NormalizeAndValidateAddress(req.Address);
+				_logger.LogDebug("RemoveFromBlocklist by address '{Address}'", ip);
+				rows = await db.BlocklistEntries
+					.Where(b => b.Ip == ip && b.IsEnabled).ToListAsync(ct).ConfigureAwait(false);
+			}
+
+			foreach (BlocklistEntry row in rows)
+			{
+				row.IsEnabled = false;
+			}
+
+			await db.SaveChangesAsync(ct).ConfigureAwait(false);
 		}
 
-		await db.SaveChangesAsync(ct).ConfigureAwait(false);
-		return new { status = IpcResultStatus.Success.ToString(), address = ip, removed = rows.Count };
+		int removed = rows.Count;
+		string targetIp = ip ?? rows.Select(r => r.Ip).FirstOrDefault(x => x is not null) ?? req.Address;
+		_logger.LogInformation(
+			"RemoveFromBlocklist soft-disabled {Removed} row(s) for Id={Id} address='{Address}'",
+			removed, req.Id, targetIp);
+
+		if (removed == 0)
+		{
+			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
+				"No enabled blocklist row matched {0} (Id={1}); nothing was removed.",
+				targetIp, req.Id));
+		}
+
+		return new { status = IpcResultStatus.Success.ToString(), address = targetIp, removed };
 	}
 
 	private async Task<object?> AddToWhitelistAsync(string? payload, CancellationToken ct)
@@ -1043,6 +1078,46 @@ public sealed class IpcDispatcher
 		}
 
 		return await _reconciliation.RepairAsync(id, ct).ConfigureAwait(false);
+	}
+
+	private async Task<object?> RepairBlocklistEnforcementAsync(string? payload, CancellationToken ct)
+	{
+		if (_reconciliation is null)
+		{
+			throw new IpcException("Enforcement reconciliation service is not available in this build.");
+		}
+
+		if (string.IsNullOrWhiteSpace(payload))
+		{
+			throw new IpcException("RepairBlocklistEnforcement requires a JSON payload with the BlockList row Id.");
+		}
+
+		long id;
+		try
+		{
+			id = JsonSerializer.Deserialize<long>(payload, JsonOptions.Default);
+		}
+		catch (JsonException ex)
+		{
+			throw new IpcException("RepairBlocklistEnforcement payload is not a valid Id: " + ex.Message);
+		}
+
+		if (id <= 0)
+		{
+			throw new IpcException("RepairBlocklistEnforcement requires a positive Id.");
+		}
+
+		return await _reconciliation.RepairBlocklistAsync(id, ct).ConfigureAwait(false);
+	}
+
+	private async Task<object?> RepairAllEnabledBlocklistEnforcementAsync(CancellationToken ct)
+	{
+		if (_reconciliation is null)
+		{
+			throw new IpcException("Enforcement reconciliation service is not available in this build.");
+		}
+
+		return await _reconciliation.RepairAllEnabledBlocklistAsync(ct).ConfigureAwait(false);
 	}
 
 	private async Task<object?> RemoveAllEnforcementAsync(CancellationToken ct)

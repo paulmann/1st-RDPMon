@@ -126,4 +126,13 @@ public enum IpcCommand
 	/// blackhole routes, IPsec objects if any) and marks the corresponding ActiveBlock rows Removed.
 	/// Never deletes unrelated admin-created rules. Returns a per-category removal summary.</summary>
 	RemoveAllEnforcement = 48,
+
+	/// <summary>Repairs enforcement for one enabled BlockList row by id: ensures a matching ActiveBlock
+	/// exists, (re-)installs the backend firewall rule, then re-reconciles to prove enforcement.
+	/// Returns the post-repair reconciled row so the caller sees verified vs still-missing.</summary>
+	RepairBlocklistEnforcement = 49,
+
+	/// <summary>Repairs enforcement for every enabled BlockList row in one pass. Returns a summary
+	/// with attempted / verified / failed counts plus per-row reconciled results.</summary>
+	RepairAllEnabledBlocklistEnforcement = 50,
 }
