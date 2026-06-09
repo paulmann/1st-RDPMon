@@ -77,4 +77,12 @@ public sealed class AbuseIpDbStatusDto
 	/// <summary>Configured max reports per day (informational).</summary>
 	[Key(15)]
 	public int MaxReportsPerDay { get; set; }
+
+	/// <summary>True when the success-filtered report cooldown ("1 report per 1 IP") is enabled.</summary>
+	[Key(16)]
+	public bool ReportDedupeEnabled { get; set; }
+
+	/// <summary>Configured cooldown, in hours, before the same IP may be reported again after a success.</summary>
+	[Key(17)]
+	public int ReportCooldownHours { get; set; }
 }

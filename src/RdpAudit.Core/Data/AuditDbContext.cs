@@ -39,6 +39,8 @@ public sealed class AuditDbContext : DbContext
 
 	public DbSet<AbuseReport> AbuseReports => Set<AbuseReport>();
 
+	public DbSet<AbuseIpDbReportHistory> AbuseIpDbReportHistory => Set<AbuseIpDbReportHistory>();
+
 	public DbSet<AttackStat> AttackStats => Set<AttackStat>();
 
 	public DbSet<SessionIpCorrelation> SessionIpCorrelations => Set<SessionIpCorrelation>();

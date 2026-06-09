@@ -308,4 +308,157 @@ public class AbuseIpDbReportWorkerTests
 			await conn.DisposeAsync();
 		}
 	}
+
+	private static AttackStat HostileStat(string ip, DateTime now) => new()
+	{
+		Ip = ip,
+		TotalAttempts = 100,
+		Failed = 100,
+		Successful = 0,
+		FirstSeenUtc = now.AddHours(-1),
+		LastSeenUtc = now,
+		DurationSeconds = 3600,
+		ThreatScore = 90.0,
+		Top10AttemptedLogins = "[]",
+		IsBlocked = false,
+		LastUpdatedUtc = now,
+	};
+
+	private static void EnableDedupe(RdpAuditOptions opts, int cooldownHours)
+	{
+		opts.AbuseIpDb.Enabled = true;
+		opts.AbuseIpDb.ReportAttacks = true;
+		opts.AbuseIpDb.ApiKey = "envelope";
+		opts.AbuseIpDb.MinThreatScore = 50;
+		opts.AbuseIpDb.MinFailedAttempts = 5;
+		opts.AbuseIpDb.ReportDedupeEnabled = true;
+		opts.AbuseIpDb.ReportCooldownHours = cooldownHours;
+	}
+
+	[Fact]
+	public async Task RunOnceAsync_RecordsHistoryRow_OnEveryAttempt()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			DateTime now = DateTime.UtcNow;
+			await using (AuditDbContext seed = factory.CreateDbContext())
+			{
+				seed.AttackStats.Add(HostileStat("203.0.113.66", now));
+				await seed.SaveChangesAsync();
+			}
+
+			RdpAuditOptions opts = new();
+			opts.AbuseIpDb.Enabled = true;
+			opts.AbuseIpDb.ReportAttacks = true;
+			opts.AbuseIpDb.ApiKey = "envelope";
+			opts.AbuseIpDb.MinThreatScore = 50;
+			opts.AbuseIpDb.MinFailedAttempts = 5;
+
+			FakeAbuseClient fake = new();
+			AbuseIpDbReportWorker worker = new(factory, new StaticOptionsMonitorLocal<RdpAuditOptions>(opts),
+				fake, NullLogger<AbuseIpDbReportWorker>.Instance);
+
+			int submitted = await worker.RunOnceAsync(CancellationToken.None);
+
+			Assert.Equal(1, submitted);
+
+			await using AuditDbContext db = factory.CreateDbContext();
+			AbuseIpDbReportHistory[] history = await db.AbuseIpDbReportHistory.ToArrayAsync();
+			AbuseIpDbReportHistory row = Assert.Single(history);
+			Assert.Equal("203.0.113.66", row.IpAddress);
+			Assert.True(row.Succeeded);
+			Assert.Equal(200, row.HttpStatusCode);
+			Assert.Equal("worker", row.Source);
+			Assert.False(string.IsNullOrEmpty(row.CommentHash));
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task RunOnceAsync_DedupeEnabled_SkipsIp_WithRecentSuccessfulHistory()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			DateTime now = DateTime.UtcNow;
+			await using (AuditDbContext seed = factory.CreateDbContext())
+			{
+				seed.AttackStats.Add(HostileStat("203.0.113.66", now));
+				seed.AbuseIpDbReportHistory.Add(new AbuseIpDbReportHistory
+				{
+					IpAddress = "203.0.113.66",
+					ReportedAtUtc = now.AddHours(-2),
+					Succeeded = true,
+					HttpStatusCode = 200,
+					ResultCode = "Accepted",
+					AbuseCategories = "18,22",
+					Source = "worker",
+				});
+				await seed.SaveChangesAsync();
+			}
+
+			RdpAuditOptions opts = new();
+			EnableDedupe(opts, cooldownHours: 24);
+
+			FakeAbuseClient fake = new();
+			AbuseIpDbReportWorker worker = new(factory, new StaticOptionsMonitorLocal<RdpAuditOptions>(opts),
+				fake, NullLogger<AbuseIpDbReportWorker>.Instance);
+
+			int submitted = await worker.RunOnceAsync(CancellationToken.None);
+
+			Assert.Equal(0, submitted);
+			Assert.Empty(fake.Submitted);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task RunOnceAsync_DedupeEnabled_FailedHistory_DoesNotSuppress()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			DateTime now = DateTime.UtcNow;
+			await using (AuditDbContext seed = factory.CreateDbContext())
+			{
+				seed.AttackStats.Add(HostileStat("203.0.113.66", now));
+				// A recent FAILED attempt must never gate a future report.
+				seed.AbuseIpDbReportHistory.Add(new AbuseIpDbReportHistory
+				{
+					IpAddress = "203.0.113.66",
+					ReportedAtUtc = now.AddHours(-2),
+					Succeeded = false,
+					HttpStatusCode = 0,
+					ResultCode = "TransportError",
+					AbuseCategories = "18,22",
+					Source = "worker",
+				});
+				await seed.SaveChangesAsync();
+			}
+
+			RdpAuditOptions opts = new();
+			EnableDedupe(opts, cooldownHours: 24);
+
+			FakeAbuseClient fake = new();
+			AbuseIpDbReportWorker worker = new(factory, new StaticOptionsMonitorLocal<RdpAuditOptions>(opts),
+				fake, NullLogger<AbuseIpDbReportWorker>.Instance);
+
+			int submitted = await worker.RunOnceAsync(CancellationToken.None);
+
+			Assert.Equal(1, submitted);
+			Assert.Single(fake.Submitted);
+			Assert.Equal("203.0.113.66", fake.Submitted[0].Ip);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
 }

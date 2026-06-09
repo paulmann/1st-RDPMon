@@ -118,6 +118,29 @@ Storm protection:
 `AuditOnly` rows skip the provider call but still flip to `Removed` so the operator-visible
 status reflects the contract.
 
+## Enforcement health (live reconciliation)
+
+`GetFirewallStatus` never claims enforcement from database rows alone. The status header on the
+Firewall tab is derived from a **live reconciliation** pass (`EnforcementReconciler`) that scans
+the real backend (Windows Firewall rules, route table, IPsec) and matches each desired block to a
+discovered object. `FirewallStatusDto` carries the summary:
+
+* `EnabledBlocklistRows` — enforcement that *should* exist (enabled `BlocklistEntries`).
+* `RdpAuditFirewallRuleCount` — RdpAudit-owned objects discovered live (verified + orphans).
+* `VerifiedEnforcedCount` — blocks whose enforcement was confirmed by a matching backend object.
+* `EnforcementHealth` — derived by `EnforcementReconciler.DeriveHealth`:
+  * `Idle` — no enabled blocklist rows; nothing to enforce.
+  * `Healthy` — enabled rows exist and every one is verified. Rendered green.
+  * `MissingRule` — enabled rows exist but **zero** verified enforcement. Rendered red with a
+    call to action: open the **Active blocks** tab, use **Repair selected**, then **Verify all**.
+  * `Failed` — some verified, some intended blocks still unenforced. Rendered red with the same
+    repair/verify call to action.
+  * `Unknown` — reconciliation unavailable; state could not be verified.
+
+A "configured but unenforced" deployment can therefore **never** display as green/active: when the
+database intends blocks that no firewall rule backs, the header goes red and points the operator at
+the repair and verify actions instead of silently reporting success.
+
 ## Windows smoke commands
 
 After deploying the service on a Windows host, validate the netsh pipeline by hand:

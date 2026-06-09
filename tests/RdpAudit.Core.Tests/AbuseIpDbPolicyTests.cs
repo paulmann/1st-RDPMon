@@ -188,4 +188,99 @@ public class AbuseIpDbPolicyTests
 		Assert.False(d.ShouldReport);
 		Assert.Equal(AbuseIpDbSuppressionReason.WithinDedupWindow, d.Reason);
 	}
+
+	[Fact]
+	public void Decide_DedupeEnabled_SuccessWithinCooldown_Suppresses()
+	{
+		AbuseIpDbOptions opts = Opts();
+		opts.ReportDedupeEnabled = true;
+		opts.ReportCooldownHours = 24;
+		DateTime now = DateTime.UtcNow;
+
+		AbuseIpDbReportDecision d = AbuseIpDbPolicy.Decide(
+			opts, hasApiKey: true, ip: "203.0.113.10", threatScore: 99, failedAttempts: 99,
+			isWhitelisted: false, lastReportUtc: now - TimeSpan.FromHours(2),
+			reportsInHour: 0, reportsInDay: 0, nowUtc: now,
+			lastSuccessfulReportUtc: now - TimeSpan.FromHours(2));
+
+		Assert.False(d.ShouldReport);
+		Assert.Equal(AbuseIpDbSuppressionReason.WithinReportCooldown, d.Reason);
+	}
+
+	[Fact]
+	public void Decide_DedupeEnabled_SuccessAfterCooldown_Reports()
+	{
+		AbuseIpDbOptions opts = Opts();
+		opts.ReportDedupeEnabled = true;
+		opts.ReportCooldownHours = 24;
+		DateTime now = DateTime.UtcNow;
+
+		AbuseIpDbReportDecision d = AbuseIpDbPolicy.Decide(
+			opts, hasApiKey: true, ip: "203.0.113.10", threatScore: 99, failedAttempts: 99,
+			isWhitelisted: false, lastReportUtc: now - TimeSpan.FromHours(48),
+			reportsInHour: 0, reportsInDay: 0, nowUtc: now,
+			lastSuccessfulReportUtc: now - TimeSpan.FromHours(48));
+
+		Assert.True(d.ShouldReport);
+		Assert.Equal(AbuseIpDbSuppressionReason.None, d.Reason);
+	}
+
+	[Fact]
+	public void Decide_DedupeEnabled_NoPriorSuccess_Reports()
+	{
+		// A failed-only history (lastSuccessfulReportUtc == null) must never suppress, even when
+		// the dedupe cooldown is enabled. Only successful prior reports gate re-reporting.
+		AbuseIpDbOptions opts = Opts();
+		opts.ReportDedupeEnabled = true;
+		opts.ReportCooldownHours = 24;
+		DateTime now = DateTime.UtcNow;
+
+		AbuseIpDbReportDecision d = AbuseIpDbPolicy.Decide(
+			opts, hasApiKey: true, ip: "203.0.113.10", threatScore: 99, failedAttempts: 99,
+			isWhitelisted: false, lastReportUtc: now - TimeSpan.FromHours(2),
+			reportsInHour: 0, reportsInDay: 0, nowUtc: now,
+			lastSuccessfulReportUtc: null);
+
+		Assert.True(d.ShouldReport);
+		Assert.Equal(AbuseIpDbSuppressionReason.None, d.Reason);
+	}
+
+	[Fact]
+	public void Decide_DedupeDisabled_RecentSuccess_DoesNotApplyCooldown()
+	{
+		// With dedupe off the cooldown is never consulted; only the 15-minute floor applies.
+		AbuseIpDbOptions opts = Opts();
+		opts.ReportDedupeEnabled = false;
+		opts.ReportCooldownHours = 24;
+		DateTime now = DateTime.UtcNow;
+
+		AbuseIpDbReportDecision d = AbuseIpDbPolicy.Decide(
+			opts, hasApiKey: true, ip: "203.0.113.10", threatScore: 99, failedAttempts: 99,
+			isWhitelisted: false, lastReportUtc: now - TimeSpan.FromHours(2),
+			reportsInHour: 0, reportsInDay: 0, nowUtc: now,
+			lastSuccessfulReportUtc: now - TimeSpan.FromHours(2));
+
+		Assert.True(d.ShouldReport);
+		Assert.Equal(AbuseIpDbSuppressionReason.None, d.Reason);
+	}
+
+	[Fact]
+	public void Decide_DedupeEnabled_DedupWindowTakesPrecedence()
+	{
+		// The 15-minute floor is evaluated before the cooldown; a very recent attempt of any kind
+		// surfaces WithinDedupWindow rather than WithinReportCooldown.
+		AbuseIpDbOptions opts = Opts();
+		opts.ReportDedupeEnabled = true;
+		opts.ReportCooldownHours = 24;
+		DateTime now = DateTime.UtcNow;
+
+		AbuseIpDbReportDecision d = AbuseIpDbPolicy.Decide(
+			opts, hasApiKey: true, ip: "203.0.113.10", threatScore: 99, failedAttempts: 99,
+			isWhitelisted: false, lastReportUtc: now - TimeSpan.FromMinutes(5),
+			reportsInHour: 0, reportsInDay: 0, nowUtc: now,
+			lastSuccessfulReportUtc: now - TimeSpan.FromMinutes(5));
+
+		Assert.False(d.ShouldReport);
+		Assert.Equal(AbuseIpDbSuppressionReason.WithinDedupWindow, d.Reason);
+	}
 }

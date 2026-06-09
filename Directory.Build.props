@@ -25,7 +25,7 @@
 		     timestamps with the DB still UTC internally, and non-fatal classification of per-id
 		     Security backfill timeouts so a 1102 timeout no longer paints the whole Security
 		     channel as broken when 4624/4625/4776 are flowing. -->
-		<VersionPrefix Condition="'$(VersionPrefix)' == ''">1.2.4</VersionPrefix>
+		<VersionPrefix Condition="'$(VersionPrefix)' == ''">1.2.5</VersionPrefix>
 		<FileVersion>$(VersionPrefix).0</FileVersion>
 		<AssemblyVersion>$(VersionPrefix).0</AssemblyVersion>
 		<InformationalVersion>$(VersionPrefix)</InformationalVersion>

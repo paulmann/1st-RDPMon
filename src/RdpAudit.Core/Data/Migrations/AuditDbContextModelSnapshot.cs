@@ -55,6 +55,59 @@ namespace RdpAudit.Core.Data.Migrations
                     b.ToTable("AbuseReports", (string)null);
                 });
 
+            modelBuilder.Entity("RdpAudit.Core.Models.AbuseIpDbReportHistory", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("AbuseCategories")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CommentHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ErrorMessage")
+                        .HasMaxLength(2048)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("HttpStatusCode")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("IpAddress")
+                        .IsRequired()
+                        .HasMaxLength(45)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("ReportedAtUtc")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ResultCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("RuleId")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Source")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("Succeeded")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ReportedAtUtc");
+
+                    b.HasIndex("IpAddress", "Succeeded", "ReportedAtUtc");
+
+                    b.ToTable("AbuseIpDbReportHistory", (string)null);
+                });
+
             modelBuilder.Entity("RdpAudit.Core.Models.ActiveBlock", b =>
                 {
                     b.Property<long>("Id")

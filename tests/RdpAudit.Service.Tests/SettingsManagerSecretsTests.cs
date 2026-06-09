@@ -152,6 +152,111 @@ public class SettingsManagerSecretsTests
 	}
 
 	[Fact]
+	public void Save_MaskPlaceholder_PreservesExistingEnvelope()
+	{
+		// First save wraps a real key; second save sends the mask sentinel ("***configured***"),
+		// which must resolve back to the stored envelope rather than wipe or re-wrap it.
+		string targetPath = CreateTempPath();
+		InMemorySecretProtector protector = new();
+		SettingsManager mgr = new(NullLogger<SettingsManager>.Instance, protector, targetPath);
+
+		try
+		{
+			string first = """
+			{
+				"RdpAudit": {
+					"AbuseIpDb": { "Enabled": true, "ApiKey": "REAL_KEY_TO_PRESERVE" }
+				}
+			}
+			""";
+			mgr.Save(first);
+
+			using JsonDocument afterFirst = JsonDocument.Parse(File.ReadAllText(targetPath));
+			string storedEnvelope = afterFirst.RootElement
+				.GetProperty("RdpAudit").GetProperty("AbuseIpDb").GetProperty("ApiKey").GetString()!;
+			Assert.Contains("$protected", storedEnvelope, StringComparison.Ordinal);
+
+			string second = """
+			{
+				"RdpAudit": {
+					"AbuseIpDb": { "Enabled": false, "ApiKey": "***configured***" }
+				}
+			}
+			""";
+			mgr.Save(second);
+
+			string persisted = File.ReadAllText(targetPath);
+			Assert.DoesNotContain("***configured***", persisted, StringComparison.Ordinal);
+			Assert.DoesNotContain("REAL_KEY_TO_PRESERVE", persisted, StringComparison.Ordinal);
+
+			using JsonDocument afterSecond = JsonDocument.Parse(persisted);
+			string preserved = afterSecond.RootElement
+				.GetProperty("RdpAudit").GetProperty("AbuseIpDb").GetProperty("ApiKey").GetString()!;
+			Assert.Equal(storedEnvelope, preserved);
+		}
+		finally
+		{
+			TryCleanup(targetPath);
+		}
+	}
+
+	[Fact]
+	public void Save_EmptyApiKey_ClearsAndDoesNotPreserve()
+	{
+		// An explicit empty value is a deliberate "Clear key" — it must NOT resurrect the stored key.
+		string targetPath = CreateTempPath();
+		InMemorySecretProtector protector = new();
+		SettingsManager mgr = new(NullLogger<SettingsManager>.Instance, protector, targetPath);
+
+		try
+		{
+			mgr.Save("""
+			{
+				"RdpAudit": {
+					"AbuseIpDb": { "Enabled": true, "ApiKey": "KEY_TO_BE_CLEARED" }
+				}
+			}
+			""");
+
+			mgr.Save("""
+			{
+				"RdpAudit": {
+					"AbuseIpDb": { "Enabled": false, "ApiKey": "" }
+				}
+			}
+			""");
+
+			string persisted = File.ReadAllText(targetPath);
+			Assert.DoesNotContain("KEY_TO_BE_CLEARED", persisted, StringComparison.Ordinal);
+
+			using JsonDocument doc = JsonDocument.Parse(persisted);
+			string cleared = doc.RootElement
+				.GetProperty("RdpAudit").GetProperty("AbuseIpDb").GetProperty("ApiKey").GetString()!;
+			Assert.Equal(string.Empty, cleared);
+		}
+		finally
+		{
+			TryCleanup(targetPath);
+		}
+	}
+
+	private static void TryCleanup(string targetPath)
+	{
+		try
+		{
+			string? dir = Path.GetDirectoryName(targetPath);
+			if (dir is not null && Directory.Exists(dir))
+			{
+				Directory.Delete(dir, recursive: true);
+			}
+		}
+		catch
+		{
+			// best effort.
+		}
+	}
+
+	[Fact]
 	public void Save_NoSecretProtector_LeavesPlaintextWithWarning()
 	{
 		// Without an ISecretProtector, the manager should leave the field as-is (the operator was

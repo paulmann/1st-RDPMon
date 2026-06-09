@@ -194,6 +194,18 @@ public sealed class AbuseIpDbReportWorker : BackgroundService
 				.FirstOrDefaultAsync(ct)
 				.ConfigureAwait(false);
 
+			string normalizedIp = IpNormalizer.Normalize(candidate.Ip) ?? candidate.Ip;
+
+			// Success-filtered cooldown lookup: only the most recent SUCCESSFUL report gates re-reporting.
+			DateTime? lastSuccessfulReportUtc = opts.ReportDedupeEnabled
+				? await db.AbuseIpDbReportHistory.AsNoTracking()
+					.Where(h => h.IpAddress == normalizedIp && h.Succeeded)
+					.OrderByDescending(h => h.ReportedAtUtc)
+					.Select(h => (DateTime?)h.ReportedAtUtc)
+					.FirstOrDefaultAsync(ct)
+					.ConfigureAwait(false)
+				: null;
+
 			bool isWhitelisted = whitelistDb.Contains(candidate.Ip);
 
 			AbuseIpDbReportDecision decision = AbuseIpDbPolicy.Decide(
@@ -206,7 +218,8 @@ public sealed class AbuseIpDbReportWorker : BackgroundService
 				lastReportUtc: lastReportUtc,
 				reportsInHour: reportsInHour,
 				reportsInDay: reportsInDay,
-				nowUtc: nowUtc);
+				nowUtc: nowUtc,
+				lastSuccessfulReportUtc: lastSuccessfulReportUtc);
 
 			if (!decision.ShouldReport)
 			{
@@ -249,6 +262,20 @@ public sealed class AbuseIpDbReportWorker : BackgroundService
 				Categories = categories,
 				ResponseCode = result.ResponseCode,
 				Error = string.IsNullOrWhiteSpace(result.Message) ? null : Truncate(result.Message, 2000),
+			});
+
+			bool accepted = result.Outcome == AbuseIpDbReportOutcome.Accepted;
+			db.AbuseIpDbReportHistory.Add(new AbuseIpDbReportHistory
+			{
+				IpAddress = normalizedIp,
+				ReportedAtUtc = nowUtc,
+				Succeeded = accepted,
+				HttpStatusCode = result.ResponseCode,
+				ResultCode = result.Outcome.ToString(),
+				ErrorMessage = string.IsNullOrWhiteSpace(result.Message) ? null : Truncate(result.Message, 2000),
+				AbuseCategories = categories,
+				CommentHash = HashComment(request.Comment),
+				Source = "worker",
 			});
 
 			if (result.Outcome == AbuseIpDbReportOutcome.Accepted)
@@ -359,6 +386,18 @@ public sealed class AbuseIpDbReportWorker : BackgroundService
 			return value;
 		}
 		return value[..(max - 3)] + "...";
+	}
+
+	/// <summary>SHA-256 hex hash of the submitted comment; lets history detect duplicate evidence without storing it.</summary>
+	internal static string? HashComment(string? comment)
+	{
+		if (string.IsNullOrEmpty(comment))
+		{
+			return null;
+		}
+
+		byte[] bytes = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(comment));
+		return Convert.ToHexString(bytes);
 	}
 
 	public override void Dispose()

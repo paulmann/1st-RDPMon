@@ -477,7 +477,36 @@ public sealed class IpcDispatcher
 			.ConfigureAwait(false);
 		dto.WhitelistCount = await db.WhitelistEntries.CountAsync(ct).ConfigureAwait(false);
 		dto.BlacklistCount = await db.BlocklistEntries.CountAsync(b => b.IsEnabled, ct).ConfigureAwait(false);
-		dto.Message = "Stage 3 firewall status snapshot.";
+
+		int enabledBlocklistRows = dto.BlacklistCount;
+		dto.EnabledBlocklistRows = enabledBlocklistRows;
+
+		// Never claim enforcement from DB rows alone — only live reconciliation verifies real firewall rules.
+		if (_reconciliation is not null)
+		{
+			try
+			{
+				ReconciliationReportDto rec = await _reconciliation.ReconcileAsync(ct).ConfigureAwait(false);
+				dto.VerifiedEnforcedCount = rec.VerifiedCount;
+				dto.RdpAuditFirewallRuleCount = rec.VerifiedCount + rec.Orphans.Count;
+				dto.EnforcementHealth = EnforcementReconciler.DeriveHealth(enabledBlocklistRows, rec.VerifiedCount, rec.UnenforcedCount);
+			}
+			catch (OperationCanceledException) when (ct.IsCancellationRequested)
+			{
+				throw;
+			}
+			catch (Exception ex)
+			{
+				_logger.LogWarning(ex, "GetFirewallStatus reconciliation failed");
+				dto.EnforcementHealth = FirewallEnforcementHealth.Unknown;
+			}
+		}
+		else
+		{
+			dto.EnforcementHealth = FirewallEnforcementHealth.Unknown;
+		}
+
+		dto.Message = EnforcementReconciler.DescribeHealth(dto.EnforcementHealth, enabledBlocklistRows, dto.VerifiedEnforcedCount);
 		return dto;
 	}
 
@@ -2199,6 +2228,8 @@ public sealed class IpcDispatcher
 			DeduplicationWindowMinutes = Math.Max(15, opts.DeduplicationWindowMinutes),
 			MaxReportsPerHour = Math.Max(1, opts.MaxReportsPerHour),
 			MaxReportsPerDay = Math.Max(1, opts.MaxReportsPerDay),
+			ReportDedupeEnabled = opts.ReportDedupeEnabled,
+			ReportCooldownHours = Math.Clamp(opts.ReportCooldownHours, 1, 8760),
 		};
 
 		try
