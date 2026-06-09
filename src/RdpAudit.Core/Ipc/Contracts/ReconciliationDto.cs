@@ -75,6 +75,17 @@ public sealed class ReconciliationReportDto
 
 	[Key(6)]
 	public string? Message { get; set; }
+
+	/// <summary>Which enumeration backend produced the Windows firewall scan behind this report:
+	/// "PowerShellJson" (locale-independent, preferred), "NetshText" (locale-fragile fallback), or
+	/// "None" (not scanned). Surfaced in diagnostics so the operator can tell a reliable read from a
+	/// locale-fragile one.</summary>
+	[Key(7)]
+	public string ScannerBackend { get; set; } = "None";
+
+	/// <summary>Human-readable note from the Windows firewall scan (backend detail / failure cause).</summary>
+	[Key(8)]
+	public string? ScannerNote { get; set; }
 }
 
 /// <summary>Result of the emergency "remove all RdpAudit enforcement" cleanup.</summary>

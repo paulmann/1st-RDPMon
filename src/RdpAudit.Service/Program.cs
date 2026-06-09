@@ -117,14 +117,37 @@ public static class Program
 
 		if (OperatingSystem.IsWindows())
 		{
-			logger = logger.WriteTo.EventLog(
-				source: "RdpAuditService",
-				logName: "Application",
-				manageEventSource: false);
+			// Route the EventLog sink through a sub-logger that drops EF Core's per-statement
+			// "Executed DbCommand" entries (logged at Information under the
+			// Microsoft.EntityFrameworkCore.Database.Command source). Those are pure SQL noise in the
+			// Windows Application event log; Warning / Error from that source (real DB problems) still
+			// pass through, and the full-fidelity file sink above keeps everything for debugging.
+			logger = logger.WriteTo.Logger(sub => sub
+				.Filter.ByExcluding(IsEfCommandInformationOrLower)
+				.WriteTo.EventLog(
+					source: "RdpAuditService",
+					logName: "Application",
+					manageEventSource: false));
 		}
 
 		builder.Logging.ClearProviders();
 		builder.Services.AddSerilog(logger.CreateLogger(), dispose: true);
+	}
+
+	/// <summary>True when <paramref name="logEvent"/> is an EF Core database-command log at
+	/// Information level or below — the high-volume "Executed DbCommand" SQL trace. Used to keep that
+	/// noise out of the Windows Application event log while preserving Warning / Error from the same
+	/// source (connection failures, command errors).</summary>
+	private static bool IsEfCommandInformationOrLower(Serilog.Events.LogEvent logEvent)
+	{
+		if (logEvent.Level >= Serilog.Events.LogEventLevel.Warning)
+		{
+			return false;
+		}
+
+		return logEvent.Properties.TryGetValue("SourceContext", out Serilog.Events.LogEventPropertyValue? source)
+			&& source is Serilog.Events.ScalarValue { Value: string ctx }
+			&& ctx.StartsWith("Microsoft.EntityFrameworkCore.Database.Command", StringComparison.Ordinal);
 	}
 
 	private static void RegisterServices(IServiceCollection services)
@@ -175,7 +198,8 @@ public static class Program
 			services.AddSingleton<RouteBlackholeProvider>();
 			services.AddSingleton<IFirewallProvider>(sp => sp.GetRequiredService<RouteBlackholeProvider>());
 			services.AddSingleton<IRdpPortProvider, RegistryRdpPortProvider>();
-			services.AddSingleton<IFirewallRuleScanner>(sp => new NetshFirewallRuleScanner(
+			services.AddSingleton<IFirewallRuleScanner>(sp => new PowerShellFirewallRuleScanner(
+				sp.GetRequiredService<ILogger<PowerShellFirewallRuleScanner>>(),
 				sp.GetRequiredService<ILogger<NetshFirewallRuleScanner>>()));
 		}
 		else

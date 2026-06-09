@@ -91,7 +91,8 @@ public class FirewallDiagnosticsReportBuilderTests
 	public void Report_SurfacesThirdPartyNote()
 	{
 		string text = FirewallDiagnosticsReportBuilder.Build(Sample(thirdParty: true));
-		Assert.Contains("Suspected interference: YES", text, StringComparison.Ordinal);
+		Assert.Contains("Detected: YES", text, StringComparison.Ordinal);
+		Assert.Contains("Interference: UNKNOWN", text, StringComparison.Ordinal);
 		Assert.Contains("Kaspersky detected", text, StringComparison.Ordinal);
 	}
 

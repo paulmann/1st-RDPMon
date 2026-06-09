@@ -53,6 +53,13 @@ public sealed record FirewallDiagnosticsInput(
 
 	/// <summary>Orphaned RdpAudit firewall rule names discovered with no backing database row.</summary>
 	public IReadOnlyList<string> OrphanedRuleNames { get; init; } = Array.Empty<string>();
+
+	/// <summary>Which enumeration backend produced the firewall scan: "PowerShellJson" (locale-
+	/// independent, preferred), "NetshText" (locale-fragile fallback), or "None" (not scanned).</summary>
+	public string ScannerBackend { get; init; } = "None";
+
+	/// <summary>Optional human-readable note from the firewall scan (backend detail / failure cause).</summary>
+	public string? ScannerNote { get; init; }
 }
 
 /// <summary>One per-IP reconciled enforcement line for the diagnostics report.</summary>
@@ -109,6 +116,28 @@ public static class FirewallDiagnosticsReportBuilder
 		}
 
 		sb.AppendLine();
+		sb.AppendLine("[Firewall scanner backend used]");
+		sb.Append("  Backend: ").AppendLine(DescribeScannerBackend(input.ScannerBackend));
+		if (!string.IsNullOrEmpty(input.ScannerNote))
+		{
+			sb.Append("  Note: ").AppendLine(input.ScannerNote);
+		}
+
+		if (string.Equals(input.ScannerBackend, "NetshText", StringComparison.OrdinalIgnoreCase))
+		{
+			sb.AppendLine("  WARNING: rules were enumerated by parsing localized netsh text. On a non-English "
+				+ "Windows host the rule labels are translated, so this path can report zero rules even when "
+				+ "rules exist. The PowerShell JSON backend (Get-NetFirewallRule) is locale-independent and "
+				+ "should be preferred.");
+		}
+
+		sb.AppendLine("  Manual equivalent (run as Administrator):");
+		sb.AppendLine("    Get-NetFirewallRule -Group 'RdpAudit' | "
+			+ "Select-Object Name,DisplayName,Direction,Action,Enabled | Format-Table -AutoSize");
+		sb.AppendLine("    Get-NetFirewallRule -Group 'RdpAudit' | "
+			+ "ForEach-Object { $_ | Get-NetFirewallAddressFilter | Select-Object RemoteAddress }");
+
+		sb.AppendLine();
 		sb.AppendLine("[Windows firewall store]");
 		sb.Append("  RdpAudit-group inbound block rules: ")
 			.AppendLine(input.RdpAuditGroupBlockRuleCount.ToString(CultureInfo.InvariantCulture));
@@ -126,7 +155,26 @@ public static class FirewallDiagnosticsReportBuilder
 		sb.AppendLine();
 
 		sb.AppendLine("[Third-party firewall]");
-		sb.Append("  Suspected interference: ").AppendLine(input.ThirdPartyFirewallSuspected ? "YES" : "no");
+		bool scanFailed = string.Equals(input.ScannerBackend, "NetshText", StringComparison.OrdinalIgnoreCase)
+			|| string.Equals(input.ScannerBackend, "None", StringComparison.OrdinalIgnoreCase);
+		if (input.ThirdPartyFirewallSuspected)
+		{
+			sb.AppendLine("  Detected: YES (a third-party firewall such as Kaspersky is present).");
+			sb.AppendLine("  Interference: UNKNOWN until a live block is tested. Detection alone does not prove "
+				+ "the third-party stack rejected or bypassed an RdpAudit rule — rules may still be created "
+				+ "and enforced normally.");
+			if (scanFailed)
+			{
+				sb.AppendLine("  Caution: the firewall scan did not use the locale-independent PowerShell backend, "
+					+ "so a reported 'zero rules' here may be a scanner limitation rather than third-party "
+					+ "interference. Do not attribute missing rules to the third-party firewall on this basis.");
+			}
+		}
+		else
+		{
+			sb.AppendLine("  Detected: no third-party firewall positively identified.");
+		}
+
 		if (!string.IsNullOrEmpty(input.ThirdPartyFirewallNote))
 		{
 			sb.Append("  Note: ").AppendLine(input.ThirdPartyFirewallNote);
@@ -134,12 +182,18 @@ public static class FirewallDiagnosticsReportBuilder
 
 		sb.AppendLine();
 		sb.AppendLine("[Enforcement reconciliation]");
-		sb.Append("  Blocklist rows (enabled): ")
+		sb.AppendLine("  Counts below come from three distinct sources and are NOT expected to be equal:");
+		sb.Append("  - Blocklist rows (enabled, intent in DB): ")
 			.AppendLine(input.BlocklistRowCount.ToString(CultureInfo.InvariantCulture));
-		sb.Append("  Active-block rows (active/pending): ")
+		sb.Append("  - Active-block rows (active/pending, attempted enforcement): ")
 			.AppendLine(input.ActiveBlockRowCount.ToString(CultureInfo.InvariantCulture));
-		sb.Append("  Verified enforced (rule confirmed present): ")
+		sb.Append("  - Per-IP reconciled lines (one per active-block, see below): ")
+			.AppendLine(input.ReconciledBlocks.Count.ToString(CultureInfo.InvariantCulture));
+		sb.Append("  - Verified enforced (live firewall rule confirmed present): ")
 			.AppendLine(input.VerifiedEnforcedCount.ToString(CultureInfo.InvariantCulture));
+		sb.AppendLine("  An enabled blocklist row only becomes an active-block (and a per-IP line) once "
+			+ "enforcement is attempted; a row can be enabled in the blocklist without yet having an "
+			+ "active-block, which is why these two counts legitimately differ.");
 
 		int unenforced = input.ActiveBlockRowCount - input.VerifiedEnforcedCount;
 		if (unenforced > 0)
@@ -147,7 +201,8 @@ public static class FirewallDiagnosticsReportBuilder
 			sb.Append("  WARNING: ")
 				.Append(unenforced.ToString(CultureInfo.InvariantCulture))
 				.AppendLine(" active-block row(s) have NO confirmed firewall enforcement — "
-					+ "a database row alone does not block traffic.");
+					+ "a database row alone does not block traffic. Use Blocklist → Repair Selected / "
+					+ "Repair All Enabled to (re-)install and verify the firewall rules.");
 		}
 
 		if (input.ReconciledBlocks.Count > 0)
@@ -180,6 +235,14 @@ public static class FirewallDiagnosticsReportBuilder
 
 		return sb.ToString();
 	}
+
+	private static string DescribeScannerBackend(string backend) => backend switch
+	{
+		"PowerShellJson" => "PowerShell Get-NetFirewallRule JSON (locale-independent; preferred)",
+		"NetshText" => "netsh verbose text parse (locale-fragile fallback)",
+		"None" => "none (no live scan was performed)",
+		_ => backend,
+	};
 
 	private static string FormatPorts(IReadOnlyList<int> ports)
 	{
