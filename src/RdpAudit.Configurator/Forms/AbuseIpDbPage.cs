@@ -50,6 +50,8 @@ public sealed class AbuseIpDbPage : TabPage
 	private readonly TextBox _apiKeyInput;
 	private readonly CheckBox _showKey;
 	private readonly CheckBox _reportEnabled;
+	private readonly CheckBox _dedupeEnabled;
+	private readonly NumericUpDown _cooldownHours;
 	private readonly Button _saveButton;
 	private readonly Button _testButton;
 	private readonly Button _refreshButton;
@@ -102,6 +104,22 @@ public sealed class AbuseIpDbPage : TabPage
 			Enabled = false,
 		};
 
+		_dedupeEnabled = new CheckBox
+		{
+			Text = "1 report per 1 IP",
+			AutoSize = true,
+		};
+		_dedupeEnabled.CheckedChanged += (_, _) => _cooldownHours.Enabled = _dedupeEnabled.Checked;
+
+		_cooldownHours = new NumericUpDown
+		{
+			Minimum = 1,
+			Maximum = 8760,
+			Value = 24,
+			Width = 90,
+			Enabled = false,
+		};
+
 		_saveButton = new Button { Text = "Save settings", Width = 140 };
 		_saveButton.Click += async (_, _) => await OnSaveAsync().ConfigureAwait(true);
 
@@ -133,18 +151,18 @@ public sealed class AbuseIpDbPage : TabPage
 
 	private Panel BuildFormPanel()
 	{
-		Panel panel = new() { Dock = DockStyle.Top, Height = 180, Padding = new Padding(8) };
+		Panel panel = new() { Dock = DockStyle.Top, Height = 220, Padding = new Padding(8) };
 
 		TableLayoutPanel layout = new()
 		{
 			Dock = DockStyle.Fill,
 			ColumnCount = 3,
-			RowCount = 5,
+			RowCount = 6,
 		};
 		layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
 		layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 		layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140));
-		for (int i = 0; i < 5; i++)
+		for (int i = 0; i < 6; i++)
 		{
 			layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
 		}
@@ -156,12 +174,26 @@ public sealed class AbuseIpDbPage : TabPage
 		layout.Controls.Add(new Label { Text = string.Empty, Dock = DockStyle.Fill }, 0, 1);
 		layout.Controls.Add(_reportEnabled, 1, 1);
 
+		// Dedupe row: "1 report per 1 IP" + cooldown hours.
+		FlowLayoutPanel dedupeRow = new() { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+		dedupeRow.Controls.Add(_dedupeEnabled);
+		dedupeRow.Controls.Add(new Label
+		{
+			Text = "Cooldown hours before reporting same IP again",
+			AutoSize = true,
+			TextAlign = ContentAlignment.MiddleLeft,
+			Margin = new Padding(12, 6, 4, 0),
+		});
+		dedupeRow.Controls.Add(_cooldownHours);
+		layout.Controls.Add(dedupeRow, 1, 2);
+		layout.SetColumnSpan(dedupeRow, 2);
+
 		FlowLayoutPanel buttons = new() { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight };
 		buttons.Controls.Add(_saveButton);
 		buttons.Controls.Add(_testButton);
 		buttons.Controls.Add(_refreshButton);
 		buttons.Controls.Add(_clearButton);
-		layout.Controls.Add(buttons, 1, 2);
+		layout.Controls.Add(buttons, 1, 3);
 
 		Label warning = new()
 		{
@@ -173,10 +205,10 @@ public sealed class AbuseIpDbPage : TabPage
 			ForeColor = Color.DarkRed,
 			AutoSize = false,
 		};
-		layout.Controls.Add(warning, 0, 3);
+		layout.Controls.Add(warning, 0, 4);
 		layout.SetColumnSpan(warning, 3);
 
-		layout.Controls.Add(_statusLabel, 0, 4);
+		layout.Controls.Add(_statusLabel, 0, 5);
 		layout.SetColumnSpan(_statusLabel, 3);
 
 		panel.Controls.Add(layout);
@@ -265,6 +297,12 @@ public sealed class AbuseIpDbPage : TabPage
 			_reportEnabled.Enabled = status.CredentialPresent;
 			_reportEnabled.Checked = status.ReportingEnabled;
 			_testButton.Enabled = status.CredentialPresent;
+
+			_dedupeEnabled.Checked = status.ReportDedupeEnabled;
+			int cooldown = status.ReportCooldownHours;
+			_cooldownHours.Value = Math.Clamp(cooldown <= 0 ? 24 : cooldown, (int)_cooldownHours.Minimum, (int)_cooldownHours.Maximum);
+			_cooldownHours.Enabled = status.ReportDedupeEnabled;
+
 			_statusLabel.Text = status.Message ?? "Status loaded.";
 		}
 		catch (Exception ex)
@@ -306,6 +344,13 @@ public sealed class AbuseIpDbPage : TabPage
 				section["AbuseIpDb"] = abuse;
 			}
 
+			int cooldownHours = (int)_cooldownHours.Value;
+			if (_dedupeEnabled.Checked && (cooldownHours < 1 || cooldownHours > 8760))
+			{
+				_statusLabel.Text = "Save FAILED: cooldown hours must be between 1 and 8760.";
+				return;
+			}
+
 			string newKey = _apiKeyInput.Text?.Trim() ?? string.Empty;
 			if (newKey.Length > 0 && !IsMaskedPlaceholder(newKey))
 			{
@@ -314,6 +359,8 @@ public sealed class AbuseIpDbPage : TabPage
 
 			abuse["ReportAttacks"] = _reportEnabled.Checked;
 			abuse["Enabled"] = _reportEnabled.Checked || _credentialPresentOnService || newKey.Length > 0;
+			abuse["ReportDedupeEnabled"] = _dedupeEnabled.Checked;
+			abuse["ReportCooldownHours"] = cooldownHours;
 
 			object? response = await _ipc
 				.SendAsync<object>(IpcCommand.SaveSettings, root.ToJsonString(JsonOptions.Default))

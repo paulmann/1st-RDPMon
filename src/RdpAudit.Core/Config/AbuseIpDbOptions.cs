@@ -63,4 +63,12 @@ public sealed class AbuseIpDbOptions
 
 	/// <summary>Category list submitted with each report. Defaults to RDP brute-force (22) and SSH (18).</summary>
 	public List<int> ReportCategories { get; set; } = new() { 18, 22 };
+
+	/// <summary>When true, suppress re-reporting an IP that has a SUCCESSFUL report within <see cref="ReportCooldownHours"/>.</summary>
+	/// <remarks>Additive to <see cref="DeduplicationWindowMinutes"/>; default false preserves prior behaviour. Failed reports never suppress.</remarks>
+	public bool ReportDedupeEnabled { get; set; }
+
+	/// <summary>Cooldown, in hours, before the same IP may be reported again once a successful report exists.</summary>
+	/// <remarks>Clamped to [1, 8760] at use site. Only consulted when <see cref="ReportDedupeEnabled"/> is true.</remarks>
+	public int ReportCooldownHours { get; set; } = 24;
 }

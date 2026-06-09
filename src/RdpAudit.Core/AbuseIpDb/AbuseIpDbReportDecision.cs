@@ -25,6 +25,9 @@ public enum AbuseIpDbSuppressionReason
 	WithinDedupWindow = 8,
 	HourlyLimitReached = 9,
 	DailyLimitReached = 10,
+
+	/// <summary>A successful report for this IP exists within the configured report cooldown window.</summary>
+	WithinReportCooldown = 11,
 }
 
 /// <summary>Container for the should-report decision.</summary>
@@ -44,6 +47,7 @@ public static class AbuseIpDbPolicy
 	/// <param name="reportsInHour">Reports already submitted in the last hour (any IP).</param>
 	/// <param name="reportsInDay">Reports already submitted in the last day (any IP).</param>
 	/// <param name="nowUtc">Current UTC time (passed in for determinism in tests).</param>
+	/// <param name="lastSuccessfulReportUtc">Last SUCCESSFUL report UTC for this IP; null when never successfully reported. Only consulted when <see cref="AbuseIpDbOptions.ReportDedupeEnabled"/> is true.</param>
 	public static AbuseIpDbReportDecision Decide(
 		AbuseIpDbOptions opts,
 		bool hasApiKey,
@@ -54,7 +58,8 @@ public static class AbuseIpDbPolicy
 		DateTime? lastReportUtc,
 		int reportsInHour,
 		int reportsInDay,
-		DateTime nowUtc)
+		DateTime nowUtc,
+		DateTime? lastSuccessfulReportUtc = null)
 	{
 		ArgumentNullException.ThrowIfNull(opts);
 
@@ -100,6 +105,18 @@ public static class AbuseIpDbPolicy
 			if (since < TimeSpan.FromMinutes(dedupMinutes))
 			{
 				return new AbuseIpDbReportDecision(false, AbuseIpDbSuppressionReason.WithinDedupWindow);
+			}
+		}
+
+		// Success-filtered cooldown: only a *successful* prior report within the configured cooldown
+		// suppresses. Failed reports never suppress future submissions. Gated by ReportDedupeEnabled.
+		if (opts.ReportDedupeEnabled && lastSuccessfulReportUtc.HasValue)
+		{
+			int cooldownHours = Math.Clamp(opts.ReportCooldownHours, 1, 8760);
+			TimeSpan sinceSuccess = nowUtc - lastSuccessfulReportUtc.Value;
+			if (sinceSuccess < TimeSpan.FromHours(cooldownHours))
+			{
+				return new AbuseIpDbReportDecision(false, AbuseIpDbSuppressionReason.WithinReportCooldown);
 			}
 		}
 

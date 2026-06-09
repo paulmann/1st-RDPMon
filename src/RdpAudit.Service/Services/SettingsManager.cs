@@ -74,7 +74,8 @@ public sealed class SettingsManager
 			ValidatePathField(storageNode, "LogDirectory");
 		}
 
-		// 3) Protect secret fields in-place. Plaintext-looking API keys are wrapped before persistence.
+		// 3) Protect secret fields in-place. Plaintext-looking API keys are wrapped before persistence;
+		//    the mask placeholder is resolved back to the currently-stored envelope.
 		ProtectSecretFields(section);
 
 		string body = root.ToJsonString(JsonOptions.Indented);
@@ -110,13 +111,19 @@ public sealed class SettingsManager
 		return true;
 	}
 
+	/// <summary>Mask placeholder echoed by <c>GetSettings</c> in place of a non-empty secret envelope.</summary>
+	/// <remarks>Must match the value IpcDispatcher.MaskSecret emits. When this round-trips back into a save
+	/// it means "operator did not change the secret" — we must preserve the existing stored envelope, never
+	/// wrap the placeholder (which would destroy the real key).</remarks>
+	internal const string MaskPlaceholder = "***configured***";
+
 	private void ProtectSecretFields(JsonNode section)
 	{
-		ProtectStringField(section["AbuseIpDb"], "ApiKey");
-		ProtectStringField(section["MikroTik"], "Password");
+		PreserveOrProtectSecret(section["AbuseIpDb"], "AbuseIpDb", "ApiKey");
+		PreserveOrProtectSecret(section["MikroTik"], "MikroTik", "Password");
 	}
 
-	private void ProtectStringField(JsonNode? container, string fieldName)
+	private void PreserveOrProtectSecret(JsonNode? container, string subsectionName, string fieldName)
 	{
 		if (container is null)
 		{
@@ -129,15 +136,13 @@ public sealed class SettingsManager
 			return;
 		}
 
-		// Field may be a plain string (plaintext to be protected) OR a JSON object envelope.
-		string? raw = null;
+		string? raw;
 		try
 		{
 			raw = field.GetValue<string?>();
 		}
 		catch (System.FormatException)
 		{
-			// Field is not a string — already an envelope object or similar; nothing to do.
 			return;
 		}
 		catch (System.InvalidOperationException)
@@ -145,6 +150,52 @@ public sealed class SettingsManager
 			return;
 		}
 
+		// Mask placeholder = "keep existing secret". Replace with the currently-stored envelope, never wrap it.
+		if (string.Equals(raw, MaskPlaceholder, StringComparison.Ordinal))
+		{
+			string? existing = LoadExistingSecret(subsectionName, fieldName);
+			if (!string.IsNullOrWhiteSpace(existing))
+			{
+				container[fieldName] = existing;
+				_logger.LogInformation("Secret field '{Field}' unchanged (mask placeholder); preserving stored envelope.", fieldName);
+			}
+			else
+			{
+				// No stored secret to preserve — drop the placeholder so it is not persisted as plaintext.
+				container[fieldName] = string.Empty;
+				_logger.LogInformation("Secret field '{Field}' mask placeholder received with no stored secret; left empty.", fieldName);
+			}
+			return;
+		}
+
+		ProtectStringField(container, fieldName, raw);
+	}
+
+	/// <summary>Reads the current on-disk secret envelope for a subsection field, if the settings file exists.</summary>
+	private string? LoadExistingSecret(string subsectionName, string fieldName)
+	{
+		string path = EffectiveConfigPath;
+		if (!File.Exists(path))
+		{
+			return null;
+		}
+
+		try
+		{
+			string existingBody = File.ReadAllText(path);
+			JsonNode? existingRoot = JsonNode.Parse(existingBody);
+			JsonNode? value = existingRoot?[RdpAuditOptions.SectionName]?[subsectionName]?[fieldName];
+			return value?.GetValue<string?>();
+		}
+		catch (Exception ex) when (ex is JsonException or System.IO.IOException or System.FormatException or System.InvalidOperationException)
+		{
+			_logger.LogWarning(ex, "Could not read existing secret for '{Sub}.{Field}'; treating as absent.", subsectionName, fieldName);
+			return null;
+		}
+	}
+
+	private void ProtectStringField(JsonNode container, string fieldName, string? raw)
+	{
 		if (string.IsNullOrWhiteSpace(raw))
 		{
 			return;

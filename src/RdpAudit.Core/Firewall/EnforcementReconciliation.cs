@@ -13,6 +13,7 @@
 // Site:    https://Deynekin.com
 
 using RdpAudit.Core.Config;
+using RdpAudit.Core.Ipc.Contracts;
 
 namespace RdpAudit.Core.Firewall;
 
@@ -430,5 +431,49 @@ public static class EnforcementReconciler
 		EnforcementConfidence.Failed => "Failed",
 		EnforcementConfidence.Unknown => "Unknown",
 		_ => confidence.ToString(),
+	};
+
+	/// <summary>Derives overall firewall enforcement health from reconciliation counts. Pure for testing.</summary>
+	/// <param name="enabledBlocklistRows">Count of enabled blocklist rows (enforcement that should exist).</param>
+	/// <param name="verifiedEnforced">Count of blocks with verified live enforcement.</param>
+	/// <param name="unenforced">Count of blocks the DB intends but reconciliation could not verify.</param>
+	public static FirewallEnforcementHealth DeriveHealth(int enabledBlocklistRows, int verifiedEnforced, int unenforced)
+	{
+		if (enabledBlocklistRows <= 0)
+		{
+			return FirewallEnforcementHealth.Idle;
+		}
+
+		// Enabled rows exist but nothing is verified and nothing is even partially enforced: a missing rule.
+		if (verifiedEnforced <= 0)
+		{
+			return FirewallEnforcementHealth.MissingRule;
+		}
+
+		// Some verified, but some intended blocks remain unenforced: partial / failed enforcement.
+		if (unenforced > 0)
+		{
+			return FirewallEnforcementHealth.Failed;
+		}
+
+		return FirewallEnforcementHealth.Healthy;
+	}
+
+	/// <summary>Operator-facing description plus recommended action for an enforcement health value.</summary>
+	public static string DescribeHealth(FirewallEnforcementHealth health, int enabledBlocklistRows, int verifiedEnforced) => health switch
+	{
+		FirewallEnforcementHealth.Idle =>
+			"No enabled blocklist rows; firewall enforcement is idle.",
+		FirewallEnforcementHealth.Healthy =>
+			$"Enforcement healthy: {verifiedEnforced} of {enabledBlocklistRows} enabled block(s) verified in the firewall.",
+		FirewallEnforcementHealth.MissingRule =>
+			$"MISSING RULE: {enabledBlocklistRows} enabled block(s) exist but no RdpAudit firewall rule was verified. "
+			+ "Use 'Repair selected' on the Active blocks tab to create the missing rules, then 'Verify all'.",
+		FirewallEnforcementHealth.Failed =>
+			$"ENFORCEMENT INCOMPLETE: only {verifiedEnforced} of {enabledBlocklistRows} enabled block(s) verified. "
+			+ "Use 'Repair selected' on the unenforced entries, then 'Verify all'.",
+		FirewallEnforcementHealth.Unknown =>
+			"Enforcement state could not be verified (reconciliation unavailable). Use 'Verify all'.",
+		_ => "Firewall status unknown.",
 	};
 }

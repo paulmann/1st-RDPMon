@@ -913,3 +913,47 @@ Sub-stage A3 (or whichever next slice consumes the dashboard surface) must satis
 4. **Schema neutrality.** Prefer storing any new lightweight per-summary metadata in the
    existing `DbProps` key-value table to avoid a migration, mirroring how A1 stores DB-size
    snapshots. Reach for a schema change only when the data shape truly requires it.
+
+## Release 1.2.5 — AbuseIPDB report dedupe, API-key persistence fix, firewall enforcement health
+
+Version 1.2.5 is a focused correctness release on top of the live-enforcement reconciliation
+shipped in 1.2.4. No new IPC ordinals are introduced; the change is additive and the defaults keep
+existing behaviour intact.
+
+Delivered:
+
+* **AbuseIPDB success-filtered report cooldown.** New `AbuseIpDbOptions.ReportDedupeEnabled`
+  (default `false`) and `ReportCooldownHours` (default `24`, clamped 1..8760). When enabled,
+  `AbuseIpDbPolicy.Decide` suppresses a report (reason `WithinReportCooldown`) if the most recent
+  **successful** report for the normalized IP falls within the cooldown. Failed attempts never
+  suppress. The 15-minute `DeduplicationWindowMinutes` floor is unchanged and independent.
+* **Persistent report history.** New `AbuseIpDbReportHistory` entity + EF configuration + migration
+  `20260609120000_Stage9AbuseIpDbReportHistory` records every report ATTEMPT (success or failure)
+  with the normalized IP, UTC timestamp, `Succeeded`, HTTP status, sanitised result/error,
+  categories, a SHA-256 hash of the comment and a source tag. Indexed for the latest-successful-by-IP
+  lookup. The API key is never written. `AbuseIpDbReportWorker` records history on every attempt and
+  consults it before submitting when dedupe is enabled.
+* **AbuseIPDB tab UI.** A `1 report per 1 IP` checkbox plus a `Cooldown hours before reporting same
+  IP again` numeric (1..8760, enabled only while the checkbox is ticked, invalid values rejected
+  before save). Both values persist via IPC/settings and re-display after a Configurator restart
+  through new `AbuseIpDbStatusDto.ReportDedupeEnabled` / `ReportCooldownHours` fields.
+* **API-key persistence fix.** `SettingsManager` now treats the `***configured***` mask sentinel for
+  `AbuseIpDb.ApiKey` (and `MikroTik.Password`) as a do-not-overwrite marker: the existing on-disk
+  envelope is preserved instead of being DPAPI-wrapped over the sentinel. Saving unrelated settings
+  after a Configurator restart can no longer wipe the stored key. The explicit **Clear key** button
+  (empty string) still clears the credential.
+* **Firewall enforcement health.** `FirewallStatusDto` gains `EnabledBlocklistRows`,
+  `RdpAuditFirewallRuleCount`, `VerifiedEnforcedCount` and an `EnforcementHealth`
+  (`Idle/Healthy/MissingRule/Failed/Unknown`) derived by the pure `EnforcementReconciler.DeriveHealth`
+  from a live reconciliation pass. The Firewall tab renders an actionable status line: a "configured
+  but unenforced" deployment shows red (`MISSING RULE` / `INCOMPLETE`) and points the operator at the
+  Active blocks tab's **Repair selected** / **Verify all** actions instead of reporting green.
+* **Tests.** Extended `AbuseIpDbPolicyTests` (cooldown reason / failed-only / expiry / disabled),
+  `AbuseIpDbReportWorkerTests` (history recorded every attempt, dedupe skip on prior success, failed
+  does not suppress), `SettingsManagerSecretsTests` (mask sentinel preserves the existing key,
+  explicit empty clears), new `EnforcementReconcilerHealthTests` (`DeriveHealth` cases), and the
+  version-metadata gate bumped to 1.2.5.
+
+Known limitation: this environment has no `dotnet` CLI, so the build, test and publish steps must be
+run on a Windows host. The EF migration and `AuditDbContextModelSnapshot` for the new table were
+hand-written to match the EF Core 8 conventions used by the existing migrations.

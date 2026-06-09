@@ -95,7 +95,9 @@ public static class AppSettingsTemplate
 			"ReportThreshold": 80,
 			"MinThreatScore": 60.0,
 			"MinFailedAttempts": 10,
-			"ReportCategories": [18, 22]
+			"ReportCategories": [18, 22],
+			"ReportDedupeEnabled": false,
+			"ReportCooldownHours": 24
 		},
 		"MikroTik": {
 			"Enabled": false,

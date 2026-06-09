@@ -41,6 +41,7 @@ public sealed class FirewallPage : TabPage
 	private readonly Label _providerStatusLabel;
 	private readonly Label _windowsStatusLabel;
 	private readonly Label _countersLabel;
+	private readonly Label _enforcementHealthLabel;
 	private readonly Button _refreshStatus;
 
 	// Auto-block policy section ---------------------------------------------------------------------
@@ -121,7 +122,7 @@ public sealed class FirewallPage : TabPage
 		{
 			Dock = DockStyle.Fill,
 			ColumnCount = 4,
-			RowCount = 4,
+			RowCount = 5,
 			Padding = new Padding(8),
 			AutoSize = true,
 			AutoSizeMode = AutoSizeMode.GrowAndShrink,
@@ -151,6 +152,13 @@ public sealed class FirewallPage : TabPage
 		_providerStatusLabel = new Label { Dock = DockStyle.Fill, AutoSize = false, Text = "Provider status: unknown" };
 		_windowsStatusLabel = new Label { Dock = DockStyle.Fill, AutoSize = false, Text = "Windows: unknown" };
 		_countersLabel = new Label { Dock = DockStyle.Fill, AutoSize = false, Text = "Counters: unknown" };
+		_enforcementHealthLabel = new Label
+		{
+			Dock = DockStyle.Fill,
+			AutoSize = false,
+			Text = "Enforcement: unknown",
+			Font = new Font(Font, FontStyle.Bold),
+		};
 
 		_refreshStatus = new Button { Text = "Refresh status", AutoSize = true };
 		_refreshStatus.Click += async (_, _) => await RefreshAllAsync().ConfigureAwait(true);
@@ -167,6 +175,8 @@ public sealed class FirewallPage : TabPage
 		providerLayout.SetColumnSpan(_windowsStatusLabel, 2);
 		providerLayout.Controls.Add(_countersLabel, 0, 3);
 		providerLayout.SetColumnSpan(_countersLabel, 4);
+		providerLayout.Controls.Add(_enforcementHealthLabel, 0, 4);
+		providerLayout.SetColumnSpan(_enforcementHealthLabel, 4);
 		providerBox.Controls.Add(providerLayout);
 
 		// --- Auto-block policy panel -----------------------------------------------------------
@@ -602,6 +612,8 @@ public sealed class FirewallPage : TabPage
 			_providerStatusLabel.Text = "Provider status: service unreachable";
 			_windowsStatusLabel.Text = "Windows: unknown";
 			_countersLabel.Text = "Counters: unavailable";
+			_enforcementHealthLabel.Text = "Enforcement: unknown (service unreachable)";
+			_enforcementHealthLabel.ForeColor = SystemColors.GrayText;
 			return;
 		}
 
@@ -632,6 +644,48 @@ public sealed class FirewallPage : TabPage
 		_countersLabel.Text = string.Format(CultureInfo.InvariantCulture,
 			"Active blocks: {0}   |   Whitelist rows: {1}   |   Blacklist rows: {2}",
 			dto.ActiveBlockCount, dto.WhitelistCount, dto.BlacklistCount);
+
+		RenderEnforcementHealth(dto);
+	}
+
+	/// <summary>Surfaces the live-reconciled enforcement health. Never shows green unless real firewall
+	/// rules were verified: enabled blocklist rows with zero verified enforcement render red and tell the
+	/// operator to repair/verify, so a "configured but unenforced" state can never look healthy.</summary>
+	private void RenderEnforcementHealth(FirewallStatusDto dto)
+	{
+		string detail = string.Format(CultureInfo.InvariantCulture,
+			"  (enabled blocks: {0}, RdpAudit rules: {1}, verified: {2})",
+			dto.EnabledBlocklistRows, dto.RdpAuditFirewallRuleCount, dto.VerifiedEnforcedCount);
+
+		switch (dto.EnforcementHealth)
+		{
+			case FirewallEnforcementHealth.Healthy:
+				_enforcementHealthLabel.Text = "Enforcement: HEALTHY" + detail;
+				_enforcementHealthLabel.ForeColor = Color.DarkGreen;
+				break;
+			case FirewallEnforcementHealth.Idle:
+				_enforcementHealthLabel.Text = "Enforcement: idle — no enabled blocklist rows" + detail;
+				_enforcementHealthLabel.ForeColor = SystemColors.ControlText;
+				break;
+			case FirewallEnforcementHealth.MissingRule:
+				_enforcementHealthLabel.Text =
+					"Enforcement: MISSING RULE — blocks intended but no firewall rule was verified. "
+					+ "Open the Active blocks tab and use 'Repair selected', then 'Verify all'."
+					+ detail;
+				_enforcementHealthLabel.ForeColor = Color.DarkRed;
+				break;
+			case FirewallEnforcementHealth.Failed:
+				_enforcementHealthLabel.Text =
+					"Enforcement: INCOMPLETE — some blocks unenforced. "
+					+ "Open the Active blocks tab and use 'Repair selected' on the gaps, then 'Verify all'."
+					+ detail;
+				_enforcementHealthLabel.ForeColor = Color.DarkRed;
+				break;
+			default:
+				_enforcementHealthLabel.Text = "Enforcement: unknown (could not verify)" + detail;
+				_enforcementHealthLabel.ForeColor = SystemColors.GrayText;
+				break;
+		}
 	}
 
 	// ---------------------------------------------------------------------------------------------
