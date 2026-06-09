@@ -80,6 +80,10 @@ public sealed class FirewallPage : TabPage
 	private readonly TextBox _whitelistInput;
 	private readonly TextBox _loginRuleInput;
 
+	/// <summary>When checked, a failed Remove / Repair surfaces a modal with the full detailed error log
+	/// and a Copy Log button. Unchecked by default so routine operation shows only a one-line status.</summary>
+	private readonly CheckBox _debugCheck;
+
 	private readonly System.Windows.Forms.Timer _timer;
 
 	private RdpAuditOptions _lastLoadedOptions = new();
@@ -319,7 +323,16 @@ public sealed class FirewallPage : TabPage
 		Button blocklistRemove = MakeButton("Remove selected", async (_, _) => await OnRemoveBlocklistAsync().ConfigureAwait(true));
 		Button blocklistRepair = MakeButton("Repair selected", async (_, _) => await OnRepairBlocklistSelectedAsync().ConfigureAwait(true));
 		Button blocklistRepairAll = MakeButton("Repair all enabled", async (_, _) => await OnRepairBlocklistAllAsync().ConfigureAwait(true));
-		_innerTabs.TabPages.Add(BuildGridTab("Blocklist", _blocklistGrid, _blocklistFilter, _blocklistInput, blocklistAdd, blocklistRemove, blocklistRepair, blocklistRepairAll));
+		Button blocklistDedupe = MakeButton("Dedupe duplicates", async (_, _) => await OnDedupeBlocklistAsync().ConfigureAwait(true));
+		_debugCheck = new CheckBox
+		{
+			Text = "DEBUG",
+			AutoSize = true,
+			Checked = false,
+			Anchor = AnchorStyles.Left,
+			Margin = new Padding(8, 8, 4, 4),
+		};
+		_innerTabs.TabPages.Add(BuildGridTab("Blocklist", _blocklistGrid, _blocklistFilter, _blocklistInput, blocklistAdd, blocklistRemove, blocklistRepair, blocklistRepairAll, blocklistDedupe, _debugCheck));
 
 		_whitelistGrid = MakeAddressGrid();
 		_whitelistGrid.DataSource = _whitelistRows;
@@ -933,24 +946,185 @@ public sealed class FirewallPage : TabPage
 			return;
 		}
 
-		// Carry the stable row Id so the service deletes exactly the selected row even when several
-		// rows share an address; Address remains for logging and as a legacy fallback.
-		AddressListMutationRequest payload = new() { Id = row.Id, Address = ip };
-		IpcRawResult result = await _ipc.SendRawAsync(IpcCommand.RemoveFromBlocklist, payload).ConfigureAwait(true);
-
-		if (result.Success)
+		if (row.Id <= 0)
 		{
-			int removed = ParseRemovedCount(result.Payload);
+			SetStatus("Remove blocklist entry aborted: selected row has no stable Id. Refresh and retry.");
+			return;
+		}
+
+		// Carry the stable row Id so the service removes exactly the selected row even when several rows
+		// share an address (including an already-disabled duplicate); Address remains for logging.
+		AddressListMutationRequest payload = new() { Id = row.Id, Address = ip };
+		IpcCallResult<BlocklistRemovalResultDto> call =
+			await _ipc.SendDetailedAsync<BlocklistRemovalResultDto>(IpcCommand.RemoveFromBlocklist, payload).ConfigureAwait(true);
+
+		if (!call.IsSuccess || call.Value is null)
+		{
+			string err = string.IsNullOrWhiteSpace(call.Error) ? "service reported no detail." : call.Error!;
 			SetStatus(string.Format(CultureInfo.InvariantCulture,
-				"RemoveFromBlocklist {0} (Id={1}): removed {2} row(s).", ip, row.Id, removed));
+				"RemoveFromBlocklist {0} (Id={1}) FAILED: {2}", ip, row.Id, err));
+			MaybeShowDebugModal("Remove BlockList row", row.Id, ip, err, null);
+			return;
+		}
+
+		BlocklistRemovalResultDto dto = call.Value;
+		if (dto.Status == IpcResultStatus.Success)
+		{
+			SetStatus(dto.Message);
 			await RefreshAllAsync().ConfigureAwait(true);
 		}
 		else
 		{
 			SetStatus(string.Format(CultureInfo.InvariantCulture,
 				"RemoveFromBlocklist {0} (Id={1}) FAILED: {2}",
-				ip, row.Id, string.IsNullOrWhiteSpace(result.Error) ? "service reported no detail." : result.Error));
+				ip, row.Id, string.IsNullOrWhiteSpace(dto.Error) ? dto.Message : dto.Error));
+			MaybeShowDebugModal("Remove BlockList row", row.Id, ip, dto.Error ?? dto.Message, dto.DebugLog);
+			// A non-success Remove may still have mutated the DB; refresh so the grid reflects reality.
+			await RefreshAllAsync().ConfigureAwait(true);
 		}
+	}
+
+	/// <summary>Runs the DB-maintenance dedupe action that collapses duplicate BlockList rows per IP,
+	/// then surfaces the audit summary and refreshes the grid.</summary>
+	private async Task OnDedupeBlocklistAsync()
+	{
+		if (!Confirm(
+			"Collapse duplicate BlockList rows? For each IP with more than one row, a canonical row is "
+			+ "kept (preferring an enabled row) and the duplicates are soft-disabled with an audit note. "
+			+ "Nothing is hard-deleted.",
+			"Confirm dedupe BlockList"))
+		{
+			SetStatus("Dedupe BlockList cancelled.");
+			return;
+		}
+
+		IpcCallResult<BlocklistDedupeResultDto> call =
+			await _ipc.SendDetailedAsync<BlocklistDedupeResultDto>(IpcCommand.DedupeBlocklistEntries).ConfigureAwait(true);
+		if (!call.IsSuccess || call.Value is null)
+		{
+			string err = string.IsNullOrWhiteSpace(call.Error) ? "service reported no detail." : call.Error!;
+			SetStatus("Dedupe BlockList FAILED: " + err);
+			return;
+		}
+
+		BlocklistDedupeResultDto dto = call.Value;
+		SetStatus(dto.Message);
+		if (_debugCheck.Checked && dto.Audit.Count > 0)
+		{
+			ShowDetailLogModal("Dedupe BlockList audit", string.Join(Environment.NewLine, dto.Audit));
+		}
+
+		await RefreshAllAsync().ConfigureAwait(true);
+	}
+
+	/// <summary>When DEBUG is checked, shows a modal with the detailed error log and a Copy Log button.
+	/// When unchecked, does nothing (the one-line status already carries the summary).</summary>
+	private void MaybeShowDebugModal(string operation, long selectedId, string ip, string? error, string? debugLog)
+	{
+		if (!_debugCheck.Checked)
+		{
+			return;
+		}
+
+		System.Text.StringBuilder sb = new();
+		sb.Append("Operation: ").Append(operation).Append(Environment.NewLine);
+		sb.Append("Selected Id: ").Append(selectedId.ToString(CultureInfo.InvariantCulture)).Append(Environment.NewLine);
+		sb.Append("IP: ").Append(ip).Append(Environment.NewLine);
+		sb.Append("UTC: ").Append(DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture)).Append(Environment.NewLine);
+		if (!string.IsNullOrEmpty(error))
+		{
+			sb.Append("Error: ").Append(error).Append(Environment.NewLine);
+		}
+
+		if (!string.IsNullOrEmpty(debugLog))
+		{
+			sb.Append(Environment.NewLine).Append("Detailed log:").Append(Environment.NewLine).Append(debugLog);
+		}
+
+		ShowDetailLogModal(operation + " — detailed error log", sb.ToString());
+	}
+
+	/// <summary>When DEBUG is checked, assembles a detailed error log from a reconciled-block result
+	/// (backend command, stdout/stderr, exit code, durationMs, rule name/handle, scanner backend,
+	/// verifier reason) and shows it in a modal with a Copy Log button.</summary>
+	private void MaybeShowReconciledDebugModal(string operation, long selectedId, string ip, ReconciledBlockDto r)
+	{
+		if (!_debugCheck.Checked)
+		{
+			return;
+		}
+
+		System.Text.StringBuilder sb = new();
+		void Line(string k, object? v) => sb.Append(k).Append(": ").Append(v?.ToString() ?? "(null)").Append(Environment.NewLine);
+		Line("Operation", operation);
+		Line("Selected Id", selectedId);
+		Line("IP", ip);
+		Line("UTC", DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+		Line("Status", r.Status);
+		Line("Confidence", r.Confidence);
+		Line("Detail", r.Detail);
+		Line("Recommended action", r.RecommendedAction);
+		Line("Backend command", r.BackendCommand);
+		Line("Backend stdout", r.BackendStdoutPreview);
+		Line("Backend stderr", r.BackendStderrPreview);
+		Line("Exit code", r.ExitCode);
+		Line("Timed out", r.TimedOut);
+		Line("Duration (ms)", r.DurationMs);
+		Line("Rule name", r.RuleName);
+		Line("Rule handle", r.RuleHandle);
+		Line("Scanner backend", r.ScannerBackend);
+		Line("Verifier reason", r.VerifierReason);
+		Line("Last error", r.LastError);
+		Line("Last attempt UTC", r.LastAttemptUtc);
+
+		ShowDetailLogModal(operation + " — detailed error log", sb.ToString());
+	}
+
+	/// <summary>Shows a modal dialog with a read-only multi-line log and a Copy Log button.</summary>
+	private void ShowDetailLogModal(string title, string body)
+	{
+		using Form dialog = new()
+		{
+			Text = title,
+			StartPosition = FormStartPosition.CenterParent,
+			Size = new Size(720, 460),
+			MinimizeBox = false,
+			MaximizeBox = true,
+			ShowInTaskbar = false,
+		};
+
+		TextBox text = new()
+		{
+			Multiline = true,
+			ReadOnly = true,
+			ScrollBars = ScrollBars.Both,
+			WordWrap = false,
+			Dock = DockStyle.Fill,
+			Text = body,
+			Font = new System.Drawing.Font(System.Drawing.FontFamily.GenericMonospace, 9f),
+		};
+
+		FlowLayoutPanel bar = new() { Dock = DockStyle.Bottom, FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Height = 40 };
+		Button close = new() { Text = "Close", DialogResult = DialogResult.OK, AutoSize = true };
+		Button copy = new() { Text = "Copy Log", AutoSize = true };
+		copy.Click += (_, _) =>
+		{
+			try
+			{
+				Clipboard.SetText(string.IsNullOrEmpty(body) ? " " : body);
+			}
+			catch (Exception)
+			{
+				// Clipboard can transiently fail (locked by another app); ignore.
+			}
+		};
+		bar.Controls.Add(close);
+		bar.Controls.Add(copy);
+
+		dialog.Controls.Add(text);
+		dialog.Controls.Add(bar);
+		dialog.AcceptButton = close;
+		dialog.ShowDialog(this);
 	}
 
 	/// <summary>
@@ -992,10 +1166,17 @@ public sealed class FirewallPage : TabPage
 					EnforcementReconciler.DescribeStatus(result.Status),
 					EnforcementReconciler.DescribeConfidence(result.Confidence),
 					detail));
+
+				// On a non-Active outcome with DEBUG on, surface the full backend detail the DTO carries.
+				if (result.Status != EnforcementStatus.Active)
+				{
+					MaybeShowReconciledDebugModal("Repair BlockList row", row.Id, row.Address, result);
+				}
 			}
 			else
 			{
 				await ReportCallFailureAsync(call, action).ConfigureAwait(true);
+				MaybeShowDebugModal("Repair BlockList row", row.Id, row.Address, call.Error, null);
 			}
 
 			await RefreshAllAsync().ConfigureAwait(true);
@@ -1054,32 +1235,6 @@ public sealed class FirewallPage : TabPage
 		{
 			EndBusy();
 		}
-	}
-
-	/// <summary>Extracts the <c>removed</c> count from a RemoveFromBlocklist success payload.</summary>
-	private static int ParseRemovedCount(string? payload)
-	{
-		if (string.IsNullOrWhiteSpace(payload))
-		{
-			return 0;
-		}
-
-		try
-		{
-			using JsonDocument doc = JsonDocument.Parse(payload);
-			if (doc.RootElement.ValueKind == JsonValueKind.Object
-				&& doc.RootElement.TryGetProperty("removed", out JsonElement removed)
-				&& removed.TryGetInt32(out int count))
-			{
-				return count;
-			}
-		}
-		catch (JsonException)
-		{
-			// Fall through to 0 — the success flag already told us it worked.
-		}
-
-		return 0;
 	}
 
 	// ---------------------------------------------------------------------------------------------
@@ -1476,6 +1631,32 @@ public sealed class FirewallPage : TabPage
 
 		_blocklistRows.RaiseListChangedEvents = true;
 		_blocklistRows.ResetBindings();
+		WarnIfDuplicateBlocklistRows();
+	}
+
+	/// <summary>Surfaces a warning when more than one BlockList row exists for the same IP (e.g. one
+	/// Manual + one AutoBlock, or a disabled duplicate). The phrase "duplicate blocklist rows" is part
+	/// of the contract so the operator can recognise the condition and run the DB-maintenance dedupe.</summary>
+	private void WarnIfDuplicateBlocklistRows()
+	{
+		Dictionary<string, int> counts = new(StringComparer.OrdinalIgnoreCase);
+		foreach (AddressListEntryDto dto in _blocklistAll)
+		{
+			if (string.IsNullOrEmpty(dto.Address))
+			{
+				continue;
+			}
+
+			counts[dto.Address] = counts.TryGetValue(dto.Address, out int n) ? n + 1 : 1;
+		}
+
+		int dupIps = counts.Count(kv => kv.Value > 1);
+		if (dupIps > 0)
+		{
+			SetStatus(string.Format(System.Globalization.CultureInfo.CurrentCulture,
+				"Warning: {0} IP(s) have duplicate blocklist rows. Use Tools → Dedupe BlockList to collapse them.",
+				dupIps));
+		}
 	}
 
 	/// <summary>
@@ -1676,12 +1857,12 @@ public sealed class FirewallPage : TabPage
 		DataGridView grid,
 		Control filterBox,
 		Control? input,
-		params Button[] buttons)
+		params Control[] buttons)
 	{
 		TabPage page = new() { Text = title };
 
 		FlowLayoutPanel buttonBar = new() { Dock = DockStyle.Top, FlowDirection = FlowDirection.LeftToRight, AutoSize = true, Height = 36 };
-		foreach (Button b in buttons)
+		foreach (Control b in buttons)
 		{
 			buttonBar.Controls.Add(b);
 		}
@@ -1730,7 +1911,9 @@ public sealed class FirewallPage : TabPage
 			SelectionMode = DataGridViewSelectionMode.FullRowSelect,
 			MultiSelect = false,
 		};
-		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Address", DataPropertyName = nameof(AddressListRow.Address), Width = 200 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Id", DataPropertyName = nameof(AddressListRow.Id), Width = 60 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Address", DataPropertyName = nameof(AddressListRow.Address), Width = 180 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Enabled", DataPropertyName = nameof(AddressListRow.EnabledText), Width = 70 });
 		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Enforcement", DataPropertyName = nameof(AddressListRow.EnforcementText), Width = 130 });
 		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Source", DataPropertyName = nameof(AddressListRow.Source), Width = 120 });
 		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Added (UTC)", DataPropertyName = nameof(AddressListRow.AddedUtcText), Width = 170 });
@@ -1951,6 +2134,12 @@ public sealed class FirewallPage : TabPage
 		/// </summary>
 		public string EnforcementText { get; set; } = string.Empty;
 
+		/// <summary>True when the underlying BlockList row is enabled. Disabled rows are still shown so
+		/// the operator can see (and remove by Id) a soft-disabled duplicate.</summary>
+		public bool IsEnabled { get; init; } = true;
+
+		public string EnabledText => IsEnabled ? "yes" : "no";
+
 		public static AddressListRow From(AddressListEntryDto dto) => new()
 		{
 			Id = dto.Id,
@@ -1959,6 +2148,7 @@ public sealed class FirewallPage : TabPage
 			Note = dto.Note,
 			AddedUtcText = FormatUtc(dto.AddedUtc),
 			ExpiresUtcText = BlockExpiryFormatter.FormatExpiresUtc(dto.ExpiresUtc),
+			IsEnabled = dto.IsEnabled,
 		};
 	}
 

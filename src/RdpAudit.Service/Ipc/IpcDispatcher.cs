@@ -181,6 +181,9 @@ public sealed class IpcDispatcher
 				IpcCommand.RunToolsDiagnostics => await RunToolsDiagnosticsAsync(ct).ConfigureAwait(false),
 				IpcCommand.RunTemporaryFirewallRuleProbe => await RunTemporaryFirewallRuleProbeAsync(request.Payload, ct).ConfigureAwait(false),
 
+				// --- v1.3.1: DB maintenance ---
+				IpcCommand.DedupeBlocklistEntries => await DedupeBlocklistEntriesAsync(ct).ConfigureAwait(false),
+
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
 
@@ -742,6 +745,7 @@ public sealed class IpcDispatcher
 		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
 		List<BlocklistEntry> rows = await db.BlocklistEntries.AsNoTracking()
 			.OrderByDescending(b => b.AddedUtc)
+			.ThenByDescending(b => b.Id)
 			.Take(2000)
 			.ToListAsync(ct).ConfigureAwait(false);
 
@@ -753,8 +757,81 @@ public sealed class IpcDispatcher
 			AddedUtc = b.AddedUtc,
 			ExpiresUtc = b.ExpiresUtc,
 			Source = b.Source.ToString(),
+			IsEnabled = b.IsEnabled,
 		});
 	}
+
+	/// <summary>DB maintenance: collapses duplicate BlocklistEntry rows that share an IP down to one
+	/// canonical row. The canonical row is chosen deterministically — prefer an enabled row, then the
+	/// oldest by AddedUtc, then the lowest Id. Every other row for that IP is soft-disabled (kept for
+	/// audit, never hard-deleted) and its Reason annotated with the canonical row it was merged into.
+	/// Login-only rows (no IP) are left untouched. Runs in a single transaction.</summary>
+	private async Task<object?> DedupeBlocklistEntriesAsync(CancellationToken ct)
+	{
+		BlocklistDedupeResultDto result = new();
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+		await using Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx =
+			await db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+
+		List<BlocklistEntry> all = await db.BlocklistEntries
+			.Where(b => b.Ip != null && b.Ip != string.Empty)
+			.ToListAsync(ct).ConfigureAwait(false);
+
+		string nowStamp = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+		foreach (IGrouping<string, BlocklistEntry> group in all.GroupBy(b => b.Ip!, StringComparer.OrdinalIgnoreCase))
+		{
+			List<BlocklistEntry> rows = group.ToList();
+			if (rows.Count <= 1)
+			{
+				continue;
+			}
+
+			BlocklistEntry canonical = rows
+				.OrderByDescending(r => r.IsEnabled)
+				.ThenBy(r => r.AddedUtc)
+				.ThenBy(r => r.Id)
+				.First();
+
+			int disabledForIp = 0;
+			foreach (BlocklistEntry row in rows)
+			{
+				if (row.Id == canonical.Id || !row.IsEnabled)
+				{
+					continue;
+				}
+
+				row.IsEnabled = false;
+				row.Reason = Truncate2048(string.Format(CultureInfo.InvariantCulture,
+					"{0} [deduped {1}: merged into canonical row Id={2}]", row.Reason, nowStamp, canonical.Id));
+				disabledForIp++;
+			}
+
+			if (disabledForIp > 0)
+			{
+				result.IpsCollapsed++;
+				result.RowsDisabled += disabledForIp;
+				result.Audit.Add(string.Format(CultureInfo.InvariantCulture,
+					"{0}: kept canonical Id={1} (enabled={2}); disabled {3} duplicate row(s).",
+					group.Key, canonical.Id, canonical.IsEnabled, disabledForIp));
+			}
+		}
+
+		await db.SaveChangesAsync(ct).ConfigureAwait(false);
+		await tx.CommitAsync(ct).ConfigureAwait(false);
+
+		result.Message = result.IpsCollapsed == 0
+			? "No duplicate BlockList rows were found; nothing to collapse."
+			: string.Format(CultureInfo.InvariantCulture,
+				"Collapsed {0} IP(s) with duplicates; soft-disabled {1} duplicate row(s) with an audit trail.",
+				result.IpsCollapsed, result.RowsDisabled);
+		_logger.LogInformation(
+			"DedupeBlocklistEntries collapsed {Ips} ip(s), disabled {Rows} duplicate row(s)",
+			result.IpsCollapsed, result.RowsDisabled);
+		return result;
+	}
+
+	private static string Truncate2048(string value) => value.Length <= 2048 ? value : value[..2048];
 
 	private async Task<object?> ListWhitelistAsync(CancellationToken ct)
 	{
@@ -829,6 +906,18 @@ public sealed class IpcDispatcher
 		// matching so the value compares equal to the canonical stored IP.
 		string rawAddress = req.Address ?? string.Empty;
 		string cleanedAddress = StripSurroundingQuotes(rawAddress);
+
+		// Preferred path: a stable surrogate id targets exactly the selected row (including an
+		// already-disabled one) and synchronizes the ActiveBlock / live firewall rule only when the
+		// last enabled row for the IP is removed. Returns a structured result the operator can inspect.
+		if (req.Id > 0 && _reconciliation is not null)
+		{
+			// Return the structured DTO as the payload even on failure so the Configurator's
+			// Diagnostics DEBUG view can render the full DebugLog and Error. The IPC envelope stays
+			// Success=true; the operator inspects removal.Status / removal.Error.
+			return await _reconciliation
+				.RemoveBlocklistEntryAsync(req.Id, cleanedAddress, ct).ConfigureAwait(false);
+		}
 
 		List<BlocklistEntry> rows;
 		string matchMode;

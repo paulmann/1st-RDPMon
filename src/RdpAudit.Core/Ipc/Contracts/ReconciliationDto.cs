@@ -137,6 +137,85 @@ public sealed class ReconciliationReportDto
 	public string? ScannerNote { get; set; }
 }
 
+/// <summary>Result of the DB-maintenance dedupe action that collapses duplicate BlocklistEntry rows
+/// per IP down to one canonical row. Duplicates are soft-disabled with an audit annotation rather than
+/// hard-deleted, so the action is reversible and traceable.</summary>
+[MessagePackObject(keyAsPropertyName: false)]
+public sealed class BlocklistDedupeResultDto
+{
+	/// <summary>Number of distinct IPs that had more than one row and were collapsed.</summary>
+	[Key(0)]
+	public int IpsCollapsed { get; set; }
+
+	/// <summary>Number of duplicate rows soft-disabled (canonical rows are never touched).</summary>
+	[Key(1)]
+	public int RowsDisabled { get; set; }
+
+	/// <summary>Per-IP audit lines describing the canonical row kept and the duplicate ids disabled.</summary>
+	[Key(2)]
+	public List<string> Audit { get; set; } = new();
+
+	/// <summary>Operator-facing summary.</summary>
+	[Key(3)]
+	public string Message { get; set; } = string.Empty;
+
+	/// <summary>Overall status.</summary>
+	[Key(4)]
+	public IpcResultStatus Status { get; set; } = IpcResultStatus.Success;
+}
+
+/// <summary>Structured result of removing a single selected BlockList row by its stable surrogate id.
+/// Captures exactly what happened to the row, the IP's other rows, the ActiveBlock, and the live
+/// firewall rule(s) so the operator never sees an opaque success/failure. The firewall is only touched
+/// when the removed row was the last enabled BlockList row for that IP.</summary>
+[MessagePackObject(keyAsPropertyName: false)]
+public sealed class BlocklistRemovalResultDto
+{
+	/// <summary>The stable BlocklistEntry.Id the operation targeted (echoed back for the operator).</summary>
+	[Key(0)]
+	public long SelectedId { get; set; }
+
+	/// <summary>Normalized IP of the targeted row (empty when the id matched nothing).</summary>
+	[Key(1)]
+	public string Ip { get; set; } = string.Empty;
+
+	/// <summary>Number of BlocklistEntry rows soft-disabled by this operation (0 or 1 for an id-targeted remove).</summary>
+	[Key(2)]
+	public int RowsAffected { get; set; }
+
+	/// <summary>True when the targeted row was enabled before removal; false when it was already disabled.</summary>
+	[Key(3)]
+	public bool WasEnabled { get; set; }
+
+	/// <summary>True when the IP's ActiveBlock row(s) were marked Removed because no enabled BlockList row remained.</summary>
+	[Key(4)]
+	public bool ActiveBlockRemoved { get; set; }
+
+	/// <summary>True when at least one live firewall rule for the IP was removed.</summary>
+	[Key(5)]
+	public bool FirewallRuleRemoved { get; set; }
+
+	/// <summary>Count of orphan firewall rules cleaned up for the IP (rules with no remaining enabled row).</summary>
+	[Key(6)]
+	public int OrphanRulesRemoved { get; set; }
+
+	/// <summary>Operator-facing summary of what happened.</summary>
+	[Key(7)]
+	public string Message { get; set; } = string.Empty;
+
+	/// <summary>Non-null when the operation failed; carries a sanitized cause.</summary>
+	[Key(8)]
+	public string? Error { get; set; }
+
+	/// <summary>Detailed multi-line diagnostic log, populated for the Diagnostics DEBUG view.</summary>
+	[Key(9)]
+	public string? DebugLog { get; set; }
+
+	/// <summary>Overall status of the removal.</summary>
+	[Key(10)]
+	public IpcResultStatus Status { get; set; } = IpcResultStatus.Success;
+}
+
 /// <summary>Result of the emergency "remove all RdpAudit enforcement" cleanup.</summary>
 [MessagePackObject(keyAsPropertyName: false)]
 public sealed class EnforcementCleanupResultDto

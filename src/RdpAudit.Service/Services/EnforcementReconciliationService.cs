@@ -217,6 +217,26 @@ public sealed class EnforcementReconciliationService
 			};
 		}
 
+		// No-op fast path: if the row already reconciles as verifiably Active there is nothing to repair.
+		// Skip the backend mutation entirely so Repair (and Repair All) never re-runs New-NetFirewallRule
+		// against an already-enforced IP. Confidence ExistsButProviderMayBypass is treated as enforced
+		// here because the matching backend rule does exist; a re-block would not improve that.
+		DateTime preCheckUtc = _time.GetUtcNow().UtcDateTime;
+		ReconciliationReport preCheck = await BuildReportAsync(new List<ActiveBlock> { row }, cfg, rulePrefix, preCheckUtc, ct)
+			.ConfigureAwait(false);
+		if (preCheck.Blocks.Count > 0
+			&& preCheck.Blocks[0].Status == EnforcementStatus.Active
+			&& preCheck.Blocks[0].Confidence is EnforcementConfidence.Verified or EnforcementConfidence.ExistsButProviderMayBypass)
+		{
+			ReconciledBlockDto verified = MapBlock(preCheck.Blocks[0]);
+			verified.Detail = "Already verified; no repair required.";
+			verified.RecommendedAction = string.IsNullOrEmpty(verified.RecommendedAction)
+				? "No action needed; the firewall rule is present and verified."
+				: verified.RecommendedAction;
+			EnrichWithPersistedDetail(verified, row);
+			return verified;
+		}
+
 		IFirewallProvider? provider = ResolveProvider(cfg, row.Provider);
 		string? repairError = null;
 		FirewallActionResult? lastAction = null;
@@ -309,7 +329,7 @@ public sealed class EnforcementReconciliationService
 			return;
 		}
 
-		row.BackendCommand = Truncate(attempt.CommandLabel + " " + attempt.Arguments, 2048);
+		row.BackendCommand = Truncate(attempt.RenderCommandLine(), 2048);
 		row.BackendStdoutPreview = Truncate(attempt.StdoutPreview, 1024);
 		row.BackendStderrPreview = Truncate(attempt.StderrPreview, 1024);
 		row.ExitCode = attempt.ExitCode;
@@ -431,7 +451,30 @@ public sealed class EnforcementReconciliationService
 		foreach (long id in ids)
 		{
 			ct.ThrowIfCancellationRequested();
-			ReconciledBlockDto rb = await RepairBlocklistAsync(id, ct).ConfigureAwait(false);
+			ReconciledBlockDto rb;
+			try
+			{
+				rb = await RepairBlocklistAsync(id, ct).ConfigureAwait(false);
+			}
+			catch (OperationCanceledException)
+			{
+				throw;
+			}
+			catch (Exception ex)
+			{
+				// One row's failure must not abort the batch or take the service down; record it as an
+				// unenforced partial result and continue with the remaining rows.
+				_logger.LogWarning(ex, "Repair All: BlockList row {Id} failed", id);
+				rb = new ReconciledBlockDto
+				{
+					ActiveBlockId = 0,
+					Status = EnforcementStatus.Failed,
+					Confidence = EnforcementConfidence.Failed,
+					Detail = "Repair failed for this row: " + ex.GetType().Name + ".",
+					RecommendedAction = "Inspect the service logs and retry this row individually.",
+				};
+			}
+
 			report.Blocks.Add(rb);
 			if (rb.Status == EnforcementStatus.Active)
 			{
@@ -591,6 +634,251 @@ public sealed class EnforcementReconciliationService
 			result.ActiveBlockRowsMarkedRemoved,
 			result.Failures);
 		return result;
+	}
+
+	/// <summary>Removes exactly one selected BlockList row by its stable surrogate id and synchronizes
+	/// the ActiveBlock / live firewall rule only when that row was the last enabled BlockList row for its
+	/// IP. The row is soft-disabled (kept for audit, never hard-deleted). Behaviour:
+	/// <list type="bullet">
+	/// <item>Already-disabled row: re-affirm disabled, never touch the firewall, say so.</item>
+	/// <item>Other enabled rows for the same IP remain: do not remove the ActiveBlock or firewall rule.</item>
+	/// <item>Last enabled row removed: mark the IP's ActiveBlock row(s) Removed and remove the live
+	/// firewall rule(s) through the owning provider; clean orphan rules for the IP.</item>
+	/// </list>
+	/// The DB mutation runs inside a transaction; the firewall mutation happens after the row state is
+	/// durably committed so a backend failure cannot leave an enabled row with no rule silently. Every
+	/// step is recorded in <see cref="BlocklistRemovalResultDto.DebugLog"/> for the Diagnostics DEBUG
+	/// view. Per-IP exceptions are caught and surfaced as a structured failure; the service stays up.</summary>
+	public async Task<BlocklistRemovalResultDto> RemoveBlocklistEntryAsync(
+		long selectedId, string? addressHint, CancellationToken ct)
+	{
+		BlocklistRemovalResultDto result = new() { SelectedId = selectedId };
+		System.Text.StringBuilder log = new();
+		void Trace(string line) => log.Append('[')
+			.Append(_time.GetUtcNow().UtcDateTime.ToString("O", CultureInfo.InvariantCulture))
+			.Append("] ").Append(line).Append('\n');
+
+		Trace(string.Format(CultureInfo.InvariantCulture,
+			"RemoveBlocklistEntry selectedId={0} addressHint='{1}'", selectedId, addressHint ?? string.Empty));
+
+		if (selectedId <= 0)
+		{
+			result.Status = IpcResultStatus.Unavailable;
+			result.Error = "A positive BlockList row id is required.";
+			result.Message = result.Error;
+			result.DebugLog = log.ToString();
+			return result;
+		}
+
+		FirewallOptions cfg = _options.CurrentValue.Firewall;
+		string ip;
+		bool lastEnabledRemoved;
+
+		try
+		{
+			await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+			await using Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx =
+				await db.Database.BeginTransactionAsync(ct).ConfigureAwait(false);
+
+			BlocklistEntry? target = await db.BlocklistEntries
+				.FirstOrDefaultAsync(b => b.Id == selectedId, ct).ConfigureAwait(false);
+			if (target is null)
+			{
+				await tx.RollbackAsync(ct).ConfigureAwait(false);
+				result.Status = IpcResultStatus.Unavailable;
+				result.Error = string.Format(CultureInfo.InvariantCulture,
+					"No BlockList row exists with Id={0}; the grid selection may be stale. Refresh and retry.", selectedId);
+				result.Message = result.Error;
+				Trace(result.Error);
+				result.DebugLog = log.ToString();
+				return result;
+			}
+
+			ip = target.Ip ?? string.Empty;
+			result.Ip = ip;
+			result.WasEnabled = target.IsEnabled;
+			Trace(string.Format(CultureInfo.InvariantCulture,
+				"Targeted row Id={0} ip='{1}' enabled={2} source={3}", target.Id, ip, target.IsEnabled, target.Source));
+
+			if (!target.IsEnabled)
+			{
+				// Already disabled: do not touch the firewall. Re-affirm the disabled state for idempotency.
+				await tx.CommitAsync(ct).ConfigureAwait(false);
+				result.RowsAffected = 0;
+				result.Status = IpcResultStatus.Success;
+				result.Message = string.Format(CultureInfo.InvariantCulture,
+					"Row Id={0} for {1} was already disabled; no firewall change was made.", selectedId, ip);
+				Trace(result.Message);
+				result.DebugLog = log.ToString();
+				return result;
+			}
+
+			target.IsEnabled = false;
+			result.RowsAffected = 1;
+			Trace("Soft-disabled the selected row.");
+
+			// Are there OTHER still-enabled BlockList rows for this IP? If so, enforcement must stay.
+			bool otherEnabledForIp = !string.IsNullOrEmpty(ip)
+				&& await db.BlocklistEntries
+					.AnyAsync(b => b.Ip == ip && b.IsEnabled && b.Id != selectedId, ct).ConfigureAwait(false);
+			lastEnabledRemoved = !otherEnabledForIp && !string.IsNullOrEmpty(ip);
+			Trace(string.Format(CultureInfo.InvariantCulture,
+				"otherEnabledRowsForIp={0} lastEnabledRemoved={1}", otherEnabledForIp, lastEnabledRemoved));
+
+			if (lastEnabledRemoved)
+			{
+				// Mark the IP's reconcilable ActiveBlock row(s) Removed in the same transaction.
+				List<ActiveBlock> blocks = await db.ActiveBlocks
+					.Where(b => b.Ip == ip
+						&& (b.Status == ActiveBlockStatus.Active
+							|| b.Status == ActiveBlockStatus.Pending
+							|| b.Status == ActiveBlockStatus.Failed))
+					.ToListAsync(ct).ConfigureAwait(false);
+				foreach (ActiveBlock block in blocks)
+				{
+					block.Status = ActiveBlockStatus.Removed;
+					block.LastError = "Removed: last enabled BlockList row for this IP was removed.";
+				}
+
+				result.ActiveBlockRemoved = blocks.Count > 0;
+				Trace(string.Format(CultureInfo.InvariantCulture,
+					"Marked {0} ActiveBlock row(s) Removed for {1}.", blocks.Count, ip));
+			}
+
+			await db.SaveChangesAsync(ct).ConfigureAwait(false);
+			await tx.CommitAsync(ct).ConfigureAwait(false);
+			Trace("DB transaction committed.");
+		}
+		catch (OperationCanceledException)
+		{
+			throw;
+		}
+		catch (Exception ex)
+		{
+			_logger.LogError(ex, "RemoveBlocklistEntry DB phase failed for Id={Id}", selectedId);
+			result.Status = IpcResultStatus.Unavailable;
+			result.Error = "Database error while removing the BlockList row; no firewall change was made.";
+			result.Message = result.Error;
+			Trace("DB phase exception: " + ex.GetType().Name + ": " + ex.Message);
+			result.DebugLog = log.ToString();
+			return result;
+		}
+
+		// Firewall phase: only when the last enabled row for the IP was removed. Runs after the DB state
+		// is durably committed so a backend failure cannot leave an enabled row with no rule.
+		if (lastEnabledRemoved && !string.IsNullOrEmpty(ip))
+		{
+			try
+			{
+				await RemoveLiveFirewallForIpAsync(ip, cfg, result, Trace, ct).ConfigureAwait(false);
+			}
+			catch (OperationCanceledException)
+			{
+				throw;
+			}
+			catch (Exception ex)
+			{
+				_logger.LogWarning(ex, "RemoveBlocklistEntry firewall phase failed for {Ip}", ip);
+				result.Status = IpcResultStatus.Unavailable;
+				result.Error = "BlockList row removed, but the live firewall rule could not be removed: "
+					+ ex.GetType().Name + ".";
+				Trace("Firewall phase exception: " + ex.GetType().Name + ": " + ex.Message);
+			}
+		}
+
+		if (result.Error is null)
+		{
+			result.Status = IpcResultStatus.Success;
+			result.Message = BuildRemovalMessage(result, ip, lastEnabledRemoved);
+		}
+		else if (string.IsNullOrEmpty(result.Message))
+		{
+			result.Message = result.Error;
+		}
+
+		Trace("Result: " + result.Message);
+		result.DebugLog = log.ToString();
+		_logger.LogInformation(
+			"RemoveBlocklistEntry Id={Id} ip={Ip} rows={Rows} activeBlockRemoved={Abr} firewallRemoved={Fwr} orphans={Orph}",
+			selectedId, ip, result.RowsAffected, result.ActiveBlockRemoved, result.FirewallRuleRemoved, result.OrphanRulesRemoved);
+		return result;
+	}
+
+	private static string BuildRemovalMessage(BlocklistRemovalResultDto r, string ip, bool lastEnabledRemoved)
+	{
+		if (!lastEnabledRemoved)
+		{
+			return string.Format(CultureInfo.InvariantCulture,
+				"Removed BlockList row Id={0} for {1}; other enabled rows for this IP remain, so enforcement was left in place.",
+				r.SelectedId, ip);
+		}
+
+		string fw = r.FirewallRuleRemoved
+			? "removed the live firewall rule"
+			: "no matching live firewall rule was found to remove";
+		return string.Format(CultureInfo.InvariantCulture,
+			"Removed the last enabled BlockList row Id={0} for {1}; marked the ActiveBlock Removed and {2}{3}.",
+			r.SelectedId, ip, fw,
+			r.OrphanRulesRemoved > 0
+				? string.Format(CultureInfo.InvariantCulture, " ({0} orphan rule(s) cleaned)", r.OrphanRulesRemoved)
+				: string.Empty);
+	}
+
+	/// <summary>Removes every live RdpAudit firewall rule whose remote IP matches <paramref name="ip"/>
+	/// through the owning provider. Only RdpAudit-prefixed rules are scanned, so unrelated admin rules
+	/// are never touched. Records each action into the debug trace.</summary>
+	private async Task RemoveLiveFirewallForIpAsync(
+		string ip, FirewallOptions cfg, BlocklistRemovalResultDto result, Action<string> trace, CancellationToken ct)
+	{
+		string rulePrefix = NetshCommandBuilder.NormalizeRulePrefix(cfg.BlockRuleName);
+		IFirewallProvider? windows = FindProvider(FirewallProviderRouting.WindowsProviderId);
+		if (windows is null)
+		{
+			trace("Windows firewall provider not registered; skipping live rule removal.");
+			return;
+		}
+
+		FirewallScanResult scan = await _scanner.ScanRdpAuditBlockRulesAsync(rulePrefix, ct).ConfigureAwait(false);
+		if (!scan.Scannable)
+		{
+			trace("Firewall not scannable (" + (scan.Note ?? "no detail") + "); skipping live rule removal.");
+			return;
+		}
+
+		List<DiscoveredBlockRule> matching = scan.Rules
+			.Where(r => r.RemoteIps.Any(x => string.Equals(x, ip, StringComparison.OrdinalIgnoreCase)))
+			.ToList();
+		trace(string.Format(CultureInfo.InvariantCulture,
+			"Scanned firewall ({0}); {1} rule(s) match {2}.", scan.Backend, matching.Count, ip));
+
+		bool first = true;
+		foreach (DiscoveredBlockRule rule in matching)
+		{
+			ct.ThrowIfCancellationRequested();
+			FirewallActionResult action = await windows.UnblockAsync(ip, cfg.BlockRuleName, ct).ConfigureAwait(false);
+			if (action.Status is FirewallActionStatus.Success or FirewallActionStatus.NotFound)
+			{
+				if (first)
+				{
+					result.FirewallRuleRemoved = true;
+					first = false;
+				}
+				else
+				{
+					result.OrphanRulesRemoved++;
+				}
+
+				trace(string.Format(CultureInfo.InvariantCulture,
+					"Removed firewall rule {0} for {1} (status={2}).", rule.RuleName, ip, action.Status));
+			}
+			else
+			{
+				trace(string.Format(CultureInfo.InvariantCulture,
+					"Provider returned {0} removing rule {1} for {2}.", action.Status, rule.RuleName, ip));
+				throw new InvalidOperationException(
+					"Provider returned " + action.Status + " removing rule " + rule.RuleName + ".");
+			}
+		}
 	}
 
 	/// <summary>Builds the pure reconciliation report from the supplied DB rows by scanning every
