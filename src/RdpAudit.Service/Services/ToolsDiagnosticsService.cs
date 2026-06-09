@@ -326,6 +326,14 @@ public sealed class ToolsDiagnosticsService
 	private async Task<ToolProbeResultDto> RunPowerShellFirewallProbeAsync(CancellationToken ct)
 	{
 		const string toolName = "powershell Get-NetFirewallRule (JSON)";
+		// The exact backend command we run: the SAME locale-independent script the live scanner uses —
+		// it projects every inbound rule to an English-stable JSON object (Name/Group/Direction/Action/
+		// Enabled/…) and the parser filters by name prefix OR group=RdpAudit. The earlier probe label
+		// ("Get-NetFirewallRule -Direction Inbound -All | ConvertTo-Json") was misleading and the raw
+		// over-broad form returned [] on the operator's host; this surfaces the real script + parsed count.
+		const string backendCommand =
+			"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -OutputFormat Text -Command "
+			+ "\"<FirewallRulesJsonScript: per-inbound-rule JSON, filtered by name prefix OR group=RdpAudit>\"";
 		try
 		{
 			ExternalCommandResult result = await _runner.RunDirectAsync(
@@ -341,9 +349,29 @@ public sealed class ToolsDiagnosticsService
 				},
 				timeout: ProbeTimeout,
 				ct: ct).ConfigureAwait(false);
-			return ToolProbeResultMapper.Map(
-				result, toolName, "Get-NetFirewallRule -Direction Inbound -All | ConvertTo-Json", "PowerShellJson",
-				note: "Locale-independent firewall enumeration; the JSON is parsed by name prefix OR group=RdpAudit.");
+
+			// Parse the emitted JSON and report how many RdpAudit rules matched so the operator sees the
+			// scanner's actual finding (the root cause of the "[] returned" confusion) instead of just raw
+			// stdout. Tolerates single-object and array JSON via the shared parser.
+			int matched = -1;
+			if (!result.TimedOut && result.ExitCode == 0 && !string.IsNullOrWhiteSpace(result.StdOut))
+			{
+				IReadOnlyList<DiscoveredBlockRule> rules = PowerShellFirewallRuleParser.DiscoverRdpAuditBlockRules(
+					result.StdOut,
+					NetshCommandBuilder.DefaultRulePrefix,
+					NetshCommandBuilder.RdpAuditGroup);
+				matched = rules.Count;
+			}
+
+			string note = matched >= 0
+				? string.Format(
+					CultureInfo.InvariantCulture,
+					"Locale-independent firewall enumeration; parser matched {0} RdpAudit rule(s) by name prefix '{1}' OR group=RdpAudit.",
+					matched,
+					NetshCommandBuilder.DefaultRulePrefix)
+				: "Locale-independent firewall enumeration; the JSON is parsed by name prefix OR group=RdpAudit (no usable JSON returned by this run).";
+
+			return ToolProbeResultMapper.Map(result, toolName, backendCommand, "PowerShellJson", note: note);
 		}
 		catch (OperationCanceledException)
 		{

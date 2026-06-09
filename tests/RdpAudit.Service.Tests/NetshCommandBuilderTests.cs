@@ -103,14 +103,18 @@ public class NetshCommandBuilderTests
 		Assert.Equal("add", args[2]);
 		Assert.Equal("rule", args[3]);
 		Assert.Equal("name=RdpAudit-Block-203.0.113.10", args[4]);
-		Assert.Equal("group=RdpAudit", args[5]);
-		Assert.Equal("dir=in", args[6]);
-		Assert.Equal("action=block", args[7]);
-		Assert.Equal("remoteip=203.0.113.10", args[8]);
-		Assert.Equal("profile=any", args[9]);
-		Assert.Equal("enable=yes", args[10]);
-		Assert.Equal("protocol=any", args[11]);
+		Assert.Equal("dir=in", args[5]);
+		Assert.Equal("action=block", args[6]);
+		Assert.Equal("remoteip=203.0.113.10", args[7]);
+		Assert.Equal("profile=any", args[8]);
+		Assert.Equal("enable=yes", args[9]);
+		Assert.Equal("protocol=any", args[10]);
 		Assert.Contains(args, a => a.StartsWith("description=", StringComparison.Ordinal));
+
+		// netsh advfirewall firewall add rule rejects group=/grouping= (verified on a live host);
+		// the rule-name prefix is the identity handle instead. Group is stamped via the PowerShell path.
+		Assert.DoesNotContain(args, a => a.StartsWith("group=", StringComparison.OrdinalIgnoreCase));
+		Assert.DoesNotContain(args, a => a.StartsWith("grouping=", StringComparison.OrdinalIgnoreCase));
 	}
 
 	[Fact]
@@ -164,7 +168,7 @@ public class NetshCommandBuilderTests
 	}
 
 	[Fact]
-	public void BuildAddRuleArgs_AllInbound_StampsGroupAndProfileAndProtocolAny()
+	public void BuildAddRuleArgs_AllInbound_OmitsGroupAndUsesProfileAndProtocolAny()
 	{
 		IReadOnlyList<string> args = NetshCommandBuilder.BuildAddRuleArgs(
 			"RdpAudit-Block-203.0.113.10",
@@ -173,7 +177,8 @@ public class NetshCommandBuilderTests
 			FirewallBlockScope.AllInbound,
 			rdpPort: 0);
 
-		Assert.Contains("group=RdpAudit", args);
+		Assert.DoesNotContain(args, a => a.StartsWith("group=", StringComparison.OrdinalIgnoreCase));
+		Assert.DoesNotContain(args, a => a.StartsWith("grouping=", StringComparison.OrdinalIgnoreCase));
 		Assert.Contains("profile=any", args);
 		Assert.Contains("protocol=any", args);
 		Assert.DoesNotContain(args, a => a.StartsWith("localport=", StringComparison.Ordinal));
@@ -189,7 +194,8 @@ public class NetshCommandBuilderTests
 			FirewallBlockScope.RdpPortOnly,
 			rdpPort: 3390);
 
-		Assert.Contains("group=RdpAudit", args);
+		Assert.DoesNotContain(args, a => a.StartsWith("group=", StringComparison.OrdinalIgnoreCase));
+		Assert.DoesNotContain(args, a => a.StartsWith("grouping=", StringComparison.OrdinalIgnoreCase));
 		Assert.Contains("protocol=tcp", args);
 		Assert.Contains("localport=3390", args);
 		Assert.DoesNotContain("protocol=any", args);
@@ -203,6 +209,100 @@ public class NetshCommandBuilderTests
 	{
 		Assert.Throws<ArgumentOutOfRangeException>(() =>
 			NetshCommandBuilder.BuildAddRuleArgs(
+				"RdpAudit-Block-203.0.113.10",
+				"203.0.113.10",
+				"reason",
+				FirewallBlockScope.RdpPortOnly,
+				rdpPort));
+	}
+
+	[Fact]
+	public void BuildNewNetFirewallRuleScript_StampsGroupAndCoreParameters()
+	{
+		string script = NetshCommandBuilder.BuildNewNetFirewallRuleScript(
+			"RdpAudit-Block-203.0.113.10",
+			"203.0.113.10",
+			"reason",
+			FirewallBlockScope.AllInbound,
+			rdpPort: 0);
+
+		// Only the PowerShell New-NetFirewallRule path can stamp the firewall Group.
+		Assert.Contains("New-NetFirewallRule", script);
+		Assert.Contains("-Group 'RdpAudit'", script);
+		Assert.Contains("-Name 'RdpAudit-Block-203.0.113.10'", script);
+		Assert.Contains("-DisplayName 'RdpAudit-Block-203.0.113.10'", script);
+		Assert.Contains("-Direction Inbound", script);
+		Assert.Contains("-Action Block", script);
+		Assert.Contains("-Enabled True", script);
+		Assert.Contains("-RemoteAddress '203.0.113.10'", script);
+		// Idempotent pre-clean so re-applying never stacks rules.
+		Assert.Contains("Remove-NetFirewallRule", script);
+	}
+
+	[Fact]
+	public void BuildNewNetFirewallRuleScript_RdpPortOnly_AddsTcpAndLocalPort()
+	{
+		string script = NetshCommandBuilder.BuildNewNetFirewallRuleScript(
+			"RdpAudit-Block-203.0.113.10",
+			"203.0.113.10",
+			null,
+			FirewallBlockScope.RdpPortOnly,
+			rdpPort: 3390);
+
+		Assert.Contains("-Protocol TCP", script);
+		Assert.Contains("-LocalPort 3390", script);
+	}
+
+	[Fact]
+	public void PsLiteral_DoublesEmbeddedSingleQuotes()
+	{
+		// Single quotes inside a PowerShell single-quoted literal must be doubled so a value can
+		// never break out of the literal. This is the escaping guard the New-NetFirewallRule path
+		// relies on for every dynamic token.
+		Assert.Equal("'O''Brien said hi'", NetshCommandBuilder.PsLiteral("O'Brien said hi"));
+		Assert.Equal("''''", NetshCommandBuilder.PsLiteral("'"));
+		Assert.Equal("'plain'", NetshCommandBuilder.PsLiteral("plain"));
+	}
+
+	[Fact]
+	public void BuildNewNetFirewallRuleScript_SanitisesDescriptionShellMetacharacters()
+	{
+		string script = NetshCommandBuilder.BuildNewNetFirewallRuleScript(
+			"RdpAudit-Block-1.2.3.4",
+			"1.2.3.4",
+			"reason\r\nwith \"quotes\" ' | & < > injection",
+			FirewallBlockScope.AllInbound,
+			rdpPort: 0);
+
+		// The description is sanitised before it reaches the PowerShell literal. Isolate the
+		// emitted -Description literal and confirm no shell-significant character survived into it
+		// (the surrounding script legitimately contains a '|' in the idempotency pipeline, so we
+		// must assert on the description token specifically, not the whole script).
+		const string marker = "-Description '";
+		int start = script.IndexOf(marker, StringComparison.Ordinal);
+		Assert.True(start >= 0, "script must contain a -Description literal");
+		int valueStart = start + marker.Length;
+		int valueEnd = script.IndexOf('\'', valueStart);
+		Assert.True(valueEnd > valueStart, "description literal must be closed");
+		string descriptionLiteral = script[valueStart..valueEnd];
+
+		Assert.DoesNotContain('"', descriptionLiteral);
+		Assert.DoesNotContain('\r', descriptionLiteral);
+		Assert.DoesNotContain('\n', descriptionLiteral);
+		Assert.DoesNotContain('|', descriptionLiteral);
+		Assert.DoesNotContain('&', descriptionLiteral);
+		Assert.DoesNotContain('<', descriptionLiteral);
+		Assert.DoesNotContain('>', descriptionLiteral);
+	}
+
+	[Theory]
+	[InlineData(0)]
+	[InlineData(-1)]
+	[InlineData(65536)]
+	public void BuildNewNetFirewallRuleScript_RdpPortOnly_RejectsOutOfRangePort(int rdpPort)
+	{
+		Assert.Throws<ArgumentOutOfRangeException>(() =>
+			NetshCommandBuilder.BuildNewNetFirewallRuleScript(
 				"RdpAudit-Block-203.0.113.10",
 				"203.0.113.10",
 				"reason",

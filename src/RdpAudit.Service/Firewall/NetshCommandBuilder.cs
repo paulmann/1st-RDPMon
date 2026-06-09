@@ -34,13 +34,16 @@ public static class NetshCommandBuilder
 	/// <summary>Prefix used by every RdpAudit-owned rule, never touched on third-party rules.</summary>
 	public const string DefaultRulePrefix = "RdpAudit-Block";
 
-	/// <summary>Firewall group stamped on every RdpAudit-owned rule.</summary>
+	/// <summary>Firewall group stamped on every RdpAudit-owned rule created through the PowerShell
+	/// <c>New-NetFirewallRule</c> path.</summary>
 	/// <remarks>
-	/// Tagging rules with a stable <c>group=</c> lets operators (and our own verification /
-	/// diagnostics) enumerate every RdpAudit rule via <c>Get-NetFirewallRule -Group RdpAudit</c> or
-	/// <c>netsh advfirewall firewall show rule name=all</c> filtered on Grouping. Without this, the
-	/// operator-reported "Get-NetFirewallRule where Group contains RdpAudit returns no rules" is
-	/// expected even when rules exist, because netsh-added rules carry no group by default.
+	/// IMPORTANT: <c>netsh advfirewall firewall add rule</c> does NOT accept a <c>group=</c> (or
+	/// <c>grouping=</c>) argument — live Windows diagnostics confirmed both forms fail with
+	/// <c>"…is not a valid argument"</c>, which is what broke the earlier Tools Diag temp probe. The
+	/// netsh add path therefore relies solely on the deterministic <see cref="DefaultRulePrefix"/>
+	/// rule-name prefix as its identity handle. Only the PowerShell <c>New-NetFirewallRule -Group</c>
+	/// path stamps this Group, which is the supported way to make
+	/// <c>Get-NetFirewallRule -Group RdpAudit</c> enumerate our rules.
 	/// </remarks>
 	public const string RdpAuditGroup = "RdpAudit";
 
@@ -147,8 +150,7 @@ public static class NetshCommandBuilder
 	}
 
 	/// <summary>Builds the argument vector for an all-inbound <c>netsh advfirewall firewall add rule</c>.</summary>
-	/// <remarks>Convenience overload preserving the historical all-inbound behaviour with the
-	/// RdpAudit group now stamped on. Equivalent to
+	/// <remarks>Convenience overload preserving the historical all-inbound behaviour. Equivalent to
 	/// <see cref="BuildAddRuleArgs(string, string, string?, FirewallBlockScope, int)"/> with
 	/// <see cref="FirewallBlockScope.AllInbound"/>.</remarks>
 	public static IReadOnlyList<string> BuildAddRuleArgs(string ruleName, string ip, string? description) =>
@@ -162,9 +164,11 @@ public static class NetshCommandBuilder
 	/// <param name="rdpPort">Resolved RDP listener port; required (1..65535) when
 	/// <paramref name="scope"/> is <see cref="FirewallBlockScope.RdpPortOnly"/>. Never hardcoded.</param>
 	/// <remarks>
-	/// Every rule is stamped with <c>group=RdpAudit</c> so operators can enumerate RdpAudit rules by
-	/// Group. For <see cref="FirewallBlockScope.RdpPortOnly"/> the rule restricts to
-	/// <c>protocol=tcp</c> and the resolved <c>localport</c>; for
+	/// IMPORTANT: no <c>group=</c> / <c>grouping=</c> argument is emitted — netsh rejects both for
+	/// <c>add rule</c> (verified on a live host). Rule identity is carried by the deterministic
+	/// <paramref name="ruleName"/> prefix; the Group is stamped only via the PowerShell
+	/// <c>New-NetFirewallRule -Group</c> path. For <see cref="FirewallBlockScope.RdpPortOnly"/> the
+	/// rule restricts to <c>protocol=tcp</c> and the resolved <c>localport</c>; for
 	/// <see cref="FirewallBlockScope.AllInbound"/> it uses <c>protocol=any</c>.
 	/// </remarks>
 	public static IReadOnlyList<string> BuildAddRuleArgs(
@@ -177,11 +181,13 @@ public static class NetshCommandBuilder
 		ValidateRuleName(ruleName);
 		string canonicalIp = NormalizeIp(ip);
 
-		List<string> args = new(12)
+		// NOTE: deliberately NO "group="/"grouping=" — netsh advfirewall firewall add rule rejects
+		// both ("…is not a valid argument"). This was the root cause of the Tools Diag temp-probe
+		// failure. The rule-name prefix is the identity handle used for verify / cleanup.
+		List<string> args = new(11)
 		{
 			"advfirewall", "firewall", "add", "rule",
 			string.Format(CultureInfo.InvariantCulture, "name={0}", ruleName),
-			string.Format(CultureInfo.InvariantCulture, "group={0}", RdpAuditGroup),
 			"dir=in",
 			"action=block",
 			string.Format(CultureInfo.InvariantCulture, "remoteip={0}", canonicalIp),
@@ -248,6 +254,75 @@ public static class NetshCommandBuilder
 	/// pass; the caller filters the parsed result to the RdpAudit rule-name prefix.</summary>
 	public static IReadOnlyList<string> BuildShowAllRulesArgs() =>
 		new List<string> { "advfirewall", "firewall", "show", "rule", "name=all", "verbose" };
+
+	/// <summary>Builds the PowerShell <c>New-NetFirewallRule</c> script that creates an enabled inbound
+	/// block rule AND stamps <c>-Group RdpAudit</c> so the rule is enumerable via
+	/// <c>Get-NetFirewallRule -Group RdpAudit</c>. This is the supported way to set the firewall Group
+	/// (netsh's <c>add rule</c> cannot). Every dynamic value (rule name, IP, port) is validated and
+	/// emitted as a single-quoted PowerShell literal — single quotes are doubled so no operator value
+	/// can break out of the literal. The script returns the created rule's Name on success.</summary>
+	/// <param name="ruleName">Validated per-IP rule name (also used as DisplayName).</param>
+	/// <param name="ip">Attacker IP; re-validated and canonicalised here.</param>
+	/// <param name="description">Optional audit description; sanitised before use.</param>
+	/// <param name="scope">RDP-port-only or all-inbound. Drives the protocol / port parameters.</param>
+	/// <param name="rdpPort">Resolved RDP listener port; required (1..65535) for
+	/// <see cref="FirewallBlockScope.RdpPortOnly"/>.</param>
+	public static string BuildNewNetFirewallRuleScript(
+		string ruleName,
+		string ip,
+		string? description,
+		FirewallBlockScope scope,
+		int rdpPort)
+	{
+		ValidateRuleName(ruleName);
+		string canonicalIp = NormalizeIp(ip);
+
+		if (scope == FirewallBlockScope.RdpPortOnly && (rdpPort < 1 || rdpPort > 65535))
+		{
+			throw new ArgumentOutOfRangeException(
+				nameof(rdpPort),
+				rdpPort,
+				"RdpPortOnly scope requires a resolved RDP listener port in range 1..65535.");
+		}
+
+		StringBuilder sb = new(256);
+		sb.Append("$ErrorActionPreference='Stop';");
+		// Idempotency: remove any pre-existing rule with the same deterministic name first.
+		sb.Append("Get-NetFirewallRule -Name ").Append(PsLiteral(ruleName))
+			.Append(" -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue;");
+		sb.Append("$r=New-NetFirewallRule");
+		sb.Append(" -Name ").Append(PsLiteral(ruleName));
+		sb.Append(" -DisplayName ").Append(PsLiteral(ruleName));
+		sb.Append(" -Group ").Append(PsLiteral(RdpAuditGroup));
+		sb.Append(" -Direction Inbound -Action Block -Enabled True -Profile Any");
+		sb.Append(" -RemoteAddress ").Append(PsLiteral(canonicalIp));
+
+		if (scope == FirewallBlockScope.RdpPortOnly)
+		{
+			sb.Append(" -Protocol TCP -LocalPort ")
+				.Append(rdpPort.ToString(CultureInfo.InvariantCulture));
+		}
+
+		string safeDescription = SanitizeDescription(description);
+		if (safeDescription.Length > 0)
+		{
+			sb.Append(" -Description ").Append(PsLiteral(safeDescription));
+		}
+
+		sb.Append(';');
+		// Emit the created rule's Name so the runner can confirm what landed.
+		sb.Append("$r.Name");
+		return sb.ToString();
+	}
+
+	/// <summary>Quotes a value as a single-quoted PowerShell literal, doubling embedded single quotes.
+	/// Inside a single-quoted PowerShell string no escape sequences are interpreted, so doubling the
+	/// quote is the only escape needed and there is no interpolation surface.</summary>
+	internal static string PsLiteral(string value)
+	{
+		value ??= string.Empty;
+		return "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+	}
 
 	/// <summary>Validates a rule name against the conservative ASCII set we accept.</summary>
 	private static void ValidateRuleName(string ruleName)

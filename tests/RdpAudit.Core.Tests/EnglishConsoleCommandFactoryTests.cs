@@ -119,6 +119,41 @@ public class EnglishConsoleCommandFactoryTests
 	}
 
 	[Fact]
+	public void Build_NetshShowNamedRuleVerbose_EmitsExpectedShape()
+	{
+		EnglishConsoleSpawn spawn = EnglishConsoleCommandFactory.Build(
+			TrustedEnglishConsoleTool.NetshShowNamedRuleVerbose,
+			new EnglishConsoleArgs { RuleName = "RdpAudit-Block-203.0.113.10" });
+
+		Assert.Equal(
+			"/d /c \"chcp 437 >nul & netsh.exe advfirewall firewall show rule name=\"RdpAudit-Block-203.0.113.10\" verbose\"",
+			spawn.Arguments);
+		Assert.Equal(
+			"netsh advfirewall firewall show rule name=RdpAudit-Block-203.0.113.10 verbose",
+			spawn.CommandLabel);
+	}
+
+	[Theory]
+	[InlineData("")]
+	[InlineData("   ")]
+	[InlineData("Rule;Name")]
+	[InlineData("\" & calc.exe & \"")]
+	[InlineData("name & del")]
+	public void Build_NetshShowNamedRuleVerbose_RejectsUnsafeRuleName(string injection)
+	{
+		Assert.Throws<ArgumentException>(() => EnglishConsoleCommandFactory.Build(
+			TrustedEnglishConsoleTool.NetshShowNamedRuleVerbose,
+			new EnglishConsoleArgs { RuleName = injection }));
+	}
+
+	[Fact]
+	public void Build_NetshShowNamedRuleVerbose_RequiresRuleName()
+	{
+		Assert.Throws<ArgumentException>(() => EnglishConsoleCommandFactory.Build(
+			TrustedEnglishConsoleTool.NetshShowNamedRuleVerbose));
+	}
+
+	[Fact]
 	public void Build_UnknownTool_Throws()
 	{
 		Assert.Throws<ArgumentOutOfRangeException>(
@@ -135,9 +170,14 @@ public class EnglishConsoleCommandFactoryTests
 				continue;
 			}
 
-			EnglishConsoleArgs? args = tool == TrustedEnglishConsoleTool.AuditpolGetSubcategoryCsv
-				? new EnglishConsoleArgs { SubcategoryGuid = "{00000000-0000-0000-0000-000000000000}" }
-				: null;
+			EnglishConsoleArgs? args = tool switch
+			{
+				TrustedEnglishConsoleTool.AuditpolGetSubcategoryCsv =>
+					new EnglishConsoleArgs { SubcategoryGuid = "{00000000-0000-0000-0000-000000000000}" },
+				TrustedEnglishConsoleTool.NetshShowNamedRuleVerbose =>
+					new EnglishConsoleArgs { RuleName = "RdpAudit-Block-203.0.113.10" },
+				_ => null,
+			};
 
 			EnglishConsoleSpawn spawn = EnglishConsoleCommandFactory.Build(tool, args);
 

@@ -11,10 +11,12 @@
 
 using System.Globalization;
 using System.Net;
+using System.Runtime.Versioning;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RdpAudit.Core.Config;
 using RdpAudit.Core.Firewall;
+using RdpAudit.Core.Util;
 
 namespace RdpAudit.Service.Firewall;
 
@@ -31,15 +33,25 @@ namespace RdpAudit.Service.Firewall;
 /// </remarks>
 public sealed class WindowsFirewallProvider : IFirewallProvider
 {
+	/// <summary>Hard timeout for the PowerShell New-NetFirewallRule create path.</summary>
+	private static readonly TimeSpan PowerShellCreateTimeout = TimeSpan.FromSeconds(20);
+
 	private readonly ILogger<WindowsFirewallProvider> _logger;
 	private readonly IOptionsMonitor<RdpAuditOptions> _options;
 	private readonly INetshRunner _runner;
 	private readonly IRdpPortProvider _portProvider;
 
+	/// <summary>Optional PowerShell runner used to create rules via <c>New-NetFirewallRule -Group
+	/// RdpAudit</c> so the firewall Group is actually stamped (netsh's <c>add rule</c> cannot set it).
+	/// When null the provider creates rules via the netsh add path (group-free) instead. Tests that
+	/// inject only the netsh runner exercise the netsh path deterministically.</summary>
+	private readonly IExternalCommandRunner? _powerShellRunner;
+
+	[SupportedOSPlatform("windows")]
 	public WindowsFirewallProvider(
 		ILogger<WindowsFirewallProvider> logger,
 		IOptionsMonitor<RdpAuditOptions> options)
-		: this(logger, options, new NetshRunner(), new RegistryRdpPortProvider())
+		: this(logger, options, new NetshRunner(), new RegistryRdpPortProvider(), new ExternalCommandRunner())
 	{
 	}
 
@@ -47,7 +59,8 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 		ILogger<WindowsFirewallProvider> logger,
 		IOptionsMonitor<RdpAuditOptions> options,
 		INetshRunner runner,
-		IRdpPortProvider portProvider)
+		IRdpPortProvider portProvider,
+		IExternalCommandRunner? powerShellRunner = null)
 	{
 		ArgumentNullException.ThrowIfNull(logger);
 		ArgumentNullException.ThrowIfNull(options);
@@ -57,6 +70,7 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 		_options = options;
 		_runner = runner;
 		_portProvider = portProvider;
+		_powerShellRunner = powerShellRunner;
 	}
 
 	public string ProviderId => "Windows";
@@ -187,27 +201,47 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 		// the firewall store. Errors here are non-fatal — the add below is the real success.
 		await _runner.RunAsync(NetshCommandBuilder.BuildDeleteRuleArgs(ruleName), ct).ConfigureAwait(false);
 
-		NetshResult addResult = await _runner.RunAsync(addArgs, ct).ConfigureAwait(false);
-		BackendCommandAttempt addAttempt = BuildAttempt(addResult, addArgs);
+		// Create the rule. Prefer the PowerShell New-NetFirewallRule path when a PowerShell runner is
+		// available, because only it can stamp -Group RdpAudit (netsh's add rule rejects group=). When
+		// the PowerShell path is unavailable or fails, fall back to the group-free netsh add.
+		BackendCommandAttempt addAttempt;
+		bool createdOk;
+		BackendCommandAttempt? powerShellAttempt = await TryPowerShellCreateAsync(
+			ruleName, canonicalIp, description, scope, rdpPort, ct).ConfigureAwait(false);
 
-		if (!addResult.Success)
+		if (powerShellAttempt is { Success: true })
 		{
-			_logger.LogWarning(
-				"Firewall block failed for {Ip}: exit={Exit} stderr={StdErr}",
-				canonicalIp,
-				addResult.ExitCode,
-				SanitizeForLog(addResult.StdErr));
-			return new FirewallActionResult
+			addAttempt = powerShellAttempt;
+			createdOk = true;
+		}
+		else
+		{
+			NetshResult addResult = await _runner.RunAsync(addArgs, ct).ConfigureAwait(false);
+			addAttempt = BuildAttempt(addResult, addArgs);
+			createdOk = addResult.Success;
+
+			if (!createdOk)
 			{
-				Status = FirewallActionStatus.Unavailable,
-				ProviderId = ProviderId,
-				RuleId = ruleName,
-				RuleHandle = ruleName,
-				BackendAttempt = addAttempt,
-				VerifierReason = "netsh add rule exited non-zero before verification.",
-				// When netsh exits non-zero with empty stderr, the failure text is in stdout — surface it.
-				Message = BuildBackendFailureMessage("netsh add rule", addResult),
-			};
+				_logger.LogWarning(
+					"Firewall block failed for {Ip}: exit={Exit} stderr={StdErr} (powerShellTried={PsTried})",
+					canonicalIp,
+					addResult.ExitCode,
+					SanitizeForLog(addResult.StdErr),
+					powerShellAttempt is not null);
+				return new FirewallActionResult
+				{
+					Status = FirewallActionStatus.Unavailable,
+					ProviderId = ProviderId,
+					RuleId = ruleName,
+					RuleHandle = ruleName,
+					BackendAttempt = addAttempt,
+					VerifierReason = powerShellAttempt is null
+						? "netsh add rule exited non-zero before verification."
+						: "PowerShell New-NetFirewallRule failed and the netsh add fallback also exited non-zero.",
+					// When netsh exits non-zero with empty stderr, the failure text is in stdout — surface it.
+					Message = BuildBackendFailureMessage("netsh add rule", addResult),
+				};
+			}
 		}
 
 		// Verification: a non-zero exit is a clear failure, but netsh (or a managing third-party
@@ -260,6 +294,78 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 				: "Verification disabled by configuration.",
 			Message = cfg.VerifyAfterBlock ? "Block rule installed and verified." : "Block rule installed.",
 		};
+	}
+
+	/// <summary>Attempts to create the block rule via PowerShell <c>New-NetFirewallRule -Group
+	/// RdpAudit</c> so the firewall Group is stamped. Returns null when no PowerShell runner is wired
+	/// (the caller then uses the netsh add path); returns a populated <see cref="BackendCommandAttempt"/>
+	/// describing the exact command, exit code, duration and bounded previews otherwise. A non-success
+	/// attempt is non-fatal — the caller falls back to netsh.</summary>
+	private async Task<BackendCommandAttempt?> TryPowerShellCreateAsync(
+		string ruleName,
+		string canonicalIp,
+		string? description,
+		FirewallBlockScope scope,
+		int rdpPort,
+		CancellationToken ct)
+	{
+		if (_powerShellRunner is null)
+		{
+			return null;
+		}
+
+		string script;
+		try
+		{
+			script = NetshCommandBuilder.BuildNewNetFirewallRuleScript(ruleName, canonicalIp, description, scope, rdpPort);
+		}
+		catch (ArgumentException ex)
+		{
+			_logger.LogWarning(ex, "Could not build New-NetFirewallRule script for {Ip}; using netsh fallback", canonicalIp);
+			return null;
+		}
+
+		IReadOnlyList<string> psArgs = new[]
+		{
+			"-NoProfile",
+			"-NonInteractive",
+			"-ExecutionPolicy", "Bypass",
+			"-OutputFormat", "Text",
+			"-Command", script,
+		};
+
+		ExternalCommandResult result;
+		try
+		{
+			result = await _powerShellRunner.RunDirectAsync(
+				commandLabel: "powershell New-NetFirewallRule -Group RdpAudit",
+				executable: "powershell.exe",
+				arguments: psArgs,
+				timeout: PowerShellCreateTimeout,
+				ct: ct).ConfigureAwait(false);
+		}
+		catch (OperationCanceledException)
+		{
+			throw;
+		}
+		catch (Exception ex)
+		{
+			_logger.LogWarning(ex, "PowerShell New-NetFirewallRule raised an exception for {Ip}; using netsh fallback", canonicalIp);
+			return null;
+		}
+
+		return new BackendCommandAttempt(
+			CommandLabel: "New-NetFirewallRule -Group RdpAudit",
+			Executable: "powershell.exe",
+			Arguments: "New-NetFirewallRule -Name " + ruleName + " -Group " + NetshCommandBuilder.RdpAuditGroup
+				+ " -Direction Inbound -Action Block -Enabled True -Profile Any -RemoteAddress " + canonicalIp,
+			RunnerMode: BackendRunnerMode.PowerShellJson,
+			ExitCode: result.TimedOut ? -1 : result.ExitCode,
+			TimedOut: result.TimedOut,
+			DurationMs: (long)result.Duration.TotalMilliseconds,
+			StdoutPreview: BackendCommandAttempt.BuildPreview(result.StdOut),
+			StderrPreview: BackendCommandAttempt.BuildPreview(result.StdErr),
+			ScannerBackend: "NewNetFirewallRule");
 	}
 
 	/// <summary>Builds a <see cref="BackendCommandAttempt"/> from a netsh outcome, filling in the

@@ -83,19 +83,44 @@ public class NetshRunnerRoutingTests
 	}
 
 	[Fact]
-	public async Task ShowRuleByName_UsesDirectArgumentList()
+	public async Task ShowRuleByName_GoesThroughEnglishConsole()
 	{
-		// Show-by-name is used for unblock-list enumeration. Its parsed tokens ("Rule Name:",
-		// "RemoteIP:") are already locale-stable in netsh's verbose output, so the runner keeps
-		// direct execution and avoids the cmd /c wrapping.
+		// Single-rule "show rule name=<X> verbose" is the post-block verification query. The
+		// NetshRuleScanner matches English field labels ("Rule Name:", "Enabled:", "Direction:",
+		// "Action:"); on a localised host (e.g. ru-RU) direct netsh emits translated / mojibake
+		// labels the scanner cannot match — the operator-reported "rule created but verification
+		// fails" symptom. Routing it through the English console (chcp 437) keeps the keys in Latin
+		// script regardless of host UI culture.
 		FakeExternalCommandRunner fake = new()
 		{
-			NextResult = MakeResult("netsh advfirewall firewall show rule name=...", englishConsole: false),
+			NextResult = MakeResult("netsh advfirewall firewall show rule name=...", englishConsole: true),
 		};
 		NetshRunner sut = new(fake, TimeSpan.FromSeconds(5));
 
 		await sut.RunAsync(
 			NetshCommandBuilder.BuildShowRuleArgs("RdpAudit-Block-1.2.3.4"),
+			CancellationToken.None);
+
+		Assert.Equal(1, fake.EnglishConsoleCalls);
+		Assert.Equal(0, fake.DirectCalls);
+		Assert.Equal(TrustedEnglishConsoleTool.NetshShowNamedRuleVerbose, fake.LastEnglishConsoleTool);
+		Assert.Equal("RdpAudit-Block-1.2.3.4", fake.LastEnglishConsoleArgs?.RuleName);
+	}
+
+	[Fact]
+	public async Task ShowAllRulesByName_UsesDirectArgumentList()
+	{
+		// The "name=all" reconciliation dump is NOT a single-rule verification; it is routed by its
+		// own callers through the dedicated NetshShowAllRulesVerbose tool, so the runner must leave it
+		// on the direct path rather than treating it as a single named rule.
+		FakeExternalCommandRunner fake = new()
+		{
+			NextResult = MakeResult("netsh advfirewall firewall show rule name=all", englishConsole: false),
+		};
+		NetshRunner sut = new(fake, TimeSpan.FromSeconds(5));
+
+		await sut.RunAsync(
+			NetshCommandBuilder.BuildShowAllRulesArgs(),
 			CancellationToken.None);
 
 		Assert.Equal(0, fake.EnglishConsoleCalls);
@@ -148,6 +173,7 @@ public class NetshRunnerRoutingTests
 		public int EnglishConsoleCalls { get; private set; }
 		public int DirectCalls { get; private set; }
 		public TrustedEnglishConsoleTool LastEnglishConsoleTool { get; private set; }
+		public EnglishConsoleArgs? LastEnglishConsoleArgs { get; private set; }
 		public string? LastDirectExecutable { get; private set; }
 		public IReadOnlyList<string>? LastDirectArguments { get; private set; }
 		public ExternalCommandResult NextResult { get; set; } = new(
@@ -168,6 +194,7 @@ public class NetshRunnerRoutingTests
 		{
 			EnglishConsoleCalls++;
 			LastEnglishConsoleTool = tool;
+			LastEnglishConsoleArgs = args;
 			return Task.FromResult(NextResult);
 		}
 
