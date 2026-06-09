@@ -266,6 +266,19 @@ public sealed class AbuseIpDbPage : TabPage
 			_credentialLabel.Text = status.CredentialPresent
 				? "Credential: Configured (encrypted at rest)"
 				: "Credential: Not configured";
+
+			// The raw key is never returned by the service (DPAPI-protected, never echoed). Show a
+			// masked placeholder when a credential exists so the operator sees the key is restored
+			// after a Configurator restart instead of an empty box that looks unconfigured. Saving
+			// with the placeholder unchanged leaves the stored key intact (see IsMaskedPlaceholder).
+			if (status.CredentialPresent && string.IsNullOrEmpty(_apiKeyInput.Text))
+			{
+				_apiKeyInput.Text = MaskedPlaceholder;
+			}
+			else if (!status.CredentialPresent && IsMaskedPlaceholder(_apiKeyInput.Text))
+			{
+				_apiKeyInput.Clear();
+			}
 			_endpointLabel.Text = "Endpoint: " + status.EndpointUrl;
 			_countersLabel.Text = string.Format(CultureInfo.InvariantCulture,
 				"Reports: {0} total / {1} hour / {2} day (limits: {3}/h, {4}/d, dedup {5}min)",
@@ -479,6 +492,9 @@ public sealed class AbuseIpDbPage : TabPage
 		}
 	}
 
+	/// <summary>Sentinel shown in the key box when a credential is configured but cannot be echoed.</summary>
+	private const string MaskedPlaceholder = "***configured***";
+
 	private static bool IsMaskedPlaceholder(string value) =>
-		string.Equals(value, "***configured***", StringComparison.Ordinal);
+		string.Equals(value, MaskedPlaceholder, StringComparison.Ordinal);
 }
