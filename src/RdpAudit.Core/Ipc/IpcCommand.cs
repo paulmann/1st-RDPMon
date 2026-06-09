@@ -141,4 +141,17 @@ public enum IpcCommand
 	/// <summary>Returns the most recent AbuseIPDB report-log rows (newest first), bounded by a
 	/// server-clamped limit, for the Configurator's report-log grid. Never returns the API key.</summary>
 	ListAbuseIpDbReportLog = 51,
+
+	// --- v1.2.9 Tools Diag tab (append-only). ---
+
+	/// <summary>Runs the read-only Tools Diag probe set (qwinsta / quser / netsh show rule / show
+	/// allprofiles / command resolution / PowerShell firewall probe / RDP port read) through the
+	/// English-command runner and returns each probe's full runner metadata plus a copyable report.
+	/// Never creates or deletes firewall rules.</summary>
+	RunToolsDiagnostics = 52,
+
+	/// <summary>Runs the explicit, user-triggered temporary-firewall-rule probe for a supplied test IP:
+	/// create a temporary block rule, verify it landed, then clean it up — reporting each step's exact
+	/// command, exit code, stdout/stderr, rule name, rule handle and scanner backend.</summary>
+	RunTemporaryFirewallRuleProbe = 53,
 }

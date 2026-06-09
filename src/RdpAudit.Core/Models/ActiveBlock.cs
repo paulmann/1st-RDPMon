@@ -45,4 +45,32 @@ public sealed class ActiveBlock
 
 	/// <summary>Last provider error, when <see cref="Status"/> is <see cref="ActiveBlockStatus.Failed"/>.</summary>
 	public string? LastError { get; set; }
+
+	/// <summary>UTC timestamp of the most recent block / repair attempt, regardless of outcome.</summary>
+	public DateTime? LastAttemptUtc { get; set; }
+
+	/// <summary>Backend command line of the most recent block / verify attempt (e.g. the netsh argument
+	/// vector), for operator diagnostics. Never contains secret material.</summary>
+	public string? BackendCommand { get; set; }
+
+	/// <summary>Bounded, control-character-flattened stdout preview of the most recent backend attempt.</summary>
+	public string? BackendStdoutPreview { get; set; }
+
+	/// <summary>Bounded, control-character-flattened stderr preview of the most recent backend attempt.</summary>
+	public string? BackendStderrPreview { get; set; }
+
+	/// <summary>Process exit code of the most recent backend attempt; null when no attempt was captured.</summary>
+	public int? ExitCode { get; set; }
+
+	/// <summary>True when the most recent backend attempt hit its hard timeout.</summary>
+	public bool? TimedOut { get; set; }
+
+	/// <summary>Wall-clock duration in milliseconds of the most recent backend attempt.</summary>
+	public long? DurationMs { get; set; }
+
+	/// <summary>Scanner / runner backend used for the most recent attempt (e.g. NetshText, PowerShellJson).</summary>
+	public string? ScannerBackend { get; set; }
+
+	/// <summary>Human-readable reason the post-block verifier reached its verdict on the most recent attempt.</summary>
+	public string? VerifierReason { get; set; }
 }

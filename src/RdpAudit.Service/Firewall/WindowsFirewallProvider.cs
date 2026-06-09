@@ -188,6 +188,7 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 		await _runner.RunAsync(NetshCommandBuilder.BuildDeleteRuleArgs(ruleName), ct).ConfigureAwait(false);
 
 		NetshResult addResult = await _runner.RunAsync(addArgs, ct).ConfigureAwait(false);
+		BackendCommandAttempt addAttempt = BuildAttempt(addResult, addArgs);
 
 		if (!addResult.Success)
 		{
@@ -201,8 +202,11 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 				Status = FirewallActionStatus.Unavailable,
 				ProviderId = ProviderId,
 				RuleId = ruleName,
-				Message = string.Format(CultureInfo.InvariantCulture,
-					"netsh add rule returned exit={0}.", addResult.ExitCode),
+				RuleHandle = ruleName,
+				BackendAttempt = addAttempt,
+				VerifierReason = "netsh add rule exited non-zero before verification.",
+				// When netsh exits non-zero with empty stderr, the failure text is in stdout — surface it.
+				Message = BuildBackendFailureMessage("netsh add rule", addResult),
 			};
 		}
 
@@ -211,9 +215,8 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 		// named rule and confirm an enabled inbound block rule exists before declaring success.
 		if (cfg.VerifyAfterBlock)
 		{
-			NetshResult verify = await _runner.RunAsync(
-				NetshCommandBuilder.BuildShowRuleArgs(ruleName),
-				ct).ConfigureAwait(false);
+			IReadOnlyList<string> showArgs = NetshCommandBuilder.BuildShowRuleArgs(ruleName);
+			NetshResult verify = await _runner.RunAsync(showArgs, ct).ConfigureAwait(false);
 
 			bool confirmed = verify.Success
 				&& NetshRuleScanner.ContainsEnabledInboundBlockRule(verify.StdOut);
@@ -223,11 +226,17 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 					"Firewall block could not be verified for {Ip}: rule {RuleName} not found after add (a managing third-party firewall may have rejected the write)",
 					canonicalIp,
 					ruleName);
+				string verifierReason = verify.Success
+					? "Verification query succeeded but no enabled inbound block rule was found in the store."
+					: string.Format(CultureInfo.InvariantCulture, "Verification query exited {0}.", verify.ExitCode);
 				return new FirewallActionResult
 				{
 					Status = FirewallActionStatus.Unavailable,
 					ProviderId = ProviderId,
 					RuleId = ruleName,
+					RuleHandle = ruleName,
+					BackendAttempt = BuildAttempt(verify, showArgs),
+					VerifierReason = verifierReason,
 					Message = "Block rule reported success but could not be verified in the firewall store; a managing third-party firewall may have rejected it.",
 				};
 			}
@@ -244,8 +253,33 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 			Status = FirewallActionStatus.Success,
 			ProviderId = ProviderId,
 			RuleId = ruleName,
+			RuleHandle = ruleName,
+			BackendAttempt = addAttempt,
+			VerifierReason = cfg.VerifyAfterBlock
+				? "Enabled inbound block rule confirmed in the firewall store."
+				: "Verification disabled by configuration.",
 			Message = cfg.VerifyAfterBlock ? "Block rule installed and verified." : "Block rule installed.",
 		};
+	}
+
+	/// <summary>Builds a <see cref="BackendCommandAttempt"/> from a netsh outcome, filling in the
+	/// argument line the provider knows about (the runner does not echo it back).</summary>
+	private static BackendCommandAttempt BuildAttempt(NetshResult result, IReadOnlyList<string> args)
+	{
+		BackendCommandAttempt baseAttempt = result.ToBackendAttempt();
+		return baseAttempt with { Arguments = string.Join(' ', args) };
+	}
+
+	/// <summary>Builds the operator-facing failure message for a non-zero netsh exit. When stderr is
+	/// empty the stdout text is the only failure signal, so it is folded into the message.</summary>
+	private static string BuildBackendFailureMessage(string action, NetshResult result)
+	{
+		string stderr = result.StdErr?.Trim() ?? string.Empty;
+		string detail = stderr.Length > 0
+			? stderr
+			: BackendCommandAttempt.BuildPreview(result.StdOut, 240);
+		string baseMsg = string.Format(CultureInfo.InvariantCulture, "{0} returned exit={1}.", action, result.ExitCode);
+		return detail.Length > 0 ? baseMsg + " " + detail : baseMsg;
 	}
 
 	public async Task<FirewallActionResult> UnblockAsync(string ip, string ruleName, CancellationToken ct)

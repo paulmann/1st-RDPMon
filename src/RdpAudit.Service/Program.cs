@@ -207,6 +207,7 @@ public static class Program
 			services.AddSingleton<IFirewallRuleScanner, UnsupportedFirewallRuleScanner>();
 		}
 		services.AddSingleton<EnforcementReconciliationService>();
+		services.AddSingleton<ToolsDiagnosticsService>();
 		if (OperatingSystem.IsWindows())
 		{
 			services.AddSingleton<RdpSessionManager>();

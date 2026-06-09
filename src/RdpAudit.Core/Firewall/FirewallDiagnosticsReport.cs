@@ -63,12 +63,52 @@ public sealed record FirewallDiagnosticsInput(
 }
 
 /// <summary>One per-IP reconciled enforcement line for the diagnostics report.</summary>
+/// <remarks>The backend-detail members are optional (init-only) so existing positional callers keep
+/// compiling; when populated they let the report show exactly what the last block attempt ran instead
+/// of an opaque "Failed / Failed".</remarks>
 public sealed record ReconciledEnforcementLine(
 	string Ip,
 	string Status,
 	string Confidence,
 	string? EnforcementObjectId,
-	string RecommendedAction);
+	string RecommendedAction)
+{
+	/// <summary>Last provider error for this IP, when the most recent attempt failed.</summary>
+	public string? LastError { get; init; }
+
+	/// <summary>UTC timestamp of the most recent block / repair attempt for this IP.</summary>
+	public DateTime? LastAttemptUtc { get; init; }
+
+	/// <summary>Backend command line of the most recent attempt (e.g. the netsh argument vector).</summary>
+	public string? BackendCommand { get; init; }
+
+	/// <summary>Bounded stdout preview of the most recent backend attempt.</summary>
+	public string? BackendStdoutPreview { get; init; }
+
+	/// <summary>Bounded stderr preview of the most recent backend attempt.</summary>
+	public string? BackendStderrPreview { get; init; }
+
+	/// <summary>Process exit code of the most recent backend attempt; null when none captured.</summary>
+	public int? ExitCode { get; init; }
+
+	/// <summary>True when the most recent backend attempt hit its hard timeout.</summary>
+	public bool? TimedOut { get; init; }
+
+	/// <summary>Wall-clock duration in milliseconds of the most recent backend attempt.</summary>
+	public long? DurationMs { get; init; }
+
+	/// <summary>Rule name created / verified by the most recent attempt.</summary>
+	public string? RuleName { get; init; }
+
+	/// <summary>Backend rule handle of the most recent attempt.</summary>
+	public string? RuleHandle { get; init; }
+
+	/// <summary>Scanner / runner backend used for the most recent attempt (e.g. NetshText).</summary>
+	public string? ScannerBackend { get; init; }
+
+	/// <summary>Human-readable reason the verifier reached its verdict on the most recent attempt.</summary>
+	public string? VerifierReason { get; init; }
+}
 
 /// <summary>Pure formatter for the Copy firewall diagnostics block.</summary>
 public static class FirewallDiagnosticsReportBuilder
@@ -220,6 +260,7 @@ public static class FirewallDiagnosticsReportBuilder
 				}
 
 				sb.Append(" — ").AppendLine(line.RecommendedAction);
+				AppendBackendDetail(sb, line);
 			}
 		}
 
@@ -234,6 +275,75 @@ public static class FirewallDiagnosticsReportBuilder
 		}
 
 		return sb.ToString();
+	}
+
+	/// <summary>Appends the per-attempt backend detail under a reconciled line so a failed IP shows the
+	/// exact command, exit code, rule, scanner backend and error instead of a bare "Failed / Failed".</summary>
+	private static void AppendBackendDetail(StringBuilder sb, ReconciledEnforcementLine line)
+	{
+		if (!string.IsNullOrEmpty(line.LastError))
+		{
+			sb.Append("      LastError: ").AppendLine(line.LastError);
+		}
+
+		if (line.LastAttemptUtc is { } attempt)
+		{
+			sb.Append("      LastAttemptUtc: ")
+				.AppendLine(attempt.ToString("u", CultureInfo.InvariantCulture));
+		}
+
+		if (line.ExitCode is { } exit)
+		{
+			sb.Append("      ExitCode: ").Append(exit.ToString(CultureInfo.InvariantCulture));
+			if (line.TimedOut == true)
+			{
+				sb.Append(" (timed-out)");
+			}
+
+			if (line.DurationMs is { } ms)
+			{
+				sb.Append(" durationMs=").Append(ms.ToString(CultureInfo.InvariantCulture));
+			}
+
+			sb.AppendLine();
+		}
+
+		if (!string.IsNullOrEmpty(line.RuleName) || !string.IsNullOrEmpty(line.RuleHandle))
+		{
+			sb.Append("      Rule: ").Append(line.RuleName ?? "(none)");
+			if (!string.IsNullOrEmpty(line.RuleHandle)
+				&& !string.Equals(line.RuleHandle, line.RuleName, StringComparison.Ordinal))
+			{
+				sb.Append(" handle=").Append(line.RuleHandle);
+			}
+
+			sb.AppendLine();
+		}
+
+		if (!string.IsNullOrEmpty(line.ScannerBackend))
+		{
+			sb.Append("      ScannerBackend: ").AppendLine(line.ScannerBackend);
+		}
+
+		if (!string.IsNullOrEmpty(line.VerifierReason))
+		{
+			sb.Append("      VerifierReason: ").AppendLine(line.VerifierReason);
+		}
+
+		if (!string.IsNullOrEmpty(line.BackendCommand))
+		{
+			sb.Append("      BackendCommand: ").AppendLine(line.BackendCommand);
+		}
+
+		if (!string.IsNullOrEmpty(line.BackendStdoutPreview))
+		{
+			sb.Append("      stdout: ").AppendLine(line.BackendStdoutPreview);
+		}
+
+		if (!string.IsNullOrEmpty(line.BackendStderrPreview))
+		{
+			sb.Append("      stderr: ").AppendLine(line.BackendStderrPreview);
+		}
 	}
 
 	private static string DescribeScannerBackend(string backend) => backend switch

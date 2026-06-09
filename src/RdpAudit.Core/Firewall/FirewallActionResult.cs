@@ -34,6 +34,17 @@ public sealed class FirewallActionResult
 	/// <summary>Concrete rule identifier created or removed by the provider, when applicable.</summary>
 	public string? RuleId { get; init; }
 
+	/// <summary>Backend handle / object id of the created rule (e.g. netsh rule name or CIM instance id),
+	/// distinct from the logical <see cref="RuleId"/> when the backend assigns its own identifier.</summary>
+	public string? RuleHandle { get; init; }
+
+	/// <summary>Full backend-command detail of the last block / verify invocation, when the provider
+	/// captured it. Null for providers that do not spawn an external command (e.g. the no-op provider).</summary>
+	public BackendCommandAttempt? BackendAttempt { get; init; }
+
+	/// <summary>Human-readable reason the post-block verifier reached its verdict, when applicable.</summary>
+	public string? VerifierReason { get; init; }
+
 	public static FirewallActionResult NotImplementedFor(string providerId, string action) =>
 		new()
 		{

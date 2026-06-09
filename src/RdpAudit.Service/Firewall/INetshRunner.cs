@@ -19,6 +19,7 @@
 // Site:    https://Deynekin.com
 
 using System.Runtime.Versioning;
+using RdpAudit.Core.Firewall;
 using RdpAudit.Core.Util;
 
 namespace RdpAudit.Service.Firewall;
@@ -27,10 +28,38 @@ namespace RdpAudit.Service.Firewall;
 /// <param name="ExitCode">Process exit code; 0 indicates success.</param>
 /// <param name="StdOut">Captured standard output, never containing secret material.</param>
 /// <param name="StdErr">Captured standard error, never containing secret material.</param>
-public readonly record struct NetshResult(int ExitCode, string StdOut, string StdErr)
+/// <param name="Executable">Resolved executable that ran the command (e.g. <c>netsh.exe</c> or
+/// <c>cmd.exe</c> for the English-console wrapper). Empty when not captured by a test runner.</param>
+/// <param name="CommandLabel">Stable label of the command line that was run. Empty when not captured.</param>
+/// <param name="DurationMs">Wall-clock duration in milliseconds; 0 when not captured.</param>
+/// <param name="TimedOut">True when a hard timeout fired and the process was killed.</param>
+/// <param name="EnglishConsoleMode">True when the command was routed through the English console wrapper.</param>
+public readonly record struct NetshResult(
+	int ExitCode,
+	string StdOut,
+	string StdErr,
+	string Executable = "",
+	string CommandLabel = "",
+	long DurationMs = 0,
+	bool TimedOut = false,
+	bool EnglishConsoleMode = false)
 {
 	/// <summary>True when the process exited with code zero.</summary>
 	public bool Success => ExitCode == 0;
+
+	/// <summary>Projects this netsh outcome onto the locale-independent backend-attempt record.</summary>
+	public BackendCommandAttempt ToBackendAttempt() =>
+		new(
+			CommandLabel: CommandLabel.Length > 0 ? CommandLabel : "netsh",
+			Executable: Executable.Length > 0 ? Executable : "netsh.exe",
+			Arguments: string.Empty,
+			RunnerMode: EnglishConsoleMode ? BackendRunnerMode.EnglishConsole : BackendRunnerMode.Direct,
+			ExitCode: ExitCode,
+			TimedOut: TimedOut,
+			DurationMs: DurationMs,
+			StdoutPreview: BackendCommandAttempt.BuildPreview(StdOut),
+			StderrPreview: BackendCommandAttempt.BuildPreview(StdErr),
+			ScannerBackend: "NetshText");
 }
 
 /// <summary>Indirection for spawning netsh.exe; production runner uses the OS process, tests fake it.</summary>
@@ -85,12 +114,18 @@ public sealed class NetshRunner : INetshRunner
 			return new NetshResult(
 				englishConsoleProbe.TimedOut ? -1 : englishConsoleProbe.ExitCode,
 				englishConsoleProbe.StdOut,
-				englishConsoleProbe.StdErr);
+				englishConsoleProbe.StdErr,
+				Executable: englishConsoleProbe.Executable,
+				CommandLabel: englishConsoleProbe.CommandLabel,
+				DurationMs: (long)englishConsoleProbe.Duration.TotalMilliseconds,
+				TimedOut: englishConsoleProbe.TimedOut,
+				EnglishConsoleMode: englishConsoleProbe.EnglishConsoleMode);
 		}
 
+		string label = "netsh " + string.Join(' ', args);
 		ExternalCommandResult direct = await _runner
 			.RunDirectAsync(
-				commandLabel: "netsh " + string.Join(' ', args),
+				commandLabel: label,
 				executable: "netsh.exe",
 				arguments: args,
 				timeout: _timeout,
@@ -99,7 +134,12 @@ public sealed class NetshRunner : INetshRunner
 		return new NetshResult(
 			direct.TimedOut ? -1 : direct.ExitCode,
 			direct.StdOut,
-			direct.StdErr);
+			direct.StdErr,
+			Executable: direct.Executable,
+			CommandLabel: direct.CommandLabel,
+			DurationMs: (long)direct.Duration.TotalMilliseconds,
+			TimedOut: direct.TimedOut,
+			EnglishConsoleMode: direct.EnglishConsoleMode);
 	}
 
 	/// <summary>True when the argument vector matches <see cref="NetshCommandBuilder.BuildShowAllProfilesStateArgs"/>.</summary>
