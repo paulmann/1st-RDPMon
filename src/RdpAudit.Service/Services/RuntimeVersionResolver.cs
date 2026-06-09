@@ -69,4 +69,15 @@ internal static class RuntimeVersionResolver
 	{
 		return Resolve(typeof(RuntimeVersionResolver).Assembly, Environment.ProcessPath);
 	}
+
+	/// <summary>Like <see cref="Resolve()"/> but preserves any SemVer build metadata (the <c>+sha</c>
+	/// suffix). Used by the Tools Diag report so the operator can see exactly which commit produced the
+	/// running service binary and compare it against the Configurator they launched. Returns the bare
+	/// SemVer when no build metadata is present. Side-effect free and never throws.</summary>
+	internal static string ResolveFull()
+	{
+		string? informational = typeof(RuntimeVersionResolver).Assembly
+			.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+		return string.IsNullOrWhiteSpace(informational) ? Resolve() : informational!;
+	}
 }

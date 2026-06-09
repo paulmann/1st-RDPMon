@@ -47,12 +47,22 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 	/// inject only the netsh runner exercise the netsh path deterministically.</summary>
 	private readonly IExternalCommandRunner? _powerShellRunner;
 
+	/// <summary>Optional locale-independent scanner used to verify / enumerate RdpAudit-owned rules via
+	/// <c>Get-NetFirewallRule -Group RdpAudit</c> JSON. When present the provider verifies a create by
+	/// targeted exact-Name match and enumerates blocks through this scanner instead of the locale-fragile
+	/// netsh verbose text parse (whose field labels are translated on non-English hosts and yield zero
+	/// matches). When null the provider falls back to the netsh text path. Tests that inject only the
+	/// netsh runner leave this null and exercise the netsh path deterministically.</summary>
+	private readonly IFirewallRuleScanner? _scanner;
+
 	[SupportedOSPlatform("windows")]
 	public WindowsFirewallProvider(
 		ILogger<WindowsFirewallProvider> logger,
-		IOptionsMonitor<RdpAuditOptions> options)
-		: this(logger, options, new NetshRunner(), new RegistryRdpPortProvider(), new ExternalCommandRunner())
+		IOptionsMonitor<RdpAuditOptions> options,
+		IFirewallRuleScanner scanner)
+		: this(logger, options, new NetshRunner(), new RegistryRdpPortProvider(), new ExternalCommandRunner(), scanner)
 	{
+		ArgumentNullException.ThrowIfNull(scanner);
 	}
 
 	internal WindowsFirewallProvider(
@@ -60,7 +70,8 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 		IOptionsMonitor<RdpAuditOptions> options,
 		INetshRunner runner,
 		IRdpPortProvider portProvider,
-		IExternalCommandRunner? powerShellRunner = null)
+		IExternalCommandRunner? powerShellRunner = null,
+		IFirewallRuleScanner? scanner = null)
 	{
 		ArgumentNullException.ThrowIfNull(logger);
 		ArgumentNullException.ThrowIfNull(options);
@@ -71,6 +82,7 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 		_runner = runner;
 		_portProvider = portProvider;
 		_powerShellRunner = powerShellRunner;
+		_scanner = scanner;
 	}
 
 	public string ProviderId => "Windows";
@@ -245,10 +257,89 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 		}
 
 		// Verification: a non-zero exit is a clear failure, but netsh (or a managing third-party
-		// firewall such as Kaspersky) can return zero while no rule actually lands. Re-query the
-		// named rule and confirm an enabled inbound block rule exists before declaring success.
+		// firewall such as Kaspersky) can return zero while no rule actually lands. Confirm an enabled
+		// inbound block rule exists before declaring success.
+		//
+		// Prefer the locale-independent scanner (Get-NetFirewallRule -Group RdpAudit JSON) and look for a
+		// TARGETED match on the exact deterministic rule name. On a localised (e.g. ru-RU) host the netsh
+		// verbose text labels are translated, so the legacy English-text parse below returns zero matches
+		// even though the rule exists — that was the operator-reported "create PASS / verify FAIL" symptom.
+		// When no scanner is wired (tests injecting only the netsh runner) the netsh text verify is used.
 		if (cfg.VerifyAfterBlock)
 		{
+			if (_scanner is not null)
+			{
+				FirewallScanResult scan;
+				try
+				{
+					scan = await _scanner.ScanRdpAuditBlockRulesAsync(
+						NetshCommandBuilder.NormalizeRulePrefix(request.RuleName), ct).ConfigureAwait(false);
+				}
+				catch (OperationCanceledException)
+				{
+					throw;
+				}
+				catch (Exception ex)
+				{
+					_logger.LogWarning(ex, "Targeted firewall verification scan raised an exception for {Ip}", canonicalIp);
+					scan = new FirewallScanResult(Scannable: false, Rules: Array.Empty<DiscoveredBlockRule>(),
+						Note: "Targeted verification scan threw: " + ex.GetType().Name, Backend: FirewallScanBackend.None);
+				}
+
+				bool targetedFound = scan.Rules.Any(r =>
+					string.Equals(r.RuleName, ruleName, StringComparison.OrdinalIgnoreCase));
+
+				if (!targetedFound)
+				{
+					_logger.LogWarning(
+						"Firewall block could not be verified for {Ip}: rule {RuleName} not found by targeted group scan (backend={Backend}, scannable={Scannable}, rules={Count})",
+						canonicalIp,
+						ruleName,
+						scan.Backend,
+						scan.Scannable,
+						scan.Rules.Count);
+					return new FirewallActionResult
+					{
+						Status = FirewallActionStatus.Unavailable,
+						ProviderId = ProviderId,
+						RuleId = ruleName,
+						RuleHandle = ruleName,
+						BackendAttempt = addAttempt,
+						VerifierReason = string.Format(
+							CultureInfo.InvariantCulture,
+							"targeted verify by name '{0}': not found; broad group scan: {1} rule(s) via {2} (scannable={3}).",
+							ruleName,
+							scan.Rules.Count,
+							scan.Backend,
+							scan.Scannable),
+						Message = "Block rule reported success but could not be verified via Get-NetFirewallRule -Group RdpAudit; a managing third-party firewall may have rejected it.",
+					};
+				}
+
+				_logger.LogInformation(
+					"Firewall block rule installed and verified (targeted group scan): {RuleName} for {Ip} scope={Scope} port={Port} backend={Backend}",
+					ruleName,
+					canonicalIp,
+					scope,
+					rdpPort,
+					scan.Backend);
+				return new FirewallActionResult
+				{
+					Status = FirewallActionStatus.Success,
+					ProviderId = ProviderId,
+					RuleId = ruleName,
+					RuleHandle = ruleName,
+					BackendAttempt = addAttempt,
+					VerifierReason = string.Format(
+						CultureInfo.InvariantCulture,
+						"targeted verify by name '{0}': found; broad group scan: {1} rule(s) via {2}.",
+						ruleName,
+						scan.Rules.Count,
+						scan.Backend),
+					Message = "Block rule installed and verified.",
+				};
+			}
+
 			IReadOnlyList<string> showArgs = NetshCommandBuilder.BuildShowRuleArgs(ruleName);
 			NetshResult verify = await _runner.RunAsync(showArgs, ct).ConfigureAwait(false);
 
@@ -463,6 +554,31 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 		}
 
 		string normalized = NetshCommandBuilder.NormalizeRulePrefix(ruleName);
+
+		// Prefer the locale-independent scanner (Get-NetFirewallRule -Group RdpAudit JSON). The legacy
+		// netsh path below passed the BASE prefix (e.g. "RdpAudit-ToolsDiag-TempProbe") as an EXACT
+		// netsh `name=`, which never matched the per-IP rule "…-TempProbe-78.37.40.185" — the temp-probe
+		// "verify FAIL" symptom. The scanner matches by group, so it returns the per-IP rule by its full
+		// name regardless of host UI culture. Fall back to the netsh text parse when no scanner is wired.
+		if (_scanner is not null)
+		{
+			FirewallScanResult scan = await _scanner
+				.ScanRdpAuditBlockRulesAsync(normalized, ct).ConfigureAwait(false);
+
+			List<FirewallBlockEntry> scanned = new(scan.Rules.Count);
+			foreach (DiscoveredBlockRule rule in scan.Rules)
+			{
+				scanned.Add(new FirewallBlockEntry
+				{
+					RuleId = rule.RuleName,
+					Ip = rule.RemoteIps.Count > 0 ? rule.RemoteIps[0] : string.Empty,
+					ProviderId = ProviderId,
+				});
+			}
+
+			return scanned;
+		}
+
 		NetshResult res = await _runner.RunAsync(
 			NetshCommandBuilder.BuildShowRuleArgs(normalized),
 			ct).ConfigureAwait(false);

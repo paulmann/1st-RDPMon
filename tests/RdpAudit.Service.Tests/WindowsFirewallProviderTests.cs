@@ -333,6 +333,146 @@ public class WindowsFirewallProviderTests
 	}
 
 	[Fact]
+	public async Task Block_ScannerWired_VerifiesByTargetedExactName()
+	{
+		if (!OperatingSystem.IsWindows())
+		{
+			return;
+		}
+
+		FakeNetshRunner runner = new();
+		// delete (idempotent prefix-cleanup) then the PowerShell create. No netsh verify `show rule`
+		// should run — verification goes through the locale-independent scanner instead.
+		runner.Responses.Enqueue(NetshSuccess());
+		CapturingCommandRunner ps = new();
+		FakeFirewallRuleScanner scanner = new();
+		// The scanner returns the rule by its exact deterministic per-IP name — the targeted match.
+		scanner.Result = new FirewallScanResult(
+			Scannable: true,
+			Rules: new[]
+			{
+				new DiscoveredBlockRule(
+					RuleName: "RdpAudit-Block-203.0.113.10",
+					Enabled: true,
+					DirectionInbound: true,
+					ActionBlock: true,
+					Protocol: "Any",
+					LocalPorts: Array.Empty<int>(),
+					RemoteIps: new[] { "203.0.113.10" }),
+			},
+			Note: "test",
+			Backend: FirewallScanBackend.PowerShellJson);
+		WindowsFirewallProvider provider = new(
+			NullLogger<WindowsFirewallProvider>.Instance,
+			CreateOptions(),
+			runner,
+			new FakeRdpPortProvider(),
+			ps,
+			scanner);
+
+		FirewallActionResult result = await provider.BlockAsync(
+			new FirewallBlockRequest("203.0.113.10", "RdpAudit-Block") { Reason = "unit-test" },
+			CancellationToken.None);
+
+		Assert.Equal(FirewallActionStatus.Success, result.Status);
+		Assert.Equal(1, scanner.Calls);
+		Assert.Contains("targeted verify by name", result.VerifierReason, StringComparison.Ordinal);
+		Assert.Contains("found", result.VerifierReason!, StringComparison.Ordinal);
+		// The locale-fragile netsh `show rule` verify must NOT run when the scanner is wired.
+		Assert.DoesNotContain(runner.Calls, call => call.Contains("show"));
+	}
+
+	[Fact]
+	public async Task Block_ScannerWired_TargetedNameMissing_ReturnsUnavailable()
+	{
+		if (!OperatingSystem.IsWindows())
+		{
+			return;
+		}
+
+		FakeNetshRunner runner = new();
+		runner.Responses.Enqueue(NetshSuccess());
+		CapturingCommandRunner ps = new();
+		FakeFirewallRuleScanner scanner = new();
+		// Scanner is healthy and returns a DIFFERENT RdpAudit rule, but not the one we just created —
+		// targeted verify by exact name must fail and the provider must report Unavailable.
+		scanner.Result = new FirewallScanResult(
+			Scannable: true,
+			Rules: new[]
+			{
+				new DiscoveredBlockRule(
+					RuleName: "RdpAudit-Block-198.51.100.7",
+					Enabled: true,
+					DirectionInbound: true,
+					ActionBlock: true,
+					Protocol: "Any",
+					LocalPorts: Array.Empty<int>(),
+					RemoteIps: new[] { "198.51.100.7" }),
+			},
+			Note: "test",
+			Backend: FirewallScanBackend.PowerShellJson);
+		WindowsFirewallProvider provider = new(
+			NullLogger<WindowsFirewallProvider>.Instance,
+			CreateOptions(),
+			runner,
+			new FakeRdpPortProvider(),
+			ps,
+			scanner);
+
+		FirewallActionResult result = await provider.BlockAsync(
+			new FirewallBlockRequest("203.0.113.10", "RdpAudit-Block") { Reason = "unit-test" },
+			CancellationToken.None);
+
+		Assert.Equal(FirewallActionStatus.Unavailable, result.Status);
+		Assert.Contains("not found", result.VerifierReason, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public async Task ListBlocks_ScannerWired_ReturnsPerIpRuleByGroup()
+	{
+		if (!OperatingSystem.IsWindows())
+		{
+			return;
+		}
+
+		FakeNetshRunner runner = new();
+		FakeFirewallRuleScanner scanner = new();
+		// The scanner matches by group, so the per-IP temp-probe rule is returned by its FULL name even
+		// though the caller passes only the base prefix. This is the fix for the temp-probe "verify FAIL".
+		scanner.Result = new FirewallScanResult(
+			Scannable: true,
+			Rules: new[]
+			{
+				new DiscoveredBlockRule(
+					RuleName: "RdpAudit-ToolsDiag-TempProbe-78.37.40.185",
+					Enabled: true,
+					DirectionInbound: true,
+					ActionBlock: true,
+					Protocol: "Any",
+					LocalPorts: Array.Empty<int>(),
+					RemoteIps: new[] { "78.37.40.185" }),
+			},
+			Note: "test",
+			Backend: FirewallScanBackend.PowerShellJson);
+		WindowsFirewallProvider provider = new(
+			NullLogger<WindowsFirewallProvider>.Instance,
+			CreateOptions(),
+			runner,
+			new FakeRdpPortProvider(),
+			powerShellRunner: null,
+			scanner: scanner);
+
+		IReadOnlyList<FirewallBlockEntry> entries =
+			await provider.ListBlocksAsync("RdpAudit-ToolsDiag-TempProbe", CancellationToken.None);
+
+		Assert.Single(entries);
+		Assert.Equal("RdpAudit-ToolsDiag-TempProbe-78.37.40.185", entries[0].RuleId);
+		Assert.Equal("78.37.40.185", entries[0].Ip);
+		// No netsh `show rule` text query when the scanner is wired.
+		Assert.DoesNotContain(runner.Calls, call => call.Contains("show"));
+	}
+
+	[Fact]
 	public async Task Block_VerificationFindsNoRule_ReturnsUnavailable()
 	{
 		FakeNetshRunner runner = new();
@@ -385,6 +525,26 @@ internal sealed class CapturingCommandRunner : IExternalCommandRunner
 		string stdOut = ExitCode == 0 ? "RdpAudit-Block-203.0.113.10" : string.Empty;
 		return Task.FromResult(new ExternalCommandResult(
 			commandLabel, executable, ExitCode, stdOut, StdErr, false, TimeSpan.FromMilliseconds(1), false));
+	}
+}
+
+internal sealed class FakeFirewallRuleScanner : IFirewallRuleScanner
+{
+	public int Calls { get; private set; }
+
+	public string? LastPrefix { get; private set; }
+
+	public FirewallScanResult Result { get; set; } = new(
+		Scannable: true,
+		Rules: Array.Empty<DiscoveredBlockRule>(),
+		Note: "test",
+		Backend: FirewallScanBackend.PowerShellJson);
+
+	public Task<FirewallScanResult> ScanRdpAuditBlockRulesAsync(string ruleNamePrefix, CancellationToken ct)
+	{
+		Calls++;
+		LastPrefix = ruleNamePrefix;
+		return Task.FromResult(Result);
 	}
 }
 

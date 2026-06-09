@@ -181,23 +181,29 @@ public sealed class ToolsDiagnosticsService
 			{
 				IReadOnlyList<FirewallBlockEntry> entries =
 					await _windowsProvider.ListBlocksAsync(TemporaryProbeRuleBase, ct).ConfigureAwait(false);
-				verified = entries.Any(e =>
-					string.Equals(e.RuleId, ruleHandle, StringComparison.OrdinalIgnoreCase)
-					|| string.Equals(e.Ip, canonicalIp, StringComparison.OrdinalIgnoreCase));
+				bool nameMatch = entries.Any(e =>
+					string.Equals(e.RuleId, ruleHandle, StringComparison.OrdinalIgnoreCase));
+				bool ipMatch = entries.Any(e =>
+					string.Equals(e.Ip, canonicalIp, StringComparison.OrdinalIgnoreCase));
+				verified = nameMatch || ipMatch;
+				string criterion = nameMatch
+					? "matched by exact rule name"
+					: ipMatch ? "matched by remote IP" : "no match";
 				steps.Add(new ToolProbeResultDto
 				{
 					ToolName = "verify temporary block rule present",
 					Executable = "(firewall provider list)",
 					Arguments = ruleName,
-					RunnerMode = "Direct",
+					RunnerMode = scannerBackend ?? "Direct",
 					ExitCode = verified ? 0 : 1,
 					DurationMs = 0,
 					TimedOut = false,
 					StdoutPreview = string.Format(
 						CultureInfo.InvariantCulture,
-						"List returned {0} RdpAudit rule(s); matching rule {1}.",
+						"List returned {0} RdpAudit rule(s); matching rule {1} ({2}).",
 						entries.Count,
-						verified ? "found" : "NOT found"),
+						verified ? "found" : "NOT found",
+						criterion),
 					Passed = verified,
 					Note = verified
 						? "Temporary rule confirmed present in the firewall store."
@@ -326,14 +332,15 @@ public sealed class ToolsDiagnosticsService
 	private async Task<ToolProbeResultDto> RunPowerShellFirewallProbeAsync(CancellationToken ct)
 	{
 		const string toolName = "powershell Get-NetFirewallRule (JSON)";
-		// The exact backend command we run: the SAME locale-independent script the live scanner uses —
-		// it projects every inbound rule to an English-stable JSON object (Name/Group/Direction/Action/
-		// Enabled/…) and the parser filters by name prefix OR group=RdpAudit. The earlier probe label
-		// ("Get-NetFirewallRule -Direction Inbound -All | ConvertTo-Json") was misleading and the raw
-		// over-broad form returned [] on the operator's host; this surfaces the real script + parsed count.
+		// The exact backend command we run: the SAME locale-independent script the live scanner uses. It
+		// is anchored on `Get-NetFirewallRule -Group 'RdpAudit'` — the precise query the operator verified
+		// returns our rules — and projects each to an English-stable JSON object (Name/Group/Direction/
+		// Action/Enabled/…); the parser then filters by name prefix OR group=RdpAudit. The earlier probe
+		// label scanned every inbound rule and returned [] on the operator's host; this surfaces the real
+		// command + parsed count.
 		const string backendCommand =
 			"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -OutputFormat Text -Command "
-			+ "\"<FirewallRulesJsonScript: per-inbound-rule JSON, filtered by name prefix OR group=RdpAudit>\"";
+			+ "\"Get-NetFirewallRule -Group 'RdpAudit' | Select Name,DisplayName,Group,DisplayGroup,Enabled,Direction,Action | ConvertTo-Json -Depth 4\"";
 		try
 		{
 			ExternalCommandResult result = await _runner.RunDirectAsync(
@@ -420,15 +427,25 @@ public sealed class ToolsDiagnosticsService
 		}
 	}
 
-	private static ToolsDiagnosticsDto BuildDto(DateTime generatedUtc, List<ToolProbeResultDto> probes, string? message) =>
-		new()
+	private static ToolsDiagnosticsDto BuildDto(DateTime generatedUtc, List<ToolProbeResultDto> probes, string? message)
+	{
+		// Surface the running service build (SemVer + git SHA when the publish pipeline stamped one) so the
+		// operator can confirm which commit produced the binary and compare it against the Configurator they
+		// launched. A full installed-vs-Configurator SHA-mismatch warning needs an IPC handshake and is
+		// deferred to a follow-up; surfacing the service SHA here is the low-risk first step.
+		string serviceBuild = "Service build " + RuntimeVersionResolver.ResolveFull();
+		string composedMessage = string.IsNullOrWhiteSpace(message)
+			? serviceBuild
+			: serviceBuild + " — " + message;
+		return new ToolsDiagnosticsDto
 		{
 			Status = IpcResultStatus.Success,
 			GeneratedUtc = generatedUtc,
 			Probes = probes,
 			ReportText = ToolsDiagnosticsReportBuilder.Build(probes, generatedUtc),
-			Message = message,
+			Message = composedMessage,
 		};
+	}
 
 	private static string BuildTemporaryFailureNote(bool created, bool verified, bool cleanedUp)
 	{

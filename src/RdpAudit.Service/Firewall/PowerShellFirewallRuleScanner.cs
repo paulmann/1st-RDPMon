@@ -24,22 +24,33 @@ namespace RdpAudit.Service.Firewall;
 /// <c>Get-NetFirewallRule | ConvertTo-Json</c>. Falls back to the netsh text scanner on failure.</summary>
 public sealed class PowerShellFirewallRuleScanner : IFirewallRuleScanner
 {
-	/// <summary>Fixed PowerShell script that emits one JSON object per inbound rule with the joined
-	/// address / port filters. English-stable property names; no operator input is interpolated. The
-	/// caller filters the parsed JSON by rule-name prefix / group. Passed as a single argument-vector
-	/// element so there is no shell-quoting surface.</summary>
+	/// <summary>Fixed PowerShell script that emits one JSON object per RdpAudit-owned rule.
+	/// English-stable property names; no operator input is interpolated. Passed as a single
+	/// argument-vector element so there is no shell-quoting surface.</summary>
+	/// <remarks>
+	/// IMPORTANT: enumeration is anchored on <c>Get-NetFirewallRule -Group 'RdpAudit'</c> — the exact
+	/// query the operator confirmed returns our rules on a live ru-RU host. The earlier script scanned
+	/// EVERY inbound rule (<c>-Direction Inbound -All</c>) and piped each through
+	/// <c>Get-NetFirewallAddressFilter</c> / <c>Get-NetFirewallPortFilter</c>; on the live host that
+	/// fragile per-rule enrichment collapsed the whole result to <c>[]</c> even though the rules exist.
+	/// Here the address / port enrichment is best-effort (<c>-ErrorAction SilentlyContinue</c>) so a
+	/// single failing filter can never zero out the rule list — a rule still reports its
+	/// Name / Group / DisplayGroup / Direction / Action / Enabled even if its filters cannot be read.
+	/// The parser then matches by name prefix OR group=RdpAudit.
+	/// </remarks>
 	internal const string FirewallRulesJsonScript =
 		"$ErrorActionPreference='SilentlyContinue';"
-		+ "$r=Get-NetFirewallRule -Direction Inbound -All;"
+		+ "$r=Get-NetFirewallRule -Group 'RdpAudit';"
+		+ "if($null -eq $r){'[]'}else{"
 		+ "$o=foreach($x in $r){"
-		+ "$a=$x|Get-NetFirewallAddressFilter;"
-		+ "$p=$x|Get-NetFirewallPortFilter;"
+		+ "$a=$x|Get-NetFirewallAddressFilter -ErrorAction SilentlyContinue;"
+		+ "$p=$x|Get-NetFirewallPortFilter -ErrorAction SilentlyContinue;"
 		+ "[pscustomobject]@{"
 		+ "Name=$x.Name;DisplayName=$x.DisplayName;Group=$x.Group;DisplayGroup=$x.DisplayGroup;"
 		+ "Direction=[string]$x.Direction;Action=[string]$x.Action;Enabled=[string]$x.Enabled;"
 		+ "Protocol=[string]$p.Protocol;LocalPort=@($p.LocalPort);RemoteAddress=@($a.RemoteAddress)"
 		+ "}};"
-		+ "if($null -eq $o){'[]'}else{$o|ConvertTo-Json -Depth 4 -Compress}";
+		+ "if($null -eq $o){'[]'}else{$o|ConvertTo-Json -Depth 4 -Compress}}";
 
 	private static readonly TimeSpan ScanTimeout = TimeSpan.FromSeconds(30);
 

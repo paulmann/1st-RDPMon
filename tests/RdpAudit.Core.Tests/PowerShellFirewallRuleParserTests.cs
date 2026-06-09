@@ -147,6 +147,72 @@ public class PowerShellFirewallRuleParserTests
 	}
 
 	[Fact]
+	public void DiscoverRdpAuditBlockRules_ManualRule_GuidName_ManualDisplayName_MatchedByGroup_SingleObject()
+	{
+		// Live shape of a manually-created RdpAudit rule: Name is an auto-assigned GUID, DisplayName is
+		// operator text, identity is carried solely by Group=RdpAudit. ConvertTo-Json emits a lone object
+		// for a single match. This MUST NOT return 0 — the regression that prompted the fix.
+		const string json = """
+		{"Name":"{7d48c3ed-1b2c-4f5a-9c0d-0123456789ab}","DisplayName":"RdpAudit Manual Keep 80.244.40.164",
+		"Group":"RdpAudit","DisplayGroup":"RdpAudit","Direction":"Inbound","Action":"Block","Enabled":"True",
+		"Protocol":"Any","LocalPort":"Any","RemoteAddress":"80.244.40.164/32"}
+		""";
+
+		IReadOnlyList<DiscoveredBlockRule> rules =
+			PowerShellFirewallRuleParser.DiscoverRdpAuditBlockRules(json, Prefix, Group);
+
+		DiscoveredBlockRule rule = Assert.Single(rules);
+		Assert.Equal("{7d48c3ed-1b2c-4f5a-9c0d-0123456789ab}", rule.RuleName);
+		Assert.True(rule.Enabled);
+		Assert.True(rule.DirectionInbound);
+		Assert.True(rule.ActionBlock);
+		Assert.Contains("80.244.40.164", rule.RemoteIps);
+	}
+
+	[Fact]
+	public void DiscoverRdpAuditBlockRules_ManualRule_GuidName_ManualDisplayName_MatchedByGroup_Array()
+	{
+		// Same live shape, but as a multi-element array (ConvertTo-Json's form when >1 rule matches).
+		const string json = """
+		[
+		 {"Name":"{7d48c3ed-1b2c-4f5a-9c0d-0123456789ab}","DisplayName":"RdpAudit Manual Keep 80.244.40.164",
+		  "Group":"RdpAudit","DisplayGroup":"RdpAudit","Direction":"Inbound","Action":"Block","Enabled":"True",
+		  "Protocol":"Any","LocalPort":"Any","RemoteAddress":"80.244.40.164/32"},
+		 {"Name":"{0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9}","DisplayName":"RdpAudit Manual Keep 5.5.5.5",
+		  "Group":"RdpAudit","DisplayGroup":"RdpAudit","Direction":"Inbound","Action":"Block","Enabled":"True",
+		  "Protocol":"Any","LocalPort":"Any","RemoteAddress":"5.5.5.5/32"}
+		]
+		""";
+
+		IReadOnlyList<DiscoveredBlockRule> rules =
+			PowerShellFirewallRuleParser.DiscoverRdpAuditBlockRules(json, Prefix, Group);
+
+		Assert.Equal(2, rules.Count);
+		Assert.Contains(rules, r => r.RemoteIps.Contains("80.244.40.164"));
+		Assert.Contains(rules, r => r.RemoteIps.Contains("5.5.5.5"));
+	}
+
+	[Fact]
+	public void DiscoverRdpAuditBlockRules_TempProbeRule_NameEqualsDisplayName_MatchedByGroup()
+	{
+		// The Tools Diag temporary-probe rule: Name == DisplayName == the deterministic per-IP name, with
+		// Group=RdpAudit. The provider verify/list path relies on this matching by group so the temp probe
+		// reports verify PASS. This MUST NOT return 0.
+		const string json = """
+		{"Name":"RdpAudit-ToolsDiag-TempProbe-78.37.40.185","DisplayName":"RdpAudit-ToolsDiag-TempProbe-78.37.40.185",
+		"Group":"RdpAudit","DisplayGroup":"RdpAudit","Direction":"Inbound","Action":"Block","Enabled":"True",
+		"Protocol":"Any","LocalPort":"Any","RemoteAddress":"78.37.40.185"}
+		""";
+
+		IReadOnlyList<DiscoveredBlockRule> rules =
+			PowerShellFirewallRuleParser.DiscoverRdpAuditBlockRules(json, Prefix, Group);
+
+		DiscoveredBlockRule rule = Assert.Single(rules);
+		Assert.Equal("RdpAudit-ToolsDiag-TempProbe-78.37.40.185", rule.RuleName);
+		Assert.Contains("78.37.40.185", rule.RemoteIps);
+	}
+
+	[Fact]
 	public void DiscoverRdpAuditBlockRules_DisplayGroupMatch_IsRecognised()
 	{
 		// Some hosts surface the localized DisplayGroup but keep Group null; an exact match on either

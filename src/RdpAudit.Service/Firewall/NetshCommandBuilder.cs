@@ -294,6 +294,10 @@ public static class NetshCommandBuilder
 		sb.Append(" -Name ").Append(PsLiteral(ruleName));
 		sb.Append(" -DisplayName ").Append(PsLiteral(ruleName));
 		sb.Append(" -Group ").Append(PsLiteral(RdpAuditGroup));
+		// Write to the persistent store explicitly so the rule survives reboots and is enumerable via
+		// Get-NetFirewallRule -Group RdpAudit (the default store is PersistentStore, but stating it makes
+		// the intent unambiguous and matches what the operator verifies manually).
+		sb.Append(" -PolicyStore PersistentStore");
 		sb.Append(" -Direction Inbound -Action Block -Enabled True -Profile Any");
 		sb.Append(" -RemoteAddress ").Append(PsLiteral(canonicalIp));
 
