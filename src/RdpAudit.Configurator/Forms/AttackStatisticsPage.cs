@@ -190,7 +190,12 @@ public sealed class AttackStatisticsPage : TabPage
 		};
 		ConfigureGridColumns(_grid);
 		_grid.DataSource = _binding;
-		SortableGrid.Enable(_grid, _binding);
+		// The "Threat" column renders a decorated string ("70.0 (High)") that cannot be parsed back to
+		// a number, so sort it on the numeric ThreatScore to keep the order exact.
+		SortableGrid.Enable(_grid, _binding, new Dictionary<string, string>(StringComparer.Ordinal)
+		{
+			[nameof(AttackStatRow.ThreatDisplay)] = nameof(AttackStatRow.ThreatScore),
+		});
 		_grid.RowPrePaint += OnRowPrePaint;
 		_grid.CellMouseDown += OnCellMouseDown;
 		_grid.CellFormatting += OnCellFormatting;

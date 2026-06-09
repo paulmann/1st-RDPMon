@@ -25,7 +25,18 @@ public static class SortableGrid
 	/// <see cref="GridValueComparer"/> over the property named by the column's
 	/// <see cref="DataGridViewColumn.DataPropertyName"/>. Re-clicking the same column toggles direction.
 	/// </summary>
-	public static void Enable<T>(DataGridView grid, BindingList<T> source)
+	/// <param name="sortKeyByProperty">
+	/// Optional map from a column's <see cref="DataGridViewColumn.DataPropertyName"/> to the name of a
+	/// sibling property on <typeparamref name="T"/> that holds the *typed* value to sort by. Use this
+	/// when a column renders a composite / decorated string that <see cref="GridValueComparer"/> cannot
+	/// parse back to its natural type — e.g. a "Threat" column showing "70.0 (High)" should sort on the
+	/// numeric <c>ThreatScore</c>. When a mapped property is found its value is compared with its own
+	/// <see cref="IComparable"/> so the order is exact; otherwise the rendered string is used.
+	/// </param>
+	public static void Enable<T>(
+		DataGridView grid,
+		BindingList<T> source,
+		IReadOnlyDictionary<string, string>? sortKeyByProperty = null)
 	{
 		ArgumentNullException.ThrowIfNull(grid);
 		ArgumentNullException.ThrowIfNull(source);
@@ -65,19 +76,35 @@ public static class SortableGrid
 				ascending = true;
 			}
 
-			PropertyInfo? prop = typeof(T).GetProperty(property, BindingFlags.Public | BindingFlags.Instance);
+			// Prefer an explicit typed sort key when the column renders a decorated string that cannot
+			// be parsed back to its natural type. Falls back to the rendered property otherwise.
+			string sortProperty = property;
+			if (sortKeyByProperty is not null
+				&& sortKeyByProperty.TryGetValue(property, out string? keyProperty)
+				&& !string.IsNullOrEmpty(keyProperty))
+			{
+				sortProperty = keyProperty;
+			}
+
+			PropertyInfo? prop = typeof(T).GetProperty(sortProperty, BindingFlags.Public | BindingFlags.Instance);
 			if (prop is null)
 			{
 				return;
 			}
 
+			bool typedKey = !string.Equals(sortProperty, property, StringComparison.Ordinal);
 			List<T> items = new(source);
 			int direction = ascending ? 1 : -1;
 			items.Sort((a, b) =>
 			{
-				string? av = prop.GetValue(a)?.ToString();
-				string? bv = prop.GetValue(b)?.ToString();
-				return direction * GridValueComparer.Compare(av, bv);
+				object? ao = prop.GetValue(a);
+				object? bo = prop.GetValue(b);
+				if (typedKey && ao is IComparable ac && bo is not null && bo.GetType() == ao.GetType())
+				{
+					return direction * ac.CompareTo(bo);
+				}
+
+				return direction * GridValueComparer.Compare(ao?.ToString(), bo?.ToString());
 			});
 
 			bool raise = source.RaiseListChangedEvents;
