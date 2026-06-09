@@ -669,6 +669,18 @@ public sealed class AttackStatisticsPage : TabPage
 			return;
 		}
 
+		// Prepare and copy the report text BEFORE opening the browser so the operator can paste it
+		// straight into AbuseIPDB. Never name the victim/local host; refuse non-reportable IPs.
+		AbuseIpDbReportText.PrepareResult prepared = AbuseIpDbReportText.Prepare(_menuRow.Source);
+		if (!prepared.Prepared)
+		{
+			SetStatus(AbuseIpDbReportText.FormatRefusal(_menuRow.Ip, prepared));
+			return;
+		}
+
+		TrySetClipboard(prepared.ReportText, "Copy AbuseIPDB report");
+		SetStatus(AbuseIpDbReportText.ClipboardToast);
+
 		IpReputationBrowser.LaunchOutcome outcome = IpReputationBrowser.OpenAbuseIpDb(_menuRow.Ip);
 		SetStatus(outcome.Format());
 	}
