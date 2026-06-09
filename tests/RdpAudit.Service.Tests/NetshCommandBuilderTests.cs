@@ -235,6 +235,8 @@ public class NetshCommandBuilderTests
 		Assert.Contains("-Action Block", script);
 		Assert.Contains("-Enabled True", script);
 		Assert.Contains("-RemoteAddress '203.0.113.10'", script);
+		// Written to the persistent store explicitly so the rule survives reboots and is enumerable.
+		Assert.Contains("-PolicyStore PersistentStore", script);
 		// Idempotent pre-clean so re-applying never stacks rules.
 		Assert.Contains("Remove-NetFirewallRule", script);
 	}

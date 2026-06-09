@@ -28,7 +28,15 @@
 		<VersionPrefix Condition="'$(VersionPrefix)' == ''">1.2.5</VersionPrefix>
 		<FileVersion>$(VersionPrefix).0</FileVersion>
 		<AssemblyVersion>$(VersionPrefix).0</AssemblyVersion>
-		<InformationalVersion>$(VersionPrefix)</InformationalVersion>
+		<!-- Build SHA surface: when the build/publish pipeline passes -p:SourceRevisionId=<short-sha>
+		     the SHA is appended as SemVer build metadata (after '+'), so the Service / Tools Diag report
+		     can show exactly which commit produced the running binary. It defaults to empty so local and
+		     test builds keep InformationalVersion == VersionPrefix exactly (RdpAuditVersionMetadataTests
+		     trims any '+meta' suffix but also forbids legacy version substrings; keeping the SHA out of
+		     non-pipeline builds avoids any rare short-SHA collision with those substrings). -->
+		<SourceRevisionId Condition="'$(SourceRevisionId)' == ''"></SourceRevisionId>
+		<InformationalVersion Condition="'$(SourceRevisionId)' == ''">$(VersionPrefix)</InformationalVersion>
+		<InformationalVersion Condition="'$(SourceRevisionId)' != ''">$(VersionPrefix)+$(SourceRevisionId)</InformationalVersion>
 		<NeutralLanguage>en-US</NeutralLanguage>
 		<InvariantGlobalization>false</InvariantGlobalization>
 		<EnableWindowsTargeting>true</EnableWindowsTargeting>
