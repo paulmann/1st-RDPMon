@@ -16,6 +16,7 @@ using System.Globalization;
 using System.Runtime.Versioning;
 using System.Text;
 using RdpAudit.Configurator.Ipc;
+using RdpAudit.Configurator.Services;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
 
@@ -26,6 +27,7 @@ namespace RdpAudit.Configurator.Forms;
 public sealed class ToolsDiagPage : TabPage
 {
 	private readonly IpcClient _ipc;
+	private readonly ServiceReachabilityProbe _reachability = new();
 	private readonly Button _run;
 	private readonly Button _copy;
 	private readonly Button _save;
@@ -133,28 +135,31 @@ public sealed class ToolsDiagPage : TabPage
 
 	private async Task RunDiagnosticsAsync()
 	{
-		_status.Text = "Running diagnostics…";
+		_status.Text = "Running diagnostics… (this can take up to a minute on a busy host)";
 		_run.Enabled = false;
+		_tempProbe.Enabled = false;
 		try
 		{
-			ToolsDiagnosticsDto? dto = await _ipc.SendAsync<ToolsDiagnosticsDto>(IpcCommand.RunToolsDiagnostics).ConfigureAwait(true);
-			if (dto is null)
+			IpcCallResult<ToolsDiagnosticsDto> call =
+				await _ipc.SendDetailedAsync<ToolsDiagnosticsDto>(IpcCommand.RunToolsDiagnostics).ConfigureAwait(true);
+			if (!call.IsSuccess || call.Value is null)
 			{
-				_status.Text = "Service: RunToolsDiagnostics returned nothing — is the service running?";
-				_report.Text = "No diagnostics available. Start the service (as administrator) and retry.";
+				await ShowServiceCallFailureAsync(call, "Tools Diag").ConfigureAwait(true);
 				return;
 			}
 
+			ToolsDiagnosticsDto dto = call.Value;
 			PopulateGrid(dto.Probes);
 			_report.Text = dto.ReportText;
 			int passed = dto.Probes.Count(p => p.Passed);
 			_status.Text = string.Format(
 				CultureInfo.InvariantCulture,
-				"Diagnostics at {0:yyyy-MM-dd HH:mm:ss}Z  |  Status={1}  |  Probes={2}  Passed={3}{4}",
+				"Diagnostics at {0:yyyy-MM-dd HH:mm:ss}Z  |  Status={1}  |  Probes={2}  Passed={3}  |  {4}{5}",
 				dto.GeneratedUtc,
 				dto.Status,
 				dto.Probes.Count,
 				passed,
+				call.TraceLine,
 				string.IsNullOrWhiteSpace(dto.Message) ? string.Empty : "  |  " + dto.Message);
 		}
 		catch (Exception ex)
@@ -165,7 +170,27 @@ public sealed class ToolsDiagPage : TabPage
 		finally
 		{
 			_run.Enabled = true;
+			_tempProbe.Enabled = true;
 		}
+	}
+
+	/// <summary>Renders an honest failure for a service call that did not succeed. The local probe grid
+	/// is left untouched (local probes, if any, stay visible); only the service-side diagnostics are
+	/// reported as unavailable, and the headline distinguishes a stopped service from a busy one.</summary>
+	private async Task ShowServiceCallFailureAsync<T>(IpcCallResult<T> call, string label)
+	{
+		ServiceReachabilityDiagnostic diag = await _reachability.DescribeAsync(call).ConfigureAwait(true);
+		_status.Text = label + ": " + diag.Headline;
+		bool hasLocalRows = _grid.Rows.Count > 0;
+		string serviceNote = hasLocalRows
+			? "Local probe rows above remain valid. Service-side diagnostics are unavailable for this run:"
+			: "Service-side diagnostics are unavailable for this run:";
+		_report.Text = string.Join(
+			"\r\n",
+			label + " — " + diag.Headline,
+			string.Empty,
+			serviceNote,
+			diag.Detail);
 	}
 
 	private async Task RunTemporaryProbeAsync()
@@ -193,26 +218,28 @@ public sealed class ToolsDiagPage : TabPage
 
 		_status.Text = "Running temporary firewall rule probe…";
 		_tempProbe.Enabled = false;
+		_run.Enabled = false;
 		try
 		{
-			TemporaryFirewallProbeDto? dto = await _ipc
-				.SendAsync<TemporaryFirewallProbeDto>(IpcCommand.RunTemporaryFirewallRuleProbe, testIp)
+			IpcCallResult<TemporaryFirewallProbeDto> call = await _ipc
+				.SendDetailedAsync<TemporaryFirewallProbeDto>(IpcCommand.RunTemporaryFirewallRuleProbe, testIp)
 				.ConfigureAwait(true);
-			if (dto is null)
+			if (!call.IsSuccess || call.Value is null)
 			{
-				_status.Text = "Service: temporary probe returned nothing — is the service running?";
-				_report.Text = "No probe result. Start the service (as administrator) and retry.";
+				await ShowServiceCallFailureAsync(call, "Temp probe").ConfigureAwait(true);
 				return;
 			}
 
+			TemporaryFirewallProbeDto dto = call.Value;
 			PopulateGrid(dto.Steps);
 			_report.Text = dto.ReportText;
 			_status.Text = string.Format(
 				CultureInfo.InvariantCulture,
-				"Temp probe at {0:yyyy-MM-dd HH:mm:ss}Z  |  Status={1}  |  Created+verified+cleaned={2}{3}",
+				"Temp probe at {0:yyyy-MM-dd HH:mm:ss}Z  |  Status={1}  |  Created+verified+cleaned={2}  |  {3}{4}",
 				dto.GeneratedUtc,
 				dto.Status,
 				dto.CreatedVerifiedAndCleanedUp ? "YES" : "NO",
+				call.TraceLine,
 				string.IsNullOrWhiteSpace(dto.Message) ? string.Empty : "  |  " + dto.Message);
 		}
 		catch (Exception ex)
@@ -223,6 +250,7 @@ public sealed class ToolsDiagPage : TabPage
 		finally
 		{
 			_tempProbe.Enabled = true;
+			_run.Enabled = true;
 		}
 	}
 

@@ -1,15 +1,16 @@
 // File:    tests/RdpAudit.Core.Tests/RdpAuditVersionMetadataTests.cs
 // Module:  RdpAudit.Core.Tests
-// Purpose: Pins the current release version to exactly 1.2.5 across every assembly metadata
+// Purpose: Pins the current release version to exactly 1.3.0 across every assembly metadata
 //          surface that publish.ps1 and the running Service surface to the operator: the
 //          AssemblyInformationalVersion (the SemVer driving the Service tab "Runtime version"
 //          line), AssemblyVersion / FileVersion (the four-part identifiers embedded in the
 //          PE file and surfaced by FileVersionInfo), plus a hard guard against the previous
-//          1.0.0 placeholder default leaking back into the build. The 1.2.5 bump corresponds
-//          to AbuseIPDB per-IP report dedupe (success-filtered cooldown), the masked-key
-//          persistence fix, and reconciliation-driven firewall enforcement health in the
-//          Firewall tab. If the release stream advances, this test must move with it — never
-//          weaken the assertion to "starts with".
+//          1.0.0 placeholder default and the 1.2.x stream leaking back into the build. The 1.3.0
+//          release corresponds to the IPC reliability/diagnostics overhaul: per-command IPC
+//          timeouts, structured IpcCallResult, SCM-aware reachability diagnostics, last-known-data
+//          UI on transient timeout, and the Configurator-vs-Service version/SHA mismatch warning.
+//          If the release stream advances, this test must move with it — never weaken the
+//          assertion to "starts with".
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
@@ -20,14 +21,14 @@ using Xunit;
 
 namespace RdpAudit.Core.Tests;
 
-/// <summary>Locks the released version metadata at exactly 1.2.5 across the Core assembly,
-/// blocking the prior 1.0.0 placeholder default from regressing.</summary>
+/// <summary>Locks the released version metadata at exactly 1.3.0 across the Core assembly,
+/// blocking the prior 1.0.0 placeholder default and the 1.2.x stream from regressing.</summary>
 public class RdpAuditVersionMetadataTests
 {
-	private const string ExpectedSemVer = "1.2.5";
-	private const string ExpectedFourPart = "1.2.5.0";
+	private const string ExpectedSemVer = "1.3.0";
+	private const string ExpectedFourPart = "1.3.0.0";
 	private const string ForbiddenLegacy = "1.0.0";
-	private const string ForbiddenPrev = "1.2.4";
+	private const string ForbiddenPrev = "1.2.";
 
 	[Fact]
 	public void Core_AssemblyInformationalVersion_IsPinnedTo110()

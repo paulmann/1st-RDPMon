@@ -94,6 +94,9 @@ public sealed class FirewallPage : TabPage
 	private readonly Button _providerCopyButton;
 	private readonly FirewallProviderDiagnosticsProbe _providerProbe = new();
 	private FirewallProviderDiagnostics? _lastProviderDiagnostics;
+	private readonly ServiceReachabilityProbe _reachability = new();
+	private bool _lastRefreshStale;
+	private bool _operationInFlight;
 
 	public FirewallPage(IpcClient ipc)
 	{
@@ -552,56 +555,101 @@ public sealed class FirewallPage : TabPage
 	{
 		try
 		{
-			Task<FirewallStatusDto?> statusTask = _ipc.SendAsync<FirewallStatusDto>(IpcCommand.GetFirewallStatus);
-			Task<List<AddressListEntryDto>?> blockTask = _ipc.SendAsync<List<AddressListEntryDto>>(IpcCommand.ListBlocklist);
-			Task<List<AddressListEntryDto>?> whiteTask = _ipc.SendAsync<List<AddressListEntryDto>>(IpcCommand.ListWhitelist);
-			Task<List<LoginRuleDto>?> rulesTask = _ipc.SendAsync<List<LoginRuleDto>>(IpcCommand.ListLoginRules);
-			Task<List<ActiveBlockDto>?> activeTask = _ipc.SendAsync<List<ActiveBlockDto>>(IpcCommand.ListActiveBlocksDetailed);
+			Task<IpcCallResult<FirewallStatusDto>> statusTask = _ipc.SendDetailedAsync<FirewallStatusDto>(IpcCommand.GetFirewallStatus);
+			Task<IpcCallResult<List<AddressListEntryDto>>> blockTask = _ipc.SendDetailedAsync<List<AddressListEntryDto>>(IpcCommand.ListBlocklist);
+			Task<IpcCallResult<List<AddressListEntryDto>>> whiteTask = _ipc.SendDetailedAsync<List<AddressListEntryDto>>(IpcCommand.ListWhitelist);
+			Task<IpcCallResult<List<LoginRuleDto>>> rulesTask = _ipc.SendDetailedAsync<List<LoginRuleDto>>(IpcCommand.ListLoginRules);
+			Task<IpcCallResult<List<ActiveBlockDto>>> activeTask = _ipc.SendDetailedAsync<List<ActiveBlockDto>>(IpcCommand.ListActiveBlocksDetailed);
 
 			await Task.WhenAll(statusTask, blockTask, whiteTask, rulesTask, activeTask).ConfigureAwait(true);
 
-			FirewallStatusDto? statusDto = await statusTask.ConfigureAwait(true);
-			List<AddressListEntryDto>? blocklist = await blockTask.ConfigureAwait(true);
-			List<AddressListEntryDto>? whitelist = await whiteTask.ConfigureAwait(true);
-			List<LoginRuleDto>? loginRules = await rulesTask.ConfigureAwait(true);
-			List<ActiveBlockDto>? activeBlocks = await activeTask.ConfigureAwait(true);
+			IpcCallResult<FirewallStatusDto> statusCall = await statusTask.ConfigureAwait(true);
+			IpcCallResult<List<AddressListEntryDto>> blockCall = await blockTask.ConfigureAwait(true);
+			IpcCallResult<List<AddressListEntryDto>> whiteCall = await whiteTask.ConfigureAwait(true);
+			IpcCallResult<List<LoginRuleDto>> rulesCall = await rulesTask.ConfigureAwait(true);
+			IpcCallResult<List<ActiveBlockDto>> activeCall = await activeTask.ConfigureAwait(true);
 
-			_lastStatus = statusDto;
-			RenderProviderStatus(_lastStatus);
+			// Treat a connect-failure on the cheap status call as "service genuinely gone": only then do
+			// we blank the grids. A timeout / transient failure keeps the last-known rows so a long Repair
+			// in flight (or a momentary busy service) never wipes the operator's view to empty.
+			bool serviceGone = !statusCall.ServiceLikelyReachable;
+
+			if (statusCall.IsSuccess)
+			{
+				_lastStatus = statusCall.Value;
+				_lastRefreshStale = false;
+			}
+			else if (serviceGone)
+			{
+				_lastStatus = null;
+				_lastRefreshStale = false;
+			}
+			else
+			{
+				_lastRefreshStale = true;
+			}
+			RenderProviderStatus(_lastStatus, statusCall);
 
 			// Load active blocks first: the BlockList enforcement column is derived from the verified
 			// ActiveBlock reconciliation, so it must be populated before ApplyBlocklistFilter runs.
-			_activeBlocksAll.Clear();
-			if (activeBlocks is not null)
+			if (activeCall.IsSuccess && activeCall.Value is not null)
 			{
-				_activeBlocksAll.AddRange(activeBlocks);
+				_activeBlocksAll.Clear();
+				_activeBlocksAll.AddRange(activeCall.Value);
+			}
+			else if (serviceGone)
+			{
+				_activeBlocksAll.Clear();
 			}
 			ApplyActiveBlockFilter();
 
-			_blocklistAll.Clear();
-			if (blocklist is not null)
+			if (blockCall.IsSuccess && blockCall.Value is not null)
 			{
-				_blocklistAll.AddRange(blocklist);
+				_blocklistAll.Clear();
+				_blocklistAll.AddRange(blockCall.Value);
+			}
+			else if (serviceGone)
+			{
+				_blocklistAll.Clear();
 			}
 			ApplyBlocklistFilter();
 
-			_whitelistAll.Clear();
-			if (whitelist is not null)
+			if (whiteCall.IsSuccess && whiteCall.Value is not null)
 			{
-				_whitelistAll.AddRange(whitelist);
+				_whitelistAll.Clear();
+				_whitelistAll.AddRange(whiteCall.Value);
+			}
+			else if (serviceGone)
+			{
+				_whitelistAll.Clear();
 			}
 			ApplyWhitelistFilter();
 
-			_loginRulesAll.Clear();
-			if (loginRules is not null)
+			if (rulesCall.IsSuccess && rulesCall.Value is not null)
 			{
-				_loginRulesAll.AddRange(loginRules);
+				_loginRulesAll.Clear();
+				_loginRulesAll.AddRange(rulesCall.Value);
+			}
+			else if (serviceGone)
+			{
+				_loginRulesAll.Clear();
 			}
 			ApplyLoginRuleFilter();
 
-			SetStatus(string.Format(CultureInfo.InvariantCulture,
-				"Refresh OK. blocklist={0} whitelist={1} logins={2} activeBlocks={3}",
-				_blocklistAll.Count, _whitelistAll.Count, _loginRulesAll.Count, _activeBlocksAll.Count));
+			if (statusCall.IsSuccess)
+			{
+				SetStatus(string.Format(CultureInfo.InvariantCulture,
+					"Refresh OK. blocklist={0} whitelist={1} logins={2} activeBlocks={3}",
+					_blocklistAll.Count, _whitelistAll.Count, _loginRulesAll.Count, _activeBlocksAll.Count));
+			}
+			else if (serviceGone)
+			{
+				SetStatus("Refresh FAILED: " + statusCall.Headline());
+			}
+			else
+			{
+				SetStatus("Refresh incomplete (showing last-known data): " + statusCall.Headline() + "  |  " + statusCall.TraceLine);
+			}
 		}
 		catch (Exception ex)
 		{
@@ -609,16 +657,29 @@ public sealed class FirewallPage : TabPage
 		}
 	}
 
-	private void RenderProviderStatus(FirewallStatusDto? dto)
+	private void RenderProviderStatus(FirewallStatusDto? dto, IpcCallResult<FirewallStatusDto>? statusCall = null)
 	{
 		if (dto is null)
 		{
-			_providerStatusLabel.Text = "Provider status: service unreachable";
+			// Distinguish a genuinely-down service from a transient timeout: a timeout keeps the last-known
+			// grids and says so, instead of declaring the service unreachable and blanking the view.
+			bool transient = statusCall is { } call && call.ServiceLikelyReachable && !call.IsSuccess;
+			string headline = statusCall?.Headline() ?? "service unreachable";
+			_providerStatusLabel.Text = transient
+				? "Provider status: " + headline + " — showing last-known data"
+				: "Provider status: " + headline;
 			_windowsStatusLabel.Text = "Windows: unknown";
-			_countersLabel.Text = "Counters: unavailable";
-			_enforcementHealthLabel.Text = "Enforcement: unknown (service unreachable)";
+			_countersLabel.Text = transient ? "Counters: stale (service busy)" : "Counters: unavailable";
+			_enforcementHealthLabel.Text = transient
+				? "Enforcement: stale (service reachable but did not respond in time — retry)"
+				: "Enforcement: unknown (service unreachable)";
 			_enforcementHealthLabel.ForeColor = SystemColors.GrayText;
 			return;
+		}
+
+		if (_lastRefreshStale)
+		{
+			_lastRefreshStale = false;
 		}
 
 		string configured = dto.ConfiguredProvider.ToString();
@@ -912,16 +973,17 @@ public sealed class FirewallPage : TabPage
 			return;
 		}
 
+		if (!BeginBusy())
+		{
+			return;
+		}
+
 		try
 		{
-			ReconciledBlockDto? result =
-				await _ipc.SendAsync<ReconciledBlockDto>(IpcCommand.RepairBlocklistEnforcement, row.Id).ConfigureAwait(true);
-			if (result is null)
-			{
-				SetStatus(string.Format(CultureInfo.InvariantCulture,
-					"Repair blocklist {0} (Id={1}): FAILED (no response).", row.Address, row.Id));
-			}
-			else
+			string action = string.Format(CultureInfo.InvariantCulture, "Repair blocklist {0} (Id={1})", row.Address, row.Id);
+			IpcCallResult<ReconciledBlockDto> call =
+				await _ipc.SendDetailedAsync<ReconciledBlockDto>(IpcCommand.RepairBlocklistEnforcement, row.Id).ConfigureAwait(true);
+			if (call.IsSuccess && call.Value is { } result)
 			{
 				string detail = string.IsNullOrWhiteSpace(result.Detail) ? string.Empty : " — " + result.Detail;
 				SetStatus(string.Format(CultureInfo.InvariantCulture,
@@ -931,6 +993,10 @@ public sealed class FirewallPage : TabPage
 					EnforcementReconciler.DescribeConfidence(result.Confidence),
 					detail));
 			}
+			else
+			{
+				await ReportCallFailureAsync(call, action).ConfigureAwait(true);
+			}
 
 			await RefreshAllAsync().ConfigureAwait(true);
 		}
@@ -938,6 +1004,10 @@ public sealed class FirewallPage : TabPage
 		{
 			SetStatus(string.Format(CultureInfo.InvariantCulture,
 				"Repair blocklist {0}: FAILED — {1}", row.Address, ex.GetType().Name));
+		}
+		finally
+		{
+			EndBusy();
 		}
 	}
 
@@ -948,13 +1018,18 @@ public sealed class FirewallPage : TabPage
 	/// </summary>
 	private async Task OnRepairBlocklistAllAsync()
 	{
+		if (!BeginBusy())
+		{
+			return;
+		}
+
 		try
 		{
-			ReconciliationReportDto? report =
-				await _ipc.SendAsync<ReconciliationReportDto>(IpcCommand.RepairAllEnabledBlocklistEnforcement).ConfigureAwait(true);
-			if (report is null)
+			IpcCallResult<ReconciliationReportDto> call =
+				await _ipc.SendDetailedAsync<ReconciliationReportDto>(IpcCommand.RepairAllEnabledBlocklistEnforcement).ConfigureAwait(true);
+			if (!call.IsSuccess || call.Value is not { } report)
 			{
-				SetStatus("Repair all enabled blocklist: FAILED (no response).");
+				await ReportCallFailureAsync(call, "Repair all enabled blocklist").ConfigureAwait(true);
 			}
 			else if (report.Blocks.Count == 0)
 			{
@@ -974,6 +1049,10 @@ public sealed class FirewallPage : TabPage
 		{
 			SetStatus(string.Format(CultureInfo.InvariantCulture,
 				"Repair all enabled blocklist: FAILED — {0}", ex.GetType().Name));
+		}
+		finally
+		{
+			EndBusy();
 		}
 	}
 
@@ -1205,18 +1284,34 @@ public sealed class FirewallPage : TabPage
 			return;
 		}
 
+		if (!BeginBusy())
+		{
+			return;
+		}
+
 		try
 		{
-			JsonElement? response = await _ipc.SendAsync<JsonElement?>(IpcCommand.UnblockActiveBlock, row.Id).ConfigureAwait(true);
-			SetStatus(response is null
-				? string.Format(CultureInfo.InvariantCulture, "Unblock {0}: FAILED (no response).", row.Ip)
-				: string.Format(CultureInfo.InvariantCulture, "Unblock {0}: response received.", row.Ip));
+			IpcCallResult<JsonElement?> call =
+				await _ipc.SendDetailedAsync<JsonElement?>(IpcCommand.UnblockActiveBlock, row.Id).ConfigureAwait(true);
+			if (call.IsSuccess)
+			{
+				SetStatus(string.Format(CultureInfo.InvariantCulture, "Unblock {0}: done.", row.Ip));
+			}
+			else
+			{
+				await ReportCallFailureAsync(call, string.Format(CultureInfo.InvariantCulture, "Unblock {0}", row.Ip)).ConfigureAwait(true);
+			}
+
 			await RefreshAllAsync().ConfigureAwait(true);
 		}
 		catch (Exception ex)
 		{
 			SetStatus(string.Format(CultureInfo.InvariantCulture,
 				"Unblock {0}: FAILED — {1}", row.Ip, ex.GetType().Name));
+		}
+		finally
+		{
+			EndBusy();
 		}
 	}
 
@@ -1228,19 +1323,24 @@ public sealed class FirewallPage : TabPage
 	/// Active Blocks view reflects verified enforcement rather than database intent alone.</summary>
 	private async Task OnVerifyAllAsync()
 	{
+		if (!BeginBusy())
+		{
+			return;
+		}
+
 		try
 		{
-			ReconciliationReportDto? report =
-				await _ipc.SendAsync<ReconciliationReportDto>(IpcCommand.ReconcileEnforcement).ConfigureAwait(true);
-			if (report is null)
-			{
-				SetStatus("Verify all: FAILED (no response).");
-			}
-			else
+			IpcCallResult<ReconciliationReportDto> call =
+				await _ipc.SendDetailedAsync<ReconciliationReportDto>(IpcCommand.ReconcileEnforcement).ConfigureAwait(true);
+			if (call.IsSuccess && call.Value is { } report)
 			{
 				SetStatus(string.Format(CultureInfo.InvariantCulture,
 					"Verify all: {0} block(s), {1} verified, {2} unenforced, {3} orphan(s).",
 					report.Blocks.Count, report.VerifiedCount, report.UnenforcedCount, report.Orphans.Count));
+			}
+			else
+			{
+				await ReportCallFailureAsync(call, "Verify all").ConfigureAwait(true);
 			}
 
 			await RefreshAllAsync().ConfigureAwait(true);
@@ -1249,6 +1349,10 @@ public sealed class FirewallPage : TabPage
 		{
 			SetStatus(string.Format(CultureInfo.InvariantCulture,
 				"Verify all: FAILED — {0}", ex.GetType().Name));
+		}
+		finally
+		{
+			EndBusy();
 		}
 	}
 
@@ -1263,22 +1367,37 @@ public sealed class FirewallPage : TabPage
 			return;
 		}
 
+		if (!BeginBusy())
+		{
+			return;
+		}
+
 		try
 		{
-			ReconciledBlockDto? result =
-				await _ipc.SendAsync<ReconciledBlockDto>(IpcCommand.RepairActiveBlock, row.Id).ConfigureAwait(true);
-			SetStatus(result is null
-				? string.Format(CultureInfo.InvariantCulture, "Repair {0}: FAILED (no response).", row.Ip)
-				: string.Format(CultureInfo.InvariantCulture, "Repair {0}: {1} / {2}.",
+			IpcCallResult<ReconciledBlockDto> call =
+				await _ipc.SendDetailedAsync<ReconciledBlockDto>(IpcCommand.RepairActiveBlock, row.Id).ConfigureAwait(true);
+			if (call.IsSuccess && call.Value is { } result)
+			{
+				SetStatus(string.Format(CultureInfo.InvariantCulture, "Repair {0}: {1} / {2}.",
 					row.Ip,
 					EnforcementReconciler.DescribeStatus(result.Status),
 					EnforcementReconciler.DescribeConfidence(result.Confidence)));
+			}
+			else
+			{
+				await ReportCallFailureAsync(call, string.Format(CultureInfo.InvariantCulture, "Repair {0}", row.Ip)).ConfigureAwait(true);
+			}
+
 			await RefreshAllAsync().ConfigureAwait(true);
 		}
 		catch (Exception ex)
 		{
 			SetStatus(string.Format(CultureInfo.InvariantCulture,
 				"Repair {0}: FAILED — {1}", row.Ip, ex.GetType().Name));
+		}
+		finally
+		{
+			EndBusy();
 		}
 	}
 
@@ -1297,21 +1416,26 @@ public sealed class FirewallPage : TabPage
 			return;
 		}
 
+		if (!BeginBusy())
+		{
+			return;
+		}
+
 		try
 		{
-			EnforcementCleanupResultDto? result =
-				await _ipc.SendAsync<EnforcementCleanupResultDto>(IpcCommand.RemoveAllEnforcement).ConfigureAwait(true);
-			if (result is null)
-			{
-				SetStatus("Remove all enforcement: FAILED (no response).");
-			}
-			else
+			IpcCallResult<EnforcementCleanupResultDto> call =
+				await _ipc.SendDetailedAsync<EnforcementCleanupResultDto>(IpcCommand.RemoveAllEnforcement).ConfigureAwait(true);
+			if (call.IsSuccess && call.Value is { } result)
 			{
 				SetStatus(string.Format(CultureInfo.InvariantCulture,
 					"Remove all enforcement: {0} rule(s), {1} route(s), {2} IPsec object(s) removed, "
 					+ "{3} row(s) marked removed, {4} failure(s).",
 					result.FirewallRulesRemoved, result.RoutesRemoved, result.IpsecObjectsRemoved,
 					result.ActiveBlockRowsMarkedRemoved, result.Failures));
+			}
+			else
+			{
+				await ReportCallFailureAsync(call, "Remove all enforcement").ConfigureAwait(true);
 			}
 
 			await RefreshAllAsync().ConfigureAwait(true);
@@ -1320,6 +1444,10 @@ public sealed class FirewallPage : TabPage
 		{
 			SetStatus(string.Format(CultureInfo.InvariantCulture,
 				"Remove all enforcement: FAILED — {0}", ex.GetType().Name));
+		}
+		finally
+		{
+			EndBusy();
 		}
 	}
 
@@ -1727,6 +1855,45 @@ public sealed class FirewallPage : TabPage
 
 	private static bool Confirm(string message, string caption) =>
 		MessageBox.Show(message, caption, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+
+	/// <summary>Re-entrancy + UI-busy guard for service-mutating actions (repair / verify / unblock /
+	/// remove-all). While one is running the inner tab control (which hosts every action button and the
+	/// grids) is disabled, so the operator cannot launch a second overlapping operation against the same
+	/// long-running service call. Returns false if an operation is already in flight.</summary>
+	private bool BeginBusy()
+	{
+		if (_operationInFlight)
+		{
+			SetStatus("Operation in progress — please wait for the current firewall operation to finish.");
+			return false;
+		}
+
+		_operationInFlight = true;
+		_innerTabs.Enabled = false;
+		return true;
+	}
+
+	private void EndBusy()
+	{
+		_operationInFlight = false;
+		_innerTabs.Enabled = true;
+	}
+
+	/// <summary>Renders an honest, SCM-aware status line for a service call that did not succeed, so the
+	/// operator sees "operation in progress / service stopped / command error" rather than a blanket
+	/// "no response". Never throws.</summary>
+	private async Task ReportCallFailureAsync<T>(IpcCallResult<T> call, string action)
+	{
+		try
+		{
+			ServiceReachabilityDiagnostic diag = await _reachability.DescribeAsync(call).ConfigureAwait(true);
+			SetStatus(action + ": " + diag.Headline + "  |  " + call.TraceLine);
+		}
+		catch (Exception ex)
+		{
+			SetStatus(action + ": FAILED — " + call.Headline() + " (diagnostic probe error: " + ex.GetType().Name + ")");
+		}
+	}
 
 	private void SetStatus(string message)
 	{

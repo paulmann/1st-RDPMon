@@ -7,6 +7,7 @@
 // Site:    https://Deynekin.com
 
 using System.Globalization;
+using System.Reflection;
 using System.Runtime.Versioning;
 using RdpAudit.Configurator.Ipc;
 using RdpAudit.Core.Ipc;
@@ -30,21 +31,35 @@ public sealed class MainForm : Form
 		Height = 820;
 		StartPosition = FormStartPosition.CenterScreen;
 
-		_tabs = new TabControl { Dock = DockStyle.Fill };
-		_tabs.TabPages.Add(new OverviewPage(_ipc) { Text = "Overview" });
-		_tabs.TabPages.Add(new PrerequisitesPage { Text = "Prerequisites" });
-		_tabs.TabPages.Add(new AuditPolicyPage { Text = "Audit Policy" });
-		_tabs.TabPages.Add(new ServicePage(_ipc) { Text = "Service" });
-		_tabs.TabPages.Add(new RdpConfigurationPage(_ipc) { Text = "RDP Configuration" });
-		_tabs.TabPages.Add(new SettingsPage(_ipc) { Text = "Settings" });
-		_tabs.TabPages.Add(new LiveEventsPage(_ipc) { Text = "Live Events" });
-		_tabs.TabPages.Add(new FirewallPage(_ipc) { Text = "Firewall" });
-		_tabs.TabPages.Add(new AttackStatisticsPage(_ipc) { Text = "Attack Statistics" });
-		_tabs.TabPages.Add(new RemoteRdpClientsPage(_ipc) { Text = "Remote RDP Clients" });
-		_tabs.TabPages.Add(new AbuseIpDbPage(_ipc) { Text = "AbuseIPDB" });
-		_tabs.TabPages.Add(new MikroTikPage(_ipc) { Text = "MikroTik" });
-		_tabs.TabPages.Add(new DiagnosticsPage(_ipc) { Text = "Diagnostic" });
-		_tabs.TabPages.Add(new ToolsDiagPage(_ipc) { Text = "Tools Diag" });
+		// Owner-drawn tabs: each page label is prefixed with a glyph for fast visual scanning, and the
+		// selected tab is rendered bold on a highlighted background so the active page is obvious at a
+		// glance. DrawMode=OwnerDrawFixed keeps tab sizing native (no layout shift / flicker); only the
+		// per-tab paint is customized. SizeMode=Fixed gives every tab a stable width so the bold selected
+		// label does not reflow neighbouring tabs.
+		_tabs = new TabControl
+		{
+			Dock = DockStyle.Fill,
+			DrawMode = TabDrawMode.OwnerDrawFixed,
+			SizeMode = TabSizeMode.Fixed,
+			ItemSize = new Size(150, 26),
+			Padding = new Point(8, 3),
+		};
+		_tabs.TabPages.Add(new OverviewPage(_ipc) { Text = "\U0001F4CA Overview" });
+		_tabs.TabPages.Add(new PrerequisitesPage { Text = "✅ Prerequisites" });
+		_tabs.TabPages.Add(new AuditPolicyPage { Text = "\U0001F4DC Audit Policy" });
+		_tabs.TabPages.Add(new ServicePage(_ipc) { Text = "⚙️ Service" });
+		_tabs.TabPages.Add(new RdpConfigurationPage(_ipc) { Text = "\U0001F5A5️ RDP Configuration" });
+		_tabs.TabPages.Add(new SettingsPage(_ipc) { Text = "\U0001F527 Settings" });
+		_tabs.TabPages.Add(new LiveEventsPage(_ipc) { Text = "\U0001F4E1 Live Events" });
+		_tabs.TabPages.Add(new FirewallPage(_ipc) { Text = "\U0001F6E1️ Firewall" });
+		_tabs.TabPages.Add(new AttackStatisticsPage(_ipc) { Text = "\U0001F4C8 Attack Statistics" });
+		_tabs.TabPages.Add(new RemoteRdpClientsPage(_ipc) { Text = "\U0001F310 Remote RDP Clients" });
+		_tabs.TabPages.Add(new AbuseIpDbPage(_ipc) { Text = "\U0001F9FE AbuseIPDB" });
+		_tabs.TabPages.Add(new MikroTikPage(_ipc) { Text = "\U0001F4F6 MikroTik" });
+		_tabs.TabPages.Add(new DiagnosticsPage(_ipc) { Text = "\U0001FA7A Diagnostic" });
+		_tabs.TabPages.Add(new ToolsDiagPage(_ipc) { Text = "\U0001F9EA Tools Diag" });
+
+		_tabs.DrawItem += OnDrawTab;
 
 		Controls.Add(_tabs);
 
@@ -63,21 +78,117 @@ public sealed class MainForm : Form
 		FormClosing += (_, _) => _statusTimer.Stop();
 	}
 
+	/// <summary>Owner-draws a single tab header: emoji-prefixed label, with the selected tab rendered
+	/// bold on a highlighted background so the active page stands out. Falls back gracefully if the
+	/// index is out of range (can happen transiently during tab mutation).</summary>
+	private void OnDrawTab(object? sender, DrawItemEventArgs e)
+	{
+		if (e.Index < 0 || e.Index >= _tabs.TabPages.Count)
+		{
+			return;
+		}
+
+		TabPage page = _tabs.TabPages[e.Index];
+		bool selected = e.Index == _tabs.SelectedIndex;
+		Rectangle bounds = e.Bounds;
+
+		Color back = selected ? SystemColors.Highlight : SystemColors.Control;
+		Color fore = selected ? SystemColors.HighlightText : SystemColors.ControlText;
+
+		using (SolidBrush backBrush = new(back))
+		{
+			e.Graphics.FillRectangle(backBrush, bounds);
+		}
+
+		using Font font = new(Font, selected ? FontStyle.Bold : FontStyle.Regular);
+		TextRenderer.DrawText(
+			e.Graphics,
+			page.Text,
+			font,
+			bounds,
+			fore,
+			TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+
+		if (selected)
+		{
+			e.DrawFocusRectangle();
+		}
+	}
+
 	private async Task RefreshServiceStatusAsync()
 	{
 		try
 		{
-			ServiceStatus? status = await _ipc.SendAsync<ServiceStatus>(IpcCommand.GetStatus).ConfigureAwait(true);
-			_statusLabel.Text = status is null
-				? "Service: not reachable"
-				: string.Format(CultureInfo.InvariantCulture,
+			IpcCallResult<ServiceStatus> call =
+				await _ipc.SendDetailedAsync<ServiceStatus>(IpcCommand.GetStatus).ConfigureAwait(true);
+
+			if (call.IsSuccess && call.Value is { } status)
+			{
+				string baseLine = string.Format(CultureInfo.InvariantCulture,
 					"Service v{0} | uptime {1:hh\\:mm\\:ss} | events {2} (dropped {3}) | alerts {4}",
 					status.Version, status.Uptime, status.EventsCaptured, status.EventsDropped, status.AlertsRaised);
+
+				// Warn prominently when the running service was built from a different version than this
+				// Configurator — the most common cause of "I fixed it but nothing changed" is launching a
+				// freshly built Configurator against a stale installed service that was never re-published.
+				string mismatch = DescribeVersionMismatch(status.Version);
+				_statusLabel.Text = mismatch.Length == 0 ? baseLine : baseLine + "  ⚠ " + mismatch;
+				_statusLabel.ForeColor = mismatch.Length == 0 ? SystemColors.ControlText : Color.Firebrick;
+			}
+			else
+			{
+				// Distinguish a stopped service from a busy one rather than the blanket "not reachable".
+				_statusLabel.Text = "Service: " + call.Headline();
+				_statusLabel.ForeColor = call.ServiceLikelyReachable ? SystemColors.ControlText : Color.Firebrick;
+			}
 		}
 		catch (Exception ex)
 		{
 			_statusLabel.Text = $"Service: error — {ex.GetType().Name}";
+			_statusLabel.ForeColor = Color.Firebrick;
 		}
+	}
+
+	/// <summary>Returns a short warning when the running service's version differs from this Configurator's
+	/// own version, else an empty string. Compares the bare SemVer (build-metadata "+sha" suffix trimmed),
+	/// so a SHA difference on the same version is not flagged here — the Service tab diagnostics report
+	/// performs the deeper SHA / fingerprint comparison.</summary>
+	private static string DescribeVersionMismatch(string? serviceVersion)
+	{
+		if (string.IsNullOrWhiteSpace(serviceVersion))
+		{
+			return string.Empty;
+		}
+
+		string configurator = ResolveConfiguratorVersion();
+		string serviceSemVer = TrimBuildMetadata(serviceVersion);
+		if (string.Equals(configurator, serviceSemVer, StringComparison.OrdinalIgnoreCase))
+		{
+			return string.Empty;
+		}
+
+		return string.Format(CultureInfo.InvariantCulture,
+			"VERSION MISMATCH: Configurator {0} vs Service {1} — the running service is likely a stale build. Re-publish & restart the service.",
+			configurator, serviceSemVer);
+	}
+
+	private static string ResolveConfiguratorVersion()
+	{
+		System.Reflection.Assembly asm = typeof(MainForm).Assembly;
+		string? info = asm
+			.GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+		if (!string.IsNullOrWhiteSpace(info))
+		{
+			return TrimBuildMetadata(info);
+		}
+
+		return asm.GetName().Version?.ToString() ?? "0.0.0";
+	}
+
+	private static string TrimBuildMetadata(string version)
+	{
+		int plus = version.IndexOf('+', StringComparison.Ordinal);
+		return plus > 0 ? version[..plus] : version;
 	}
 
 	protected override void Dispose(bool disposing)

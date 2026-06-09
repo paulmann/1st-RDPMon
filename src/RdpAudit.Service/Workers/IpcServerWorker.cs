@@ -110,8 +110,11 @@ public sealed class IpcServerWorker : BackgroundService
 	{
 		await using (pipe)
 		{
-			// Hard per-connection deadline so a stalled / slow client never holds a server slot
-			// indefinitely. Linked to the service stoppingToken so shutdown still cancels.
+			// Read the request frame first under the short default deadline (a connected client must send
+			// promptly), then widen the deadline to the per-command budget before dispatching. This keeps
+			// the server and client agreeing on how long a long-running command (firewall repair / verify /
+			// Tools Diag) is allowed to take, so the service is not cancelled mid-operation while the client
+			// still waits — the historic cause of "service unreachable" right after a Repair.
 			using CancellationTokenSource cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
 			cts.CancelAfter(TimeSpan.FromMilliseconds(IpcConstants.OperationTimeoutMs));
 			CancellationToken token = cts.Token;
@@ -130,6 +133,15 @@ public sealed class IpcServerWorker : BackgroundService
 				await pipe.ReadExactlyAsync(body, token).ConfigureAwait(false);
 
 				IpcRequest request = MessagePackSerializer.Deserialize<IpcRequest>(body, cancellationToken: token);
+
+				// Extend the deadline to the per-command budget now that the command is known. The Stopwatch
+				// already elapsed during the read is negligible against multi-second command budgets.
+				int budgetMs = IpcConstants.TimeoutMsFor(request.Command);
+				if (budgetMs > IpcConstants.OperationTimeoutMs)
+				{
+					cts.CancelAfter(TimeSpan.FromMilliseconds(budgetMs));
+				}
+
 				using IServiceScope scope = _services.CreateScope();
 				IpcDispatcher dispatcher = scope.ServiceProvider.GetRequiredService<IpcDispatcher>();
 				IpcResponse response = await dispatcher.DispatchAsync(request, token).ConfigureAwait(false);
