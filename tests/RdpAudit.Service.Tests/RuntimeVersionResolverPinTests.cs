@@ -1,12 +1,13 @@
 // File:    tests/RdpAudit.Service.Tests/RuntimeVersionResolverPinTests.cs
 // Module:  RdpAudit.Service.Tests
 // Purpose: Locks the Service runtime version surfaced via IPC ServiceStatus.Version at exactly
-//          1.2.4 — the SemVer publish.ps1 emits and the value the Configurator's Service tab
+//          1.2.5 — the SemVer publish.ps1 emits and the value the Configurator's Service tab
 //          contrasts against the installed and distribution binaries. The complementary core
 //          gate lives in RdpAuditVersionMetadataTests; this one targets the Service assembly
-//          and the resolver path the running service actually uses at runtime. The 1.2.4 bump
-//          accompanies the live-enforcement reconciliation pass and the new Reconcile / Repair /
-//          RemoveAllEnforcement diagnostic IPC commands.
+//          and the resolver path the running service actually uses at runtime. The 1.2.5 bump
+//          corresponds to AbuseIPDB per-IP report dedupe (success-filtered cooldown), the
+//          masked-key persistence fix, and reconciliation-driven firewall enforcement health
+//          in the Firewall tab. If the release stream advances, this test must move with it.
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
@@ -17,14 +18,16 @@ using Xunit;
 
 namespace RdpAudit.Service.Tests;
 
-/// <summary>Pins the Service runtime version at 1.2.4.</summary>
+/// <summary>Pins the Service runtime version at exactly 1.2.5, blocking both the prior 1.0.0
+/// placeholder default and the previous 1.2.4 release stream from regressing.</summary>
 public class RuntimeVersionResolverPinTests
 {
-	private const string ExpectedSemVer = "1.2.4";
+	private const string ExpectedSemVer = "1.2.5";
 	private const string ForbiddenLegacy = "1.0.0";
+	private const string ForbiddenPrev = "1.2.4";
 
 	[Fact]
-	public void Resolve_FromServiceAssembly_ReturnsExactly120()
+	public void Resolve_FromServiceAssembly_ReturnsPinnedSemVer()
 	{
 		Assembly serviceAssembly = typeof(RuntimeVersionResolver).Assembly;
 		string version = RuntimeVersionResolver.Resolve(serviceAssembly, processPath: null);
@@ -37,5 +40,13 @@ public class RuntimeVersionResolverPinTests
 		Assembly serviceAssembly = typeof(RuntimeVersionResolver).Assembly;
 		string version = RuntimeVersionResolver.Resolve(serviceAssembly, processPath: null);
 		Assert.DoesNotContain(ForbiddenLegacy, version, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public void Resolve_NeverReportsPreviousRelease124()
+	{
+		Assembly serviceAssembly = typeof(RuntimeVersionResolver).Assembly;
+		string version = RuntimeVersionResolver.Resolve(serviceAssembly, processPath: null);
+		Assert.DoesNotContain(ForbiddenPrev, version, StringComparison.Ordinal);
 	}
 }
