@@ -59,6 +59,11 @@ public static class ConnectionFactsExportFormatter
 		"ObservedEventIds",
 		"UserNamesAttempted",
 		"IsActive",
+		"Classification",
+		"IsPublic",
+		"IsWhitelisted",
+		"IsReportableToAbuseIPDB",
+		"IsEligibleForAutoBlock",
 	};
 
 	/// <summary>Renders <paramref name="dto"/> into <paramref name="format"/>. Throws
@@ -212,7 +217,12 @@ public static class ConnectionFactsExportFormatter
 			AppendCsvCell(sb, f.SuccessfulLogons.ToString(CultureInfo.InvariantCulture)); sb.Append(',');
 			AppendCsvCell(sb, f.ObservedEventIds); sb.Append(',');
 			AppendCsvCell(sb, f.UserNamesAttempted); sb.Append(',');
-			AppendCsvCell(sb, f.IsActive ? "yes" : "no");
+			AppendCsvCell(sb, f.IsActive ? "yes" : "no"); sb.Append(',');
+			AppendCsvCell(sb, f.Classification); sb.Append(',');
+			AppendCsvCell(sb, f.IsPublic ? "yes" : "no"); sb.Append(',');
+			AppendCsvCell(sb, f.IsWhitelisted ? "yes" : "no"); sb.Append(',');
+			AppendCsvCell(sb, f.IsReportableToAbuseIPDB ? "yes" : "no"); sb.Append(',');
+			AppendCsvCell(sb, f.IsEligibleForAutoBlock ? "yes" : "no");
 			sb.AppendLine();
 		}
 		return sb.ToString();

@@ -482,6 +482,99 @@ public class IpcDispatcherStageIpDTests
 		}
 	}
 
+	private static RdpConnectionFact MakeFact(string ip, DateTime lastSeenUtc) => new()
+	{
+		Ip = ip,
+		UserName = "tester",
+		LogonId = "0x9000",
+		FirstSeenUtc = lastSeenUtc.AddMinutes(-5),
+		LastSeenUtc = lastSeenUtc,
+		FailedLogons = 1,
+		ObservedEventIds = "4625",
+		UserNamesAttempted = "tester",
+		IsActive = false,
+	};
+
+	[Fact]
+	public async Task ListConnectionFacts_PopulatesReportabilityClassification()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			await using (AuditDbContext db = factory.CreateDbContext())
+			{
+				db.RdpConnectionFacts.Add(MakeFact("77.37.192.246", Now));
+				db.RdpConnectionFacts.Add(MakeFact("192.168.1.50", Now.AddMinutes(-1)));
+				db.RdpConnectionFacts.Add(MakeFact("fe80::1ff:fe23:4567:890a", Now.AddMinutes(-2)));
+				db.RdpConnectionFacts.Add(MakeFact("8.8.8.8", Now.AddMinutes(-3)));
+				db.WhitelistEntries.Add(new WhitelistEntry
+				{
+					Ip = "8.8.8.8",
+					AddedUtc = Now,
+				});
+				await db.SaveChangesAsync();
+			}
+
+			IpcDispatcher dispatcher = CreateDispatcher(factory);
+			ConnectionFactsDto dto = await CallAsync<ConnectionFactsDto>(dispatcher,
+				IpcCommand.ListConnectionFacts, new ConnectionFactsRequest());
+
+			ConnectionFactDto pub = dto.Facts.Single(f => f.Ip == "77.37.192.246");
+			Assert.True(pub.IsPublic);
+			Assert.False(pub.IsWhitelisted);
+			Assert.True(pub.IsReportableToAbuseIPDB);
+			Assert.True(pub.IsEligibleForAutoBlock);
+
+			ConnectionFactDto priv = dto.Facts.Single(f => f.Ip == "192.168.1.50");
+			Assert.False(priv.IsPublic);
+			Assert.False(priv.IsReportableToAbuseIPDB);
+			Assert.False(priv.IsEligibleForAutoBlock);
+
+			ConnectionFactDto link = dto.Facts.Single(f => f.Ip == "fe80::1ff:fe23:4567:890a");
+			Assert.False(link.IsPublic);
+			Assert.False(link.IsReportableToAbuseIPDB);
+			Assert.False(link.IsEligibleForAutoBlock);
+
+			ConnectionFactDto white = dto.Facts.Single(f => f.Ip == "8.8.8.8");
+			Assert.True(white.IsWhitelisted);
+			Assert.False(white.IsReportableToAbuseIPDB);
+			Assert.False(white.IsEligibleForAutoBlock);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task GetConnectionFactsForIp_PopulatesReportabilityForPublicIp()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			await using (AuditDbContext db = factory.CreateDbContext())
+			{
+				db.RdpConnectionFacts.Add(MakeFact("77.37.192.246", Now));
+				await db.SaveChangesAsync();
+			}
+
+			IpcDispatcher dispatcher = CreateDispatcher(factory);
+			ConnectionFactsForIpDto dto = await CallAsync<ConnectionFactsForIpDto>(dispatcher,
+				IpcCommand.GetConnectionFactsForIp,
+				new ConnectionFactsForIpRequest { Ip = "77.37.192.246" });
+
+			ConnectionFactDto fact = Assert.Single(dto.Facts);
+			Assert.True(fact.IsPublic);
+			Assert.True(fact.IsReportableToAbuseIPDB);
+			Assert.True(fact.IsEligibleForAutoBlock);
+			Assert.False(fact.IsWhitelisted);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
 	[Fact]
 	public async Task EnrichSessionsHistoricalContext_NoFacts_LeavesSessionUntouched()
 	{
