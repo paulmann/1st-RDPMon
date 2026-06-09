@@ -218,6 +218,168 @@ public sealed class EnforcementReconciliationService
 		return dto;
 	}
 
+	/// <summary>
+	/// Repairs enforcement for one enabled BlockList row: ensures a matching ActiveBlock exists for
+	/// the row's IP (creating a Pending row routed to the configured provider when none is found),
+	/// then delegates to <see cref="RepairAsync"/> which (re-)installs the backend rule and proves
+	/// enforcement by re-reading the firewall. Returns the post-repair reconciled row so the caller
+	/// sees verified vs still-missing — never a silent success.
+	/// </summary>
+	public async Task<ReconciledBlockDto> RepairBlocklistAsync(long blocklistId, CancellationToken ct)
+	{
+		if (blocklistId <= 0)
+		{
+			throw new ArgumentOutOfRangeException(nameof(blocklistId), "BlockList id must be positive.");
+		}
+
+		FirewallOptions cfg = _options.CurrentValue.Firewall;
+
+		long activeBlockId;
+		await using (AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false))
+		{
+			BlocklistEntry? entry = await db.BlocklistEntries
+				.FirstOrDefaultAsync(b => b.Id == blocklistId, ct).ConfigureAwait(false);
+			if (entry is null)
+			{
+				return new ReconciledBlockDto
+				{
+					ActiveBlockId = 0,
+					Status = EnforcementStatus.Failed,
+					Confidence = EnforcementConfidence.Failed,
+					Detail = "BlockList row not found.",
+					RecommendedAction = "Refresh the BlockList; the row may have been removed.",
+				};
+			}
+
+			if (!entry.IsEnabled)
+			{
+				return new ReconciledBlockDto
+				{
+					ActiveBlockId = 0,
+					Ip = entry.Ip ?? string.Empty,
+					Status = EnforcementStatus.Failed,
+					Confidence = EnforcementConfidence.Failed,
+					Detail = "BlockList row is disabled; enforcement is not expected for disabled rows.",
+					RecommendedAction = "Re-enable the row before repairing its enforcement.",
+				};
+			}
+
+			if (string.IsNullOrWhiteSpace(entry.Ip))
+			{
+				return new ReconciledBlockDto
+				{
+					ActiveBlockId = 0,
+					Status = EnforcementStatus.Failed,
+					Confidence = EnforcementConfidence.Failed,
+					Detail = "BlockList row has no IP (login-only rule); firewall enforcement does not apply.",
+					RecommendedAction = "Login-only rules are enforced by the auth pipeline, not the firewall.",
+				};
+			}
+
+			activeBlockId = await EnsureActiveBlockAsync(db, entry, cfg, ct).ConfigureAwait(false);
+		}
+
+		return await RepairAsync(activeBlockId, ct).ConfigureAwait(false);
+	}
+
+	/// <summary>
+	/// Repairs enforcement for every enabled BlockList IP row in one pass and returns an aggregate
+	/// report (attempted = Blocks.Count, VerifiedCount, UnenforcedCount). Never claims success when
+	/// zero rules were installed: the per-row reconciled results carry the exact outcome.
+	/// </summary>
+	public async Task<ReconciliationReportDto> RepairAllEnabledBlocklistAsync(CancellationToken ct)
+	{
+		FirewallOptions cfg = _options.CurrentValue.Firewall;
+
+		List<long> ids;
+		await using (AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false))
+		{
+			ids = await db.BlocklistEntries.AsNoTracking()
+				.Where(b => b.IsEnabled && b.Ip != null && b.Ip != string.Empty)
+				.OrderByDescending(b => b.AddedUtc)
+				.Select(b => b.Id)
+				.Take(5000)
+				.ToListAsync(ct).ConfigureAwait(false);
+		}
+
+		ReconciliationReportDto report = new()
+		{
+			Status = IpcResultStatus.Success,
+			GeneratedUtc = _time.GetUtcNow().UtcDateTime,
+		};
+
+		foreach (long id in ids)
+		{
+			ct.ThrowIfCancellationRequested();
+			ReconciledBlockDto rb = await RepairBlocklistAsync(id, ct).ConfigureAwait(false);
+			report.Blocks.Add(rb);
+			if (rb.Status == EnforcementStatus.Active)
+			{
+				report.VerifiedCount++;
+			}
+			else
+			{
+				report.UnenforcedCount++;
+			}
+		}
+
+		report.Message = report.Blocks.Count == 0
+			? "No enabled BlockList IP rows to repair."
+			: string.Format(CultureInfo.InvariantCulture,
+				"Repaired {0} enabled BlockList row(s): {1} verified enforced, {2} still unenforced.",
+				report.Blocks.Count, report.VerifiedCount, report.UnenforcedCount);
+		return report;
+	}
+
+	/// <summary>
+	/// Finds an existing reconcilable ActiveBlock for the entry's IP, or creates a fresh Pending row
+	/// routed to the configured provider. Returns the ActiveBlock id to repair. The actual rule
+	/// install + verification is performed by <see cref="RepairAsync"/>.
+	/// </summary>
+	private async Task<long> EnsureActiveBlockAsync(
+		AuditDbContext db, BlocklistEntry entry, FirewallOptions cfg, CancellationToken ct)
+	{
+		string ip = entry.Ip!;
+		ActiveBlock? existing = await db.ActiveBlocks
+			.Where(b => b.Ip == ip
+				&& (b.Status == ActiveBlockStatus.Active
+					|| b.Status == ActiveBlockStatus.Pending
+					|| b.Status == ActiveBlockStatus.Failed))
+			.OrderByDescending(b => b.CreatedUtc)
+			.FirstOrDefaultAsync(ct).ConfigureAwait(false);
+
+		if (existing is not null)
+		{
+			return existing.Id;
+		}
+
+		// Route to the configured provider; Both fans out to Windows for the local reconciler (the
+		// MikroTik leg is owned by its own provider and reconciled separately).
+		FirewallProviderKind target = cfg.Provider == FirewallProviderKind.Both
+			? FirewallProviderKind.Windows
+			: cfg.Provider;
+		if (target == FirewallProviderKind.None)
+		{
+			target = FirewallProviderKind.Windows;
+		}
+
+		ActiveBlock created = new()
+		{
+			Ip = ip,
+			Provider = target,
+			CreatedUtc = _time.GetUtcNow().UtcDateTime,
+			ExpiresUtc = entry.ExpiresUtc,
+			Reason = string.IsNullOrWhiteSpace(entry.Reason) ? "BlockList repair" : entry.Reason,
+			Status = ActiveBlockStatus.Pending,
+		};
+		db.ActiveBlocks.Add(created);
+		await db.SaveChangesAsync(ct).ConfigureAwait(false);
+		_logger.LogInformation(
+			"BlockList repair created Pending ActiveBlock {Id} for {Ip} via {Provider}",
+			created.Id, ip, target);
+		return created.Id;
+	}
+
 	/// <summary>Emergency cleanup: removes every RdpAudit-created firewall rule discovered live and
 	/// marks the corresponding ActiveBlock rows Removed. Never deletes unrelated admin rules — only
 	/// rules whose name carries the RdpAudit prefix are touched.</summary>

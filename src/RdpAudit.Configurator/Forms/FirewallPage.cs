@@ -306,7 +306,7 @@ public sealed class FirewallPage : TabPage
 			MinimumSize = new Size(0, 220),
 		};
 
-		_blocklistGrid = MakeAddressGrid();
+		_blocklistGrid = MakeBlocklistGrid();
 		_blocklistGrid.DataSource = _blocklistRows;
 		SortableGrid.Enable(_blocklistGrid, _blocklistRows);
 		AttachReputationMenu(_blocklistGrid, () => SelectedRow(_blocklistGrid, _blocklistRows)?.Address);
@@ -314,7 +314,9 @@ public sealed class FirewallPage : TabPage
 		_blocklistInput = MakeInputBox("IP to add to blocklist (e.g. 203.0.113.10)");
 		Button blocklistAdd = MakeButton("Add IP", async (_, _) => await OnAddBlocklistAsync().ConfigureAwait(true));
 		Button blocklistRemove = MakeButton("Remove selected", async (_, _) => await OnRemoveBlocklistAsync().ConfigureAwait(true));
-		_innerTabs.TabPages.Add(BuildGridTab("Blocklist", _blocklistGrid, _blocklistFilter, _blocklistInput, blocklistAdd, blocklistRemove));
+		Button blocklistRepair = MakeButton("Repair selected", async (_, _) => await OnRepairBlocklistSelectedAsync().ConfigureAwait(true));
+		Button blocklistRepairAll = MakeButton("Repair all enabled", async (_, _) => await OnRepairBlocklistAllAsync().ConfigureAwait(true));
+		_innerTabs.TabPages.Add(BuildGridTab("Blocklist", _blocklistGrid, _blocklistFilter, _blocklistInput, blocklistAdd, blocklistRemove, blocklistRepair, blocklistRepairAll));
 
 		_whitelistGrid = MakeAddressGrid();
 		_whitelistGrid.DataSource = _whitelistRows;
@@ -567,6 +569,15 @@ public sealed class FirewallPage : TabPage
 			_lastStatus = statusDto;
 			RenderProviderStatus(_lastStatus);
 
+			// Load active blocks first: the BlockList enforcement column is derived from the verified
+			// ActiveBlock reconciliation, so it must be populated before ApplyBlocklistFilter runs.
+			_activeBlocksAll.Clear();
+			if (activeBlocks is not null)
+			{
+				_activeBlocksAll.AddRange(activeBlocks);
+			}
+			ApplyActiveBlockFilter();
+
 			_blocklistAll.Clear();
 			if (blocklist is not null)
 			{
@@ -587,13 +598,6 @@ public sealed class FirewallPage : TabPage
 				_loginRulesAll.AddRange(loginRules);
 			}
 			ApplyLoginRuleFilter();
-
-			_activeBlocksAll.Clear();
-			if (activeBlocks is not null)
-			{
-				_activeBlocksAll.AddRange(activeBlocks);
-			}
-			ApplyActiveBlockFilter();
 
 			SetStatus(string.Format(CultureInfo.InvariantCulture,
 				"Refresh OK. blocklist={0} whitelist={1} logins={2} activeBlocks={3}",
@@ -868,14 +872,135 @@ public sealed class FirewallPage : TabPage
 			return;
 		}
 
-		AddressListMutationRequest payload = new() { Address = ip };
-		bool ok = await SendMutationAsync(IpcCommand.RemoveFromBlocklist, payload).ConfigureAwait(true);
-		SetStatus(string.Format(CultureInfo.InvariantCulture,
-			"RemoveFromBlocklist {0}: {1}", ip, ok ? "OK" : "FAILED"));
-		if (ok)
+		// Carry the stable row Id so the service deletes exactly the selected row even when several
+		// rows share an address; Address remains for logging and as a legacy fallback.
+		AddressListMutationRequest payload = new() { Id = row.Id, Address = ip };
+		IpcRawResult result = await _ipc.SendRawAsync(IpcCommand.RemoveFromBlocklist, payload).ConfigureAwait(true);
+
+		if (result.Success)
 		{
+			int removed = ParseRemovedCount(result.Payload);
+			SetStatus(string.Format(CultureInfo.InvariantCulture,
+				"RemoveFromBlocklist {0} (Id={1}): removed {2} row(s).", ip, row.Id, removed));
 			await RefreshAllAsync().ConfigureAwait(true);
 		}
+		else
+		{
+			SetStatus(string.Format(CultureInfo.InvariantCulture,
+				"RemoveFromBlocklist {0} (Id={1}) FAILED: {2}",
+				ip, row.Id, string.IsNullOrWhiteSpace(result.Error) ? "service reported no detail." : result.Error));
+		}
+	}
+
+	/// <summary>
+	/// Repairs enforcement for the selected BlockList row: the service ensures a matching ActiveBlock
+	/// exists, (re-)installs the backend rule, and re-reads the firewall to prove enforcement. The
+	/// post-repair status is surfaced verbatim so the operator never sees a silent success.
+	/// </summary>
+	private async Task OnRepairBlocklistSelectedAsync()
+	{
+		AddressListRow? row = SelectedRow(_blocklistGrid, _blocklistRows);
+		if (row is null)
+		{
+			SetStatus("Repair blocklist enforcement aborted: no row selected.");
+			return;
+		}
+
+		if (row.Id <= 0)
+		{
+			SetStatus("Repair blocklist enforcement aborted: selected row has no stable Id.");
+			return;
+		}
+
+		try
+		{
+			ReconciledBlockDto? result =
+				await _ipc.SendAsync<ReconciledBlockDto>(IpcCommand.RepairBlocklistEnforcement, row.Id).ConfigureAwait(true);
+			if (result is null)
+			{
+				SetStatus(string.Format(CultureInfo.InvariantCulture,
+					"Repair blocklist {0} (Id={1}): FAILED (no response).", row.Address, row.Id));
+			}
+			else
+			{
+				string detail = string.IsNullOrWhiteSpace(result.Detail) ? string.Empty : " — " + result.Detail;
+				SetStatus(string.Format(CultureInfo.InvariantCulture,
+					"Repair blocklist {0}: {1} / {2}{3}",
+					row.Address,
+					EnforcementReconciler.DescribeStatus(result.Status),
+					EnforcementReconciler.DescribeConfidence(result.Confidence),
+					detail));
+			}
+
+			await RefreshAllAsync().ConfigureAwait(true);
+		}
+		catch (Exception ex)
+		{
+			SetStatus(string.Format(CultureInfo.InvariantCulture,
+				"Repair blocklist {0}: FAILED — {1}", row.Address, ex.GetType().Name));
+		}
+	}
+
+	/// <summary>
+	/// Repairs enforcement for every enabled BlockList row in one pass and reports an attempted /
+	/// verified / unenforced summary. Warns explicitly when zero rows were verified despite rows
+	/// existing, so the operator is never misled into believing enforcement succeeded.
+	/// </summary>
+	private async Task OnRepairBlocklistAllAsync()
+	{
+		try
+		{
+			ReconciliationReportDto? report =
+				await _ipc.SendAsync<ReconciliationReportDto>(IpcCommand.RepairAllEnabledBlocklistEnforcement).ConfigureAwait(true);
+			if (report is null)
+			{
+				SetStatus("Repair all enabled blocklist: FAILED (no response).");
+			}
+			else if (report.Blocks.Count == 0)
+			{
+				SetStatus("Repair all enabled blocklist: no enabled IP rows to repair.");
+			}
+			else
+			{
+				string severity = report.VerifiedCount == 0 ? "WARNING: " : string.Empty;
+				SetStatus(string.Format(CultureInfo.InvariantCulture,
+					"{0}Repair all enabled blocklist: attempted {1}, {2} verified enforced, {3} still unenforced.",
+					severity, report.Blocks.Count, report.VerifiedCount, report.UnenforcedCount));
+			}
+
+			await RefreshAllAsync().ConfigureAwait(true);
+		}
+		catch (Exception ex)
+		{
+			SetStatus(string.Format(CultureInfo.InvariantCulture,
+				"Repair all enabled blocklist: FAILED — {0}", ex.GetType().Name));
+		}
+	}
+
+	/// <summary>Extracts the <c>removed</c> count from a RemoveFromBlocklist success payload.</summary>
+	private static int ParseRemovedCount(string? payload)
+	{
+		if (string.IsNullOrWhiteSpace(payload))
+		{
+			return 0;
+		}
+
+		try
+		{
+			using JsonDocument doc = JsonDocument.Parse(payload);
+			if (doc.RootElement.ValueKind == JsonValueKind.Object
+				&& doc.RootElement.TryGetProperty("removed", out JsonElement removed)
+				&& removed.TryGetInt32(out int count))
+			{
+				return count;
+			}
+		}
+		catch (JsonException)
+		{
+			// Fall through to 0 — the success flag already told us it worked.
+		}
+
+		return 0;
 	}
 
 	// ---------------------------------------------------------------------------------------------
@@ -1204,6 +1329,10 @@ public sealed class FirewallPage : TabPage
 
 	private void ApplyBlocklistFilter()
 	{
+		// Cross-reference verified ActiveBlock enforcement (built from live reconciliation, never DB
+		// rows alone) so each BlockList row shows its real enforcement state, not just intent.
+		Dictionary<string, EnforcementStatus> byIp = BuildEnforcementByIp();
+
 		AddressListFilter filter = new() { Query = _blocklistFilter.Text };
 		_blocklistRows.RaiseListChangedEvents = false;
 		_blocklistRows.Clear();
@@ -1211,12 +1340,73 @@ public sealed class FirewallPage : TabPage
 		{
 			if (filter.Matches(dto.Address, dto.Note, dto.Source))
 			{
-				_blocklistRows.Add(AddressListRow.From(dto));
+				AddressListRow row = AddressListRow.From(dto);
+				row.EnforcementText = DescribeBlocklistEnforcement(dto.Address, byIp);
+				_blocklistRows.Add(row);
 			}
 		}
 
 		_blocklistRows.RaiseListChangedEvents = true;
 		_blocklistRows.ResetBindings();
+	}
+
+	/// <summary>
+	/// Builds a map from IP to the strongest reconciled enforcement status seen across all
+	/// ActiveBlock rows for that IP. "Strongest" prefers a verified Active rule over Pending /
+	/// Failed so a row with at least one verified backend rule reports Active.
+	/// </summary>
+	private Dictionary<string, EnforcementStatus> BuildEnforcementByIp()
+	{
+		Dictionary<string, EnforcementStatus> byIp = new(StringComparer.OrdinalIgnoreCase);
+		foreach (ActiveBlockDto ab in _activeBlocksAll)
+		{
+			if (string.IsNullOrEmpty(ab.Ip))
+			{
+				continue;
+			}
+
+			if (!byIp.TryGetValue(ab.Ip, out EnforcementStatus current)
+				|| EnforcementRank(ab.EnforcementStatus) > EnforcementRank(current))
+			{
+				byIp[ab.Ip] = ab.EnforcementStatus;
+			}
+		}
+
+		return byIp;
+	}
+
+	private static int EnforcementRank(EnforcementStatus status) => status switch
+	{
+		EnforcementStatus.Active => 5,
+		EnforcementStatus.ParameterMismatch => 4,
+		EnforcementStatus.Desired => 3,
+		EnforcementStatus.MissingRule => 2,
+		EnforcementStatus.Failed => 2,
+		EnforcementStatus.Expired => 1,
+		_ => 0,
+	};
+
+	/// <summary>Maps a BlockList row to its operator-facing enforcement label.</summary>
+	private static string DescribeBlocklistEnforcement(string? ip, Dictionary<string, EnforcementStatus> byIp)
+	{
+		if (string.IsNullOrEmpty(ip) || !byIp.TryGetValue(ip, out EnforcementStatus status))
+		{
+			// No ActiveBlock at all: the intent exists but nothing is enforcing it.
+			return "Not enforced";
+		}
+
+		return status switch
+		{
+			EnforcementStatus.Active => "Active",
+			EnforcementStatus.Desired => "Pending",
+			EnforcementStatus.MissingRule => "Not enforced",
+			EnforcementStatus.ParameterMismatch => "Failed",
+			EnforcementStatus.Failed => "Failed",
+			EnforcementStatus.Expired => "Expired",
+			EnforcementStatus.ProviderUnavailable => "Backend unavailable",
+			EnforcementStatus.EffectiveUnknown => "Backend unavailable",
+			_ => "Not enforced",
+		};
 	}
 
 	private void ApplyWhitelistFilter()
@@ -1400,6 +1590,27 @@ public sealed class FirewallPage : TabPage
 		return g;
 	}
 
+	private static DataGridView MakeBlocklistGrid()
+	{
+		DataGridView g = new()
+		{
+			Dock = DockStyle.Fill,
+			AutoGenerateColumns = false,
+			ReadOnly = true,
+			RowHeadersVisible = false,
+			AllowUserToAddRows = false,
+			SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+			MultiSelect = false,
+		};
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Address", DataPropertyName = nameof(AddressListRow.Address), Width = 200 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Enforcement", DataPropertyName = nameof(AddressListRow.EnforcementText), Width = 130 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Source", DataPropertyName = nameof(AddressListRow.Source), Width = 120 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Added (UTC)", DataPropertyName = nameof(AddressListRow.AddedUtcText), Width = 170 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Expires (UTC)", DataPropertyName = nameof(AddressListRow.ExpiresUtcText), Width = 170 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Note / reason", DataPropertyName = nameof(AddressListRow.Note), AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
+		return g;
+	}
+
 	private static DataGridView MakeLoginRulesGrid()
 	{
 		DataGridView g = new()
@@ -1553,6 +1764,9 @@ public sealed class FirewallPage : TabPage
 	/// <summary>Grid view-model for blocklist / whitelist entries.</summary>
 	public sealed class AddressListRow
 	{
+		/// <summary>Stable surrogate row key carried from the service for deterministic mutation.</summary>
+		public long Id { get; init; }
+
 		public string Address { get; init; } = string.Empty;
 
 		public string? Source { get; init; }
@@ -1563,8 +1777,16 @@ public sealed class FirewallPage : TabPage
 
 		public string ExpiresUtcText { get; init; } = string.Empty;
 
+		/// <summary>
+		/// Per-row enforcement state for the BlockList (intent) vs verified ActiveBlock enforcement.
+		/// One of: "Not enforced", "Pending", "Active", "Failed", "Expired", "Backend unavailable".
+		/// Empty for lists where enforcement does not apply (e.g. whitelist).
+		/// </summary>
+		public string EnforcementText { get; set; } = string.Empty;
+
 		public static AddressListRow From(AddressListEntryDto dto) => new()
 		{
+			Id = dto.Id,
 			Address = dto.Address,
 			Source = dto.Source,
 			Note = dto.Note,

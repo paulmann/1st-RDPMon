@@ -22,4 +22,12 @@ public sealed class AddressListMutationRequest
 
 	[Key(2)]
 	public int DurationMinutes { get; set; }
+
+	/// <summary>
+	/// Optional stable surrogate row key (BlocklistEntry.Id). When greater than zero the removal
+	/// handler targets exactly this row; <see cref="Address"/> is then used only for logging and as
+	/// a fallback when the Id is not found. Zero preserves the legacy address-only behaviour.
+	/// </summary>
+	[Key(3)]
+	public long Id { get; set; }
 }

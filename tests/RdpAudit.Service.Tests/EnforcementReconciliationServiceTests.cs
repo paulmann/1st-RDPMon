@@ -251,6 +251,113 @@ public class EnforcementReconciliationServiceTests
 	}
 
 	[Fact]
+	public async Task RepairBlocklistAsync_CreatesActiveBlock_InstallsRule_AndVerifies()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			// A BlockList row exists (intent) but no ActiveBlock yet — the Active Blocks tab is empty.
+			long blocklistId;
+			await using (AuditDbContext db = factory.CreateDbContext())
+			{
+				BlocklistEntry entry = new()
+				{
+					Ip = "203.0.113.10",
+					Reason = "manual",
+					AddedUtc = DateTime.UtcNow,
+					Source = BlocklistSource.Manual,
+					IsEnabled = true,
+				};
+				db.BlocklistEntries.Add(entry);
+				await db.SaveChangesAsync();
+				blocklistId = entry.Id;
+			}
+
+			// After repair installs the rule the scanner sees it, so reconciliation verifies it.
+			StubScanner scanner = new(new FirewallScanResult(true, new[] { BlockRule("203.0.113.10") }, null));
+			MockFirewallProvider provider = new();
+			EnforcementReconciliationService svc = MakeService(factory, scanner, provider);
+
+			ReconciledBlockDto result = await svc.RepairBlocklistAsync(blocklistId, CancellationToken.None);
+
+			Assert.Single(provider.BlockCalls);
+			Assert.Equal(EnforcementStatus.Active, result.Status);
+			Assert.Equal(EnforcementConfidence.Verified, result.Confidence);
+
+			await using AuditDbContext verify = factory.CreateDbContext();
+			ActiveBlock row = await verify.ActiveBlocks.SingleAsync(b => b.Ip == "203.0.113.10");
+			Assert.Equal(ActiveBlockStatus.Active, row.Status);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task RepairBlocklistAsync_MissingRow_ReturnsFailedWithDetail()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			StubScanner scanner = new(new FirewallScanResult(true, Array.Empty<DiscoveredBlockRule>(), null));
+			EnforcementReconciliationService svc = MakeService(factory, scanner, new MockFirewallProvider());
+
+			ReconciledBlockDto result = await svc.RepairBlocklistAsync(999, CancellationToken.None);
+
+			Assert.Equal(EnforcementStatus.Failed, result.Status);
+			Assert.Contains("not found", result.Detail ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
+	public async Task RepairAllEnabledBlocklistAsync_VerifiesEnabledRows_AndReportsCounts()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			await using (AuditDbContext db = factory.CreateDbContext())
+			{
+				db.BlocklistEntries.Add(new BlocklistEntry
+				{
+					Ip = "203.0.113.10",
+					Reason = "manual",
+					AddedUtc = DateTime.UtcNow,
+					Source = BlocklistSource.Manual,
+					IsEnabled = true,
+				});
+				// Disabled rows must be skipped.
+				db.BlocklistEntries.Add(new BlocklistEntry
+				{
+					Ip = "203.0.113.20",
+					Reason = "manual-disabled",
+					AddedUtc = DateTime.UtcNow,
+					Source = BlocklistSource.Manual,
+					IsEnabled = false,
+				});
+				await db.SaveChangesAsync();
+			}
+
+			StubScanner scanner = new(new FirewallScanResult(true, new[] { BlockRule("203.0.113.10") }, null));
+			EnforcementReconciliationService svc = MakeService(factory, scanner, new MockFirewallProvider());
+
+			ReconciliationReportDto report = await svc.RepairAllEnabledBlocklistAsync(CancellationToken.None);
+
+			Assert.Single(report.Blocks);
+			Assert.Equal(1, report.VerifiedCount);
+			Assert.Equal(0, report.UnenforcedCount);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
 	public async Task RemoveAllEnforcementAsync_RemovesRules_AndMarksRowsRemoved()
 	{
 		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
