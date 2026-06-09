@@ -335,7 +335,25 @@ public sealed class AbuseIpDbReportWorker : BackgroundService
 			FirstSeenUtc = stat.FirstSeenUtc,
 			LastSeenUtc = stat.LastSeenUtc,
 			UsernamesAttempted = logins,
+			EvidenceEventIds = DeriveEvidenceEventIds(stat.Failed, stat.Successful),
 		};
+	}
+
+	/// <summary>Derives the evidence Windows event IDs from observed failed/successful counts.</summary>
+	internal static List<int> DeriveEvidenceEventIds(long failed, long successful)
+	{
+		List<int> ids = new(4);
+		if (failed > 0)
+		{
+			ids.Add(4625);
+			ids.Add(4776);
+		}
+		if (successful > 0)
+		{
+			ids.Add(4624);
+			ids.Add(4648);
+		}
+		return ids;
 	}
 
 	internal static List<string> ParseTopLogins(string? json)

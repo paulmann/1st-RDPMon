@@ -461,4 +461,41 @@ public class AbuseIpDbReportWorkerTests
 			await conn.DisposeAsync();
 		}
 	}
+
+	[Fact]
+	public void BuildEvidence_PopulatesEvidenceEventIds_FromCounts()
+	{
+		AttackStat both = new()
+		{
+			Ip = "203.0.113.7",
+			Failed = 10,
+			Successful = 2,
+			FirstSeenUtc = DateTime.UtcNow.AddHours(-1),
+			LastSeenUtc = DateTime.UtcNow,
+			Top10AttemptedLogins = "[\"admin\"]",
+		};
+		AbuseIpDbEvidence ev = AbuseIpDbReportWorker.BuildEvidence(both);
+		Assert.Equal(new[] { 4625, 4776, 4624, 4648 }, ev.EvidenceEventIds);
+
+		AttackStat failedOnly = new()
+		{
+			Ip = "203.0.113.8",
+			Failed = 3,
+			Successful = 0,
+			FirstSeenUtc = DateTime.UtcNow.AddHours(-1),
+			LastSeenUtc = DateTime.UtcNow,
+			Top10AttemptedLogins = "[]",
+		};
+		Assert.Equal(new[] { 4625, 4776 }, AbuseIpDbReportWorker.BuildEvidence(failedOnly).EvidenceEventIds);
+	}
+
+	[Theory]
+	[InlineData(0, 0, new int[0])]
+	[InlineData(5, 0, new[] { 4625, 4776 })]
+	[InlineData(0, 5, new[] { 4624, 4648 })]
+	[InlineData(5, 5, new[] { 4625, 4776, 4624, 4648 })]
+	public void DeriveEvidenceEventIds_MapsCountsToWindowsEventIds(long failed, long successful, int[] expected)
+	{
+		Assert.Equal(expected, AbuseIpDbReportWorker.DeriveEvidenceEventIds(failed, successful));
+	}
 }

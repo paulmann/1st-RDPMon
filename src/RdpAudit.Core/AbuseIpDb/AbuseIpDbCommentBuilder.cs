@@ -22,7 +22,7 @@ public static class AbuseIpDbCommentBuilder
 	public const int MaxUsernameLength = 32;
 
 	/// <summary>Cap on the number of distinct usernames included in the evidence comment.</summary>
-	public const int MaxUsernamesIncluded = 5;
+	public const int MaxUsernamesIncluded = 10;
 
 	/// <summary>Public attribution footer linking back to the RdpAudit project on GitHub.</summary>
 	public const string AttributionFooter = "Reported via RDP Monitor https://github.com/paulmann/1st-RDPMon";
@@ -52,6 +52,14 @@ public static class AbuseIpDbCommentBuilder
 			duration = TimeSpan.Zero;
 		}
 		sb.Append("Duration: ").Append(FormatDuration(duration)).Append(". ");
+
+		sb.Append("Intensity: ").Append(FormatIntensity(evidence.FailedAttempts + evidence.SuccessfulLogins, duration)).Append(". ");
+
+		string eventIds = FormatEventIds(evidence.EvidenceEventIds);
+		if (eventIds.Length > 0)
+		{
+			sb.Append("Evidence Event IDs: ").Append(eventIds).Append(". ");
+		}
 
 		sb.Append(AttributionFooter);
 
@@ -168,6 +176,42 @@ public static class AbuseIpDbCommentBuilder
 		return trimmed;
 	}
 
+	/// <summary>Formats attempt intensity as attempts-per-hour, or a total when the window is sub-hour.</summary>
+	internal static string FormatIntensity(long totalAttempts, TimeSpan window)
+	{
+		if (totalAttempts <= 0)
+		{
+			return "0 attempts";
+		}
+		double hours = window.TotalHours;
+		if (hours < 1.0 / 60.0)
+		{
+			return string.Format(CultureInfo.InvariantCulture, "{0} attempts (burst)", totalAttempts);
+		}
+		double perHour = totalAttempts / hours;
+		return string.Format(CultureInfo.InvariantCulture, "{0:0.#} attempts/hour", perHour);
+	}
+
+	/// <summary>Renders the distinct evidence Windows event IDs (e.g. 4625/4776/4624/4648), comma separated.</summary>
+	internal static string FormatEventIds(IEnumerable<int>? eventIds)
+	{
+		if (eventIds is null)
+		{
+			return string.Empty;
+		}
+		List<string> distinct = new();
+		HashSet<int> seen = new();
+		foreach (int id in eventIds)
+		{
+			if (id <= 0 || !seen.Add(id))
+			{
+				continue;
+			}
+			distinct.Add(id.ToString(CultureInfo.InvariantCulture));
+		}
+		return distinct.Count == 0 ? string.Empty : string.Join(",", distinct);
+	}
+
 	private static string FormatDuration(TimeSpan span)
 	{
 		if (span.TotalDays >= 1.0)
@@ -209,4 +253,8 @@ public sealed class AbuseIpDbEvidence
 
 	/// <summary>Usernames attempted during the observation window.</summary>
 	public IReadOnlyList<string> UsernamesAttempted { get; set; } = Array.Empty<string>();
+
+	/// <summary>Distinct Windows Security event IDs that constitute the evidence (e.g. 4625/4776/4624/4648).
+	/// Empty when no specific event IDs are available.</summary>
+	public IReadOnlyList<int> EvidenceEventIds { get; set; } = Array.Empty<int>();
 }
