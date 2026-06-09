@@ -140,6 +140,7 @@ public sealed class IpcDispatcher
 				// --- Stage 8 handlers (AbuseIPDB integration). ---
 				IpcCommand.GetAbuseIpDbStatus => await GetAbuseIpDbStatusAsync(ct).ConfigureAwait(false),
 				IpcCommand.TestAbuseIpDbKey => await TestAbuseIpDbKeyAsync(ct).ConfigureAwait(false),
+				IpcCommand.ListAbuseIpDbReportLog => await ListAbuseIpDbReportLogAsync(request.Payload, ct).ConfigureAwait(false),
 
 				// --- Stage 9 handlers (MikroTik integration). ---
 				IpcCommand.GetMikroTikStatus => await GetMikroTikStatusAsync(ct).ConfigureAwait(false),
@@ -2434,6 +2435,63 @@ public sealed class IpcDispatcher
 				break;
 		}
 		return result;
+	}
+
+	private const int AbuseIpDbReportLogDefaultLimit = 200;
+	private const int AbuseIpDbReportLogMaxLimit = 1000;
+
+	private async Task<object?> ListAbuseIpDbReportLogAsync(string? payload, CancellationToken ct)
+	{
+		int limit = AbuseIpDbReportLogDefaultLimit;
+		if (!string.IsNullOrWhiteSpace(payload))
+		{
+			try
+			{
+				int requested = JsonSerializer.Deserialize<int>(payload, JsonOptions.Default);
+				if (requested > 0)
+				{
+					limit = requested;
+				}
+			}
+			catch (JsonException)
+			{
+				// Tolerate a missing / malformed limit and fall back to the default.
+			}
+		}
+
+		if (limit > AbuseIpDbReportLogMaxLimit)
+		{
+			limit = AbuseIpDbReportLogMaxLimit;
+		}
+
+		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+
+		List<AbuseIpDbReportHistory> rows = await db.AbuseIpDbReportHistory.AsNoTracking()
+			.OrderByDescending(r => r.ReportedAtUtc)
+			.ThenByDescending(r => r.Id)
+			.Take(limit)
+			.ToListAsync(ct)
+			.ConfigureAwait(false);
+
+		return rows.ConvertAll(r => new AbuseIpDbReportLogDto
+		{
+			Id = r.Id,
+			TimeUtc = r.ReportedAtUtc,
+			SourceIp = r.IpAddress,
+			Classification = r.Classification,
+			Action = r.Action,
+			Reason = r.Reason,
+			HttpStatusCode = r.HttpStatusCode,
+			ReportId = r.ReportId,
+			CooldownExpiresUtc = r.CooldownExpiresUtc,
+			FailedCount = r.FailedCount,
+			SuccessfulCount = r.SuccessfulCount,
+			FirstSeenUtc = r.FirstSeenUtc,
+			LastSeenUtc = r.LastSeenUtc,
+			UsernamesSample = r.UsernamesSample,
+			CommentPreview = r.CommentPreview,
+			Source = r.Source,
+		});
 	}
 
 	// ----------------------------------------------------------------------------------------------

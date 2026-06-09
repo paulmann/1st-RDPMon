@@ -15,6 +15,7 @@ using RdpAudit.Core.AbuseIpDb;
 using RdpAudit.Core.Config;
 using RdpAudit.Core.Data;
 using RdpAudit.Core.Models;
+using RdpAudit.Core.Util;
 using RdpAudit.Service.Workers;
 using Xunit;
 
@@ -371,6 +372,13 @@ public class AbuseIpDbReportWorkerTests
 			Assert.Equal(200, row.HttpStatusCode);
 			Assert.Equal("worker", row.Source);
 			Assert.False(string.IsNullOrEmpty(row.CommentHash));
+			// v1.2.6 report-log columns are populated on every attempt.
+			Assert.Equal(AbuseIpDbReportAction.Sent, row.Action);
+			// 203.0.113.0/24 is TEST-NET-3 (documentation range); the classifier records that verbatim.
+			Assert.Equal(IpReportClassification.Documentation, row.Classification);
+			Assert.Equal(100, row.FailedCount);
+			Assert.Equal(0, row.SuccessfulCount);
+			Assert.False(string.IsNullOrEmpty(row.CommentPreview));
 		}
 		finally
 		{
@@ -497,5 +505,25 @@ public class AbuseIpDbReportWorkerTests
 	public void DeriveEvidenceEventIds_MapsCountsToWindowsEventIds(long failed, long successful, int[] expected)
 	{
 		Assert.Equal(expected, AbuseIpDbReportWorker.DeriveEvidenceEventIds(failed, successful));
+	}
+
+	[Fact]
+	public void FormatUsernamesSample_NullOrEmpty_ReturnsNull()
+	{
+		Assert.Null(AbuseIpDbReportWorker.FormatUsernamesSample(null));
+		Assert.Null(AbuseIpDbReportWorker.FormatUsernamesSample("[]"));
+	}
+
+	[Fact]
+	public void FormatUsernamesSample_CapsAtTenAndJoins()
+	{
+		string json = System.Text.Json.JsonSerializer.Serialize(
+			Enumerable.Range(0, 25).Select(i => "user" + i.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToArray());
+
+		string? sample = AbuseIpDbReportWorker.FormatUsernamesSample(json);
+
+		Assert.NotNull(sample);
+		Assert.Equal(10, sample!.Split(", ", StringSplitOptions.None).Length);
+		Assert.StartsWith("user0, user1", sample, StringComparison.Ordinal);
 	}
 }

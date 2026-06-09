@@ -265,6 +265,10 @@ public sealed class AbuseIpDbReportWorker : BackgroundService
 			});
 
 			bool accepted = result.Outcome == AbuseIpDbReportOutcome.Accepted;
+			IpReportabilityResult classification = IpReportability.Classify(candidate.Ip, isWhitelisted: ip => whitelistDb.Contains(ip));
+			DateTime? cooldownExpiresUtc = accepted && opts.ReportDedupeEnabled
+				? nowUtc.AddHours(Math.Clamp(opts.ReportCooldownHours, 1, 8760))
+				: null;
 			db.AbuseIpDbReportHistory.Add(new AbuseIpDbReportHistory
 			{
 				IpAddress = normalizedIp,
@@ -276,6 +280,16 @@ public sealed class AbuseIpDbReportWorker : BackgroundService
 				AbuseCategories = categories,
 				CommentHash = HashComment(request.Comment),
 				Source = "worker",
+				Action = accepted ? AbuseIpDbReportAction.Sent : AbuseIpDbReportAction.Failed,
+				Reason = accepted ? null : Truncate(result.Outcome.ToString(), 64),
+				Classification = classification.Classification,
+				CooldownExpiresUtc = cooldownExpiresUtc,
+				FailedCount = candidate.Failed,
+				SuccessfulCount = candidate.Successful,
+				FirstSeenUtc = candidate.FirstSeenUtc,
+				LastSeenUtc = candidate.LastSeenUtc,
+				UsernamesSample = FormatUsernamesSample(candidate.Top10AttemptedLogins),
+				CommentPreview = Truncate(request.Comment, 512),
 			});
 
 			if (result.Outcome == AbuseIpDbReportOutcome.Accepted)
@@ -354,6 +368,32 @@ public sealed class AbuseIpDbReportWorker : BackgroundService
 			ids.Add(4648);
 		}
 		return ids;
+	}
+
+	/// <summary>Formats up to 10 attempted usernames into a sanitised comma-separated sample for the report log.</summary>
+	internal static string? FormatUsernamesSample(string? topLoginsJson)
+	{
+		List<string> logins = ParseTopLogins(topLoginsJson);
+		if (logins.Count == 0)
+		{
+			return null;
+		}
+
+		List<string> sample = new(10);
+		foreach (string login in logins)
+		{
+			if (string.IsNullOrWhiteSpace(login))
+			{
+				continue;
+			}
+			sample.Add(login.Trim());
+			if (sample.Count >= 10)
+			{
+				break;
+			}
+		}
+
+		return sample.Count == 0 ? null : Truncate(string.Join(", ", sample), 512);
 	}
 
 	internal static List<string> ParseTopLogins(string? json)

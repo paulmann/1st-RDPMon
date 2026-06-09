@@ -135,4 +135,10 @@ public enum IpcCommand
 	/// <summary>Repairs enforcement for every enabled BlockList row in one pass. Returns a summary
 	/// with attempted / verified / failed counts plus per-row reconciled results.</summary>
 	RepairAllEnabledBlocklistEnforcement = 50,
+
+	// --- v1.2.6 AbuseIPDB report-log addition (append-only). ---
+
+	/// <summary>Returns the most recent AbuseIPDB report-log rows (newest first), bounded by a
+	/// server-clamped limit, for the Configurator's report-log grid. Never returns the API key.</summary>
+	ListAbuseIpDbReportLog = 51,
 }

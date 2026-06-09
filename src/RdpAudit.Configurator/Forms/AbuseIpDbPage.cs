@@ -15,9 +15,12 @@ using System.Runtime.Versioning;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using RdpAudit.Configurator.Controls;
 using RdpAudit.Configurator.Ipc;
+using RdpAudit.Configurator.Services;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
+using RdpAudit.Core.Models;
 using RdpAudit.Core.Util;
 
 namespace RdpAudit.Configurator.Forms;
@@ -62,6 +65,13 @@ public sealed class AbuseIpDbPage : TabPage
 	private readonly Label _countersLabel;
 	private readonly Label _lastResultLabel;
 	private readonly Label _rateLimitLabel;
+
+	private readonly DataGridView _reportLogGrid;
+	private readonly SortableBindingList<ReportLogRow> _reportLogRows = new();
+	private readonly Button _logRefreshButton;
+	private readonly Button _logCopyButton;
+	private readonly Button _logOpenButton;
+	private readonly Label _logStatusLabel;
 
 	private bool _credentialPresentOnService;
 
@@ -139,14 +149,35 @@ public sealed class AbuseIpDbPage : TabPage
 		_lastResultLabel = new Label { Text = "Last result: (none)", AutoSize = false, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
 		_rateLimitLabel = new Label { Text = "Rate-limit: ok", AutoSize = false, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
 
+		_reportLogGrid = BuildReportLogGrid();
+		_reportLogGrid.DataSource = _reportLogRows;
+
+		_logRefreshButton = new Button { Text = "Refresh log", Width = 120 };
+		_logRefreshButton.Click += async (_, _) => await RefreshReportLogAsync().ConfigureAwait(true);
+
+		_logCopyButton = new Button { Text = "Copy report text", Width = 140 };
+		_logCopyButton.Click += (_, _) => OnCopySelectedReport();
+
+		_logOpenButton = new Button { Text = "Open in AbuseIPDB", Width = 160 };
+		_logOpenButton.Click += (_, _) => OnOpenSelectedInAbuseIpDb();
+
+		_logStatusLabel = new Label { Text = "Report log: (not loaded)", AutoSize = false, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft };
+
 		Panel statusPanel = BuildStatusPanel();
 		Panel formPanel = BuildFormPanel();
+		Panel logPanel = BuildReportLogPanel();
 
+		// Fill control must be added before docked-top controls so it occupies the remaining area.
+		Controls.Add(logPanel);
 		Controls.Add(formPanel);
 		Controls.Add(statusPanel);
 		Controls.Add(_intro);
 
-		HandleCreated += async (_, _) => await RefreshAsync().ConfigureAwait(true);
+		HandleCreated += async (_, _) =>
+		{
+			await RefreshAsync().ConfigureAwait(true);
+			await RefreshReportLogAsync().ConfigureAwait(true);
+		};
 	}
 
 	private Panel BuildFormPanel()
@@ -489,6 +520,217 @@ public sealed class AbuseIpDbPage : TabPage
 		finally
 		{
 			_testButton.Enabled = _credentialPresentOnService || !string.IsNullOrWhiteSpace(_apiKeyInput.Text);
+		}
+	}
+
+	private const int ReportLogLimit = 500;
+
+	private Panel BuildReportLogPanel()
+	{
+		Panel panel = new() { Dock = DockStyle.Fill, Padding = new Padding(8) };
+
+		FlowLayoutPanel buttons = new() { Dock = DockStyle.Top, Height = 36, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+		buttons.Controls.Add(_logRefreshButton);
+		buttons.Controls.Add(_logCopyButton);
+		buttons.Controls.Add(_logOpenButton);
+
+		Panel statusBar = new() { Dock = DockStyle.Bottom, Height = 24 };
+		statusBar.Controls.Add(_logStatusLabel);
+
+		Label header = new()
+		{
+			Text = "AbuseIPDB report log (persisted; never shows the API key). Click a column header to sort.",
+			Dock = DockStyle.Top,
+			Height = 22,
+			TextAlign = ContentAlignment.MiddleLeft,
+			Font = new Font(Font, FontStyle.Bold),
+		};
+
+		panel.Controls.Add(_reportLogGrid);
+		panel.Controls.Add(buttons);
+		panel.Controls.Add(header);
+		panel.Controls.Add(statusBar);
+		return panel;
+	}
+
+	private static DataGridView BuildReportLogGrid()
+	{
+		DataGridView g = new()
+		{
+			Dock = DockStyle.Fill,
+			AllowUserToAddRows = false,
+			AllowUserToDeleteRows = false,
+			ReadOnly = true,
+			AutoGenerateColumns = false,
+			SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+			MultiSelect = false,
+			RowHeadersVisible = false,
+		};
+
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Time (UTC)", DataPropertyName = nameof(ReportLogRow.TimeUtc), Width = 150 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Local time", DataPropertyName = nameof(ReportLogRow.LocalTime), Width = 150 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Source IP", DataPropertyName = nameof(ReportLogRow.SourceIp), Width = 140 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Classification", DataPropertyName = nameof(ReportLogRow.Classification), Width = 110 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Action", DataPropertyName = nameof(ReportLogRow.Action), Width = 100 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Reason", DataPropertyName = nameof(ReportLogRow.Reason), Width = 130 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "HTTP", DataPropertyName = nameof(ReportLogRow.HttpStatusCode), Width = 60 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Report id", DataPropertyName = nameof(ReportLogRow.ReportId), Width = 100 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Cooldown until (UTC)", DataPropertyName = nameof(ReportLogRow.CooldownExpiresUtc), Width = 160 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Failed", DataPropertyName = nameof(ReportLogRow.FailedCount), Width = 70 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Successful", DataPropertyName = nameof(ReportLogRow.SuccessfulCount), Width = 80 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "First seen (UTC)", DataPropertyName = nameof(ReportLogRow.FirstSeenUtc), Width = 150 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Last seen (UTC)", DataPropertyName = nameof(ReportLogRow.LastSeenUtc), Width = 150 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Usernames (≤10)", DataPropertyName = nameof(ReportLogRow.UsernamesSample), Width = 200 });
+		g.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Comment preview", DataPropertyName = nameof(ReportLogRow.CommentPreview), AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
+
+		foreach (DataGridViewColumn col in g.Columns)
+		{
+			col.SortMode = DataGridViewColumnSortMode.Automatic;
+		}
+
+		return g;
+	}
+
+	private async Task RefreshReportLogAsync()
+	{
+		_logRefreshButton.Enabled = false;
+		try
+		{
+			List<AbuseIpDbReportLogDto>? rows = await _ipc
+				.SendAsync<List<AbuseIpDbReportLogDto>>(IpcCommand.ListAbuseIpDbReportLog, ReportLogLimit)
+				.ConfigureAwait(true);
+
+			_reportLogRows.RaiseListChangedEvents = false;
+			_reportLogRows.Clear();
+			if (rows is not null)
+			{
+				foreach (AbuseIpDbReportLogDto dto in rows)
+				{
+					_reportLogRows.Add(ReportLogRow.FromDto(dto));
+				}
+			}
+			_reportLogRows.RaiseListChangedEvents = true;
+			_reportLogRows.ResetBindings();
+
+			_logStatusLabel.Text = string.Format(
+				CultureInfo.InvariantCulture,
+				"Report log: {0} row(s) loaded (newest first; max {1}).",
+				_reportLogRows.Count,
+				ReportLogLimit);
+		}
+		catch (Exception ex)
+		{
+			_logStatusLabel.Text = "Report log load FAILED: " + ex.GetType().Name + " — " + ex.Message;
+		}
+		finally
+		{
+			_logRefreshButton.Enabled = true;
+		}
+	}
+
+	private ReportLogRow? SelectedReportRow()
+	{
+		if (_reportLogGrid.CurrentRow?.DataBoundItem is ReportLogRow row)
+		{
+			return row;
+		}
+		return null;
+	}
+
+	private void OnCopySelectedReport()
+	{
+		ReportLogRow? row = SelectedReportRow();
+		if (row is null)
+		{
+			_logStatusLabel.Text = "Copy report text: no row selected.";
+			return;
+		}
+
+		string text = string.IsNullOrWhiteSpace(row.CommentPreview)
+			? "No stored comment preview for " + row.SourceIp + "."
+			: row.CommentPreview;
+
+		try
+		{
+			Clipboard.SetText(text);
+			_logStatusLabel.Text = AbuseIpDbReportText.ClipboardToast;
+		}
+		catch (Exception ex)
+		{
+			_logStatusLabel.Text = "Copy report text FAILED: " + ex.GetType().Name + " — " + ex.Message;
+		}
+	}
+
+	private void OnOpenSelectedInAbuseIpDb()
+	{
+		ReportLogRow? row = SelectedReportRow();
+		if (row is null || string.IsNullOrWhiteSpace(row.SourceIp))
+		{
+			_logStatusLabel.Text = "Open in AbuseIPDB: no row selected.";
+			return;
+		}
+
+		IpReputationBrowser.LaunchOutcome outcome = IpReputationBrowser.OpenAbuseIpDb(row.SourceIp);
+		_logStatusLabel.Text = outcome.Format();
+	}
+
+	/// <summary>Display projection of an AbuseIPDB report-log row with typed columns for correct sorting.</summary>
+	public sealed class ReportLogRow
+	{
+		public long Id { get; init; }
+
+		public DateTime TimeUtc { get; init; }
+
+		public DateTime LocalTime { get; init; }
+
+		public string SourceIp { get; init; } = string.Empty;
+
+		public string Classification { get; init; } = string.Empty;
+
+		public string Action { get; init; } = string.Empty;
+
+		public string? Reason { get; init; }
+
+		public int HttpStatusCode { get; init; }
+
+		public string? ReportId { get; init; }
+
+		public DateTime? CooldownExpiresUtc { get; init; }
+
+		public long FailedCount { get; init; }
+
+		public long SuccessfulCount { get; init; }
+
+		public DateTime? FirstSeenUtc { get; init; }
+
+		public DateTime? LastSeenUtc { get; init; }
+
+		public string? UsernamesSample { get; init; }
+
+		public string? CommentPreview { get; init; }
+
+		public static ReportLogRow FromDto(AbuseIpDbReportLogDto dto)
+		{
+			ArgumentNullException.ThrowIfNull(dto);
+			return new ReportLogRow
+			{
+				Id = dto.Id,
+				TimeUtc = dto.TimeUtc,
+				LocalTime = dto.TimeUtc.ToLocalTime(),
+				SourceIp = dto.SourceIp,
+				Classification = IpReportability.Describe(dto.Classification),
+				Action = dto.Action.ToString(),
+				Reason = dto.Reason,
+				HttpStatusCode = dto.HttpStatusCode,
+				ReportId = dto.ReportId,
+				CooldownExpiresUtc = dto.CooldownExpiresUtc,
+				FailedCount = dto.FailedCount,
+				SuccessfulCount = dto.SuccessfulCount,
+				FirstSeenUtc = dto.FirstSeenUtc,
+				LastSeenUtc = dto.LastSeenUtc,
+				UsernamesSample = dto.UsernamesSample,
+				CommentPreview = dto.CommentPreview,
+			};
 		}
 	}
 
