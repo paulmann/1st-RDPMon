@@ -244,3 +244,136 @@ public sealed class EnforcementCleanupResultDto
 	[Key(7)]
 	public string? Message { get; set; }
 }
+
+/// <summary>Result of the full blacklist cleanup (Req A): every enabled BlocklistEntry is soft-disabled,
+/// then enforcement is synchronized for every IP left without an enabled entry — Active / Pending
+/// ActiveBlock rows are marked Removed and the RdpAudit-created firewall rules that backed them (plus
+/// safe RdpAudit-owned orphan rules) are removed. Unrelated / non-RdpAudit rules are never touched.</summary>
+[MessagePackObject(keyAsPropertyName: false)]
+public sealed class BlocklistClearResultDto
+{
+	/// <summary>Number of BlocklistEntry rows soft-disabled by this operation.</summary>
+	[Key(0)]
+	public int BlocklistRowsAffected { get; set; }
+
+	/// <summary>Number of distinct IPs whose enforcement was synchronized (had no enabled entry left).</summary>
+	[Key(1)]
+	public int IpsSynchronized { get; set; }
+
+	/// <summary>Number of Active / Pending ActiveBlock rows marked Removed.</summary>
+	[Key(2)]
+	public int ActiveBlocksRemoved { get; set; }
+
+	/// <summary>Number of RdpAudit-created firewall rules removed for the cleared IPs.</summary>
+	[Key(3)]
+	public int FirewallRulesRemoved { get; set; }
+
+	/// <summary>Number of safe RdpAudit-owned orphan firewall rules removed (no remaining enabled row).</summary>
+	[Key(4)]
+	public int OrphanRulesRemoved { get; set; }
+
+	/// <summary>Number of per-step failures encountered (the operation continues best-effort).</summary>
+	[Key(5)]
+	public int Errors { get; set; }
+
+	/// <summary>Operator-facing summary of what happened.</summary>
+	[Key(6)]
+	public string Message { get; set; } = string.Empty;
+
+	/// <summary>Detailed multi-line diagnostic log for the Copy Log / Diagnostics DEBUG view.</summary>
+	[Key(7)]
+	public string? DebugLog { get; set; }
+
+	/// <summary>Overall status of the cleanup.</summary>
+	[Key(8)]
+	public IpcResultStatus Status { get; set; } = IpcResultStatus.Success;
+}
+
+/// <summary>Result of the DEBUG-gated full firewall cleanup (Req B): every RdpAudit-owned firewall rule
+/// (matched strictly by the RdpAudit group / name convention) is removed and ActiveBlock rows are
+/// synchronized to the non-enforced (Removed) state. Unrelated admin rules are never touched and the
+/// BlocklistEntry table is never modified.</summary>
+[MessagePackObject(keyAsPropertyName: false)]
+public sealed class FirewallClearResultDto
+{
+	/// <summary>Number of RdpAudit-owned firewall rules discovered by the scan.</summary>
+	[Key(0)]
+	public int FirewallRulesFound { get; set; }
+
+	/// <summary>Number of RdpAudit-owned firewall rules successfully removed.</summary>
+	[Key(1)]
+	public int FirewallRulesRemoved { get; set; }
+
+	/// <summary>Number of ActiveBlock rows synchronized to the Removed state.</summary>
+	[Key(2)]
+	public int ActiveBlocksUpdated { get; set; }
+
+	/// <summary>Number of per-step failures encountered (the operation continues best-effort).</summary>
+	[Key(3)]
+	public int Errors { get; set; }
+
+	/// <summary>Operator-facing summary of what happened.</summary>
+	[Key(4)]
+	public string Message { get; set; } = string.Empty;
+
+	/// <summary>Detailed multi-line diagnostic log for the Copy Log / Diagnostics DEBUG view.</summary>
+	[Key(5)]
+	public string? DebugLog { get; set; }
+
+	/// <summary>Overall status of the cleanup.</summary>
+	[Key(6)]
+	public IpcResultStatus Status { get; set; } = IpcResultStatus.Success;
+}
+
+/// <summary>Per-table row count cleared during the application-data purge (Req C).</summary>
+[MessagePackObject(keyAsPropertyName: false)]
+public sealed class PurgedTableDto
+{
+	/// <summary>Logical table / entity name (e.g. "RawEvents").</summary>
+	[Key(0)]
+	public string Table { get; set; } = string.Empty;
+
+	/// <summary>Number of rows deleted from the table.</summary>
+	[Key(1)]
+	public int RowsCleared { get; set; }
+}
+
+/// <summary>Result of the DEBUG-gated full application-data cleanup (Req C): the accumulated RdpAudit
+/// operational tables are transactionally cleared while schema, migrations and configuration are
+/// preserved; on SQLite the purge is followed by a WAL checkpoint and VACUUM. Requires a typed
+/// confirmation phrase on the client.</summary>
+[MessagePackObject(keyAsPropertyName: false)]
+public sealed class AppDataPurgeResultDto
+{
+	/// <summary>Per-table cleared row counts.</summary>
+	[Key(0)]
+	public List<PurgedTableDto> TablesCleared { get; set; } = new();
+
+	/// <summary>Names of any auxiliary files removed (reserved; empty for the in-DB purge path).</summary>
+	[Key(1)]
+	public List<string> FilesRemoved { get; set; } = new();
+
+	/// <summary>True when a SQLite VACUUM was executed after the purge.</summary>
+	[Key(2)]
+	public bool DatabaseVacuumed { get; set; }
+
+	/// <summary>True when a SQLite WAL checkpoint (TRUNCATE) was executed after the purge.</summary>
+	[Key(3)]
+	public bool WalCheckpointed { get; set; }
+
+	/// <summary>Number of per-step failures encountered.</summary>
+	[Key(4)]
+	public int Errors { get; set; }
+
+	/// <summary>Operator-facing summary of what happened.</summary>
+	[Key(5)]
+	public string Message { get; set; } = string.Empty;
+
+	/// <summary>Detailed multi-line diagnostic log for the Copy Log / Diagnostics DEBUG view.</summary>
+	[Key(6)]
+	public string? DebugLog { get; set; }
+
+	/// <summary>Overall status of the purge.</summary>
+	[Key(7)]
+	public IpcResultStatus Status { get; set; } = IpcResultStatus.Success;
+}

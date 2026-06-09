@@ -81,8 +81,17 @@ public sealed class FirewallPage : TabPage
 	private readonly TextBox _loginRuleInput;
 
 	/// <summary>When checked, a failed Remove / Repair surfaces a modal with the full detailed error log
-	/// and a Copy Log button. Unchecked by default so routine operation shows only a one-line status.</summary>
+	/// and a Copy Log button, and the two destructive DEBUG-gated cleanup buttons become visible. Unchecked
+	/// by default so routine operation shows only a one-line status and the destructive buttons stay hidden.</summary>
 	private readonly CheckBox _debugCheck;
+
+	/// <summary>DEBUG-gated destructive button: removes every RdpAudit-owned firewall rule. Hidden unless
+	/// the DEBUG checkbox is checked.</summary>
+	private readonly Button _debugClearFirewallButton;
+
+	/// <summary>DEBUG-gated destructive button: clears all accumulated RdpAudit application data. Hidden
+	/// unless the DEBUG checkbox is checked.</summary>
+	private readonly Button _debugClearDataButton;
 
 	private readonly System.Windows.Forms.Timer _timer;
 
@@ -324,6 +333,11 @@ public sealed class FirewallPage : TabPage
 		Button blocklistRepair = MakeButton("Repair selected", async (_, _) => await OnRepairBlocklistSelectedAsync().ConfigureAwait(true));
 		Button blocklistRepairAll = MakeButton("Repair all enabled", async (_, _) => await OnRepairBlocklistAllAsync().ConfigureAwait(true));
 		Button blocklistDedupe = MakeButton("Dedupe duplicates", async (_, _) => await OnDedupeBlocklistAsync().ConfigureAwait(true));
+		Button blocklistClearAll = MakeButton("Clear all blacklist", async (_, _) => await OnClearAllBlocklistAsync().ConfigureAwait(true));
+		_debugClearFirewallButton = MakeButton("DEBUG: Clear RdpAudit firewall rules", async (_, _) => await OnDebugClearFirewallAsync().ConfigureAwait(true));
+		_debugClearDataButton = MakeButton("DEBUG: Clear all application data", async (_, _) => await OnDebugClearApplicationDataAsync().ConfigureAwait(true));
+		_debugClearFirewallButton.Visible = false;
+		_debugClearDataButton.Visible = false;
 		_debugCheck = new CheckBox
 		{
 			Text = "DEBUG",
@@ -332,7 +346,12 @@ public sealed class FirewallPage : TabPage
 			Anchor = AnchorStyles.Left,
 			Margin = new Padding(8, 8, 4, 4),
 		};
-		_innerTabs.TabPages.Add(BuildGridTab("Blocklist", _blocklistGrid, _blocklistFilter, _blocklistInput, blocklistAdd, blocklistRemove, blocklistRepair, blocklistRepairAll, blocklistDedupe, _debugCheck));
+		_debugCheck.CheckedChanged += (_, _) =>
+		{
+			_debugClearFirewallButton.Visible = _debugCheck.Checked;
+			_debugClearDataButton.Visible = _debugCheck.Checked;
+		};
+		_innerTabs.TabPages.Add(BuildGridTab("Blocklist", _blocklistGrid, _blocklistFilter, _blocklistInput, blocklistAdd, blocklistRemove, blocklistRepair, blocklistRepairAll, blocklistDedupe, blocklistClearAll, _debugCheck, _debugClearFirewallButton, _debugClearDataButton));
 
 		_whitelistGrid = MakeAddressGrid();
 		_whitelistGrid.DataSource = _whitelistRows;
@@ -1015,6 +1034,221 @@ public sealed class FirewallPage : TabPage
 		}
 
 		await RefreshAllAsync().ConfigureAwait(true);
+	}
+
+	/// <summary>Req A — full blacklist cleanup. Soft-disables every enabled BlockList row (audit-preserving,
+	/// never hard-deleted), then synchronizes enforcement for the cleared IPs: their active blocks are marked
+	/// Removed and the RdpAudit-created firewall rules backing them (plus safe orphans) are removed. Unrelated
+	/// administrator rules are never touched. Confirms first, then does the atomic 1.3.1-style refresh.</summary>
+	private async Task OnClearAllBlocklistAsync()
+	{
+		const string prompt =
+			"Clear the ENTIRE blacklist?\r\n\r\nEvery enabled BlockList entry will be disabled (rows are kept "
+			+ "for audit, never hard-deleted). For each IP left without an enabled entry, its active block is "
+			+ "marked Removed and the RdpAudit-created firewall rule that backed it is removed. Unrelated "
+			+ "administrator firewall rules are never touched.";
+		if (!Confirm(prompt, "Confirm clear all blacklist"))
+		{
+			SetStatus("Clear all blacklist cancelled.");
+			return;
+		}
+
+		if (!BeginBusy())
+		{
+			return;
+		}
+
+		try
+		{
+			IpcCallResult<BlocklistClearResultDto> call =
+				await _ipc.SendDetailedAsync<BlocklistClearResultDto>(IpcCommand.ClearAllBlocklist).ConfigureAwait(true);
+			if (call.IsSuccess && call.Value is { } result)
+			{
+				SetStatus(result.Message);
+				if (_debugCheck.Checked && !string.IsNullOrEmpty(result.DebugLog))
+				{
+					ShowDetailLogModal("Clear all blacklist — detailed log", result.DebugLog!);
+				}
+			}
+			else
+			{
+				await ReportCallFailureAsync(call, "Clear all blacklist").ConfigureAwait(true);
+			}
+
+			await RefreshAllAsync().ConfigureAwait(true);
+		}
+		catch (Exception ex)
+		{
+			SetStatus(string.Format(CultureInfo.InvariantCulture,
+				"Clear all blacklist: FAILED — {0}", ex.GetType().Name));
+		}
+		finally
+		{
+			EndBusy();
+		}
+	}
+
+	/// <summary>Req B — DEBUG-gated full firewall cleanup. Removes every RdpAudit-owned firewall rule
+	/// (matched by the RdpAudit group / name convention) and synchronizes active-block rows to Removed.
+	/// Never touches unrelated administrator rules and never modifies the BlockList table. Confirms first,
+	/// then does the atomic refresh.</summary>
+	private async Task OnDebugClearFirewallAsync()
+	{
+		const string prompt =
+			"DEBUG: Remove ALL RdpAudit firewall rules?\r\n\r\nEvery firewall rule created by RdpAudit (matched "
+			+ "by the RdpAudit rule group / name) is removed and every active block is marked Removed. The "
+			+ "BlockList table is not modified. Unrelated administrator rules are never touched. This is a "
+			+ "destructive maintenance action.";
+		if (!Confirm(prompt, "Confirm DEBUG firewall cleanup"))
+		{
+			SetStatus("DEBUG firewall cleanup cancelled.");
+			return;
+		}
+
+		if (!BeginBusy())
+		{
+			return;
+		}
+
+		try
+		{
+			IpcCallResult<FirewallClearResultDto> call =
+				await _ipc.SendDetailedAsync<FirewallClearResultDto>(IpcCommand.ClearAllFirewallRules).ConfigureAwait(true);
+			if (call.IsSuccess && call.Value is { } result)
+			{
+				SetStatus(result.Message);
+				if (_debugCheck.Checked && !string.IsNullOrEmpty(result.DebugLog))
+				{
+					ShowDetailLogModal("DEBUG firewall cleanup — detailed log", result.DebugLog!);
+				}
+			}
+			else
+			{
+				await ReportCallFailureAsync(call, "DEBUG firewall cleanup").ConfigureAwait(true);
+			}
+
+			await RefreshAllAsync().ConfigureAwait(true);
+		}
+		catch (Exception ex)
+		{
+			SetStatus(string.Format(CultureInfo.InvariantCulture,
+				"DEBUG firewall cleanup: FAILED — {0}", ex.GetType().Name));
+		}
+		finally
+		{
+			EndBusy();
+		}
+	}
+
+	/// <summary>Req C — DEBUG-gated full application-data cleanup. Requires the operator to type the exact
+	/// confirmation phrase; the same phrase is re-validated server-side before any data is touched. The
+	/// service transactionally clears the accumulated operational tables (preserving schema, migrations,
+	/// configuration and event-log bookmarks) and reclaims SQLite space, then the UI refreshes to the empty
+	/// healthy state without reporting the service as unreachable.</summary>
+	private async Task OnDebugClearApplicationDataAsync()
+	{
+		const string phrase = "CLEAR ALL RDP AUDIT DATA";
+		const string prompt =
+			"DEBUG: Clear ALL application data?\r\n\r\nThis permanently deletes the accumulated RdpAudit data "
+			+ "(raw events, auth-attempt and connection facts, active blocks, blocklist / whitelist entries, "
+			+ "alerts, sessions, addresses, correlations, attack stats and abuse report history). Schema, "
+			+ "migrations, configuration and event-log read positions are preserved, so the service keeps "
+			+ "running. This cannot be undone.";
+		if (!Confirm(prompt, "Confirm DEBUG application-data cleanup"))
+		{
+			SetStatus("DEBUG application-data cleanup cancelled.");
+			return;
+		}
+
+		string typed = PromptForConfirmationPhrase(phrase);
+		if (!string.Equals(typed, phrase, StringComparison.Ordinal))
+		{
+			SetStatus("DEBUG application-data cleanup cancelled: confirmation phrase did not match.");
+			return;
+		}
+
+		if (!BeginBusy())
+		{
+			return;
+		}
+
+		try
+		{
+			IpcCallResult<AppDataPurgeResultDto> call =
+				await _ipc.SendDetailedAsync<AppDataPurgeResultDto>(IpcCommand.ClearAllApplicationData, phrase).ConfigureAwait(true);
+			if (call.IsSuccess && call.Value is { } result)
+			{
+				SetStatus(result.Message);
+				if (_debugCheck.Checked && !string.IsNullOrEmpty(result.DebugLog))
+				{
+					ShowDetailLogModal("DEBUG application-data cleanup — detailed log", result.DebugLog!);
+				}
+			}
+			else
+			{
+				await ReportCallFailureAsync(call, "DEBUG application-data cleanup").ConfigureAwait(true);
+			}
+
+			await RefreshAllAsync().ConfigureAwait(true);
+		}
+		catch (Exception ex)
+		{
+			SetStatus(string.Format(CultureInfo.InvariantCulture,
+				"DEBUG application-data cleanup: FAILED — {0}", ex.GetType().Name));
+		}
+		finally
+		{
+			EndBusy();
+		}
+	}
+
+	/// <summary>Modal prompt that requires the operator to type the exact destructive-confirmation phrase.
+	/// Returns the trimmed entered text (empty on cancel) so the caller can compare it ordinally.</summary>
+	private string PromptForConfirmationPhrase(string requiredPhrase)
+	{
+		using Form dialog = new()
+		{
+			Text = "Type the confirmation phrase",
+			StartPosition = FormStartPosition.CenterParent,
+			FormBorderStyle = FormBorderStyle.FixedDialog,
+			Size = new Size(480, 180),
+			MinimizeBox = false,
+			MaximizeBox = false,
+			ShowInTaskbar = false,
+		};
+
+		Label label = new()
+		{
+			Text = "To proceed, type the following phrase exactly:\r\n\r\n" + requiredPhrase,
+			Dock = DockStyle.Top,
+			AutoSize = false,
+			Height = 64,
+			Padding = new Padding(12, 12, 12, 0),
+		};
+		TextBox input = new()
+		{
+			Dock = DockStyle.Top,
+			Margin = new Padding(12),
+			Width = 440,
+		};
+		FlowLayoutPanel buttons = new()
+		{
+			Dock = DockStyle.Bottom,
+			FlowDirection = FlowDirection.RightToLeft,
+			Height = 44,
+			Padding = new Padding(8),
+		};
+		Button ok = new() { Text = "Confirm", DialogResult = DialogResult.OK, AutoSize = true };
+		Button cancel = new() { Text = "Cancel", DialogResult = DialogResult.Cancel, AutoSize = true };
+		buttons.Controls.Add(ok);
+		buttons.Controls.Add(cancel);
+		dialog.AcceptButton = ok;
+		dialog.CancelButton = cancel;
+		dialog.Controls.Add(input);
+		dialog.Controls.Add(label);
+		dialog.Controls.Add(buttons);
+
+		return dialog.ShowDialog(this) == DialogResult.OK ? input.Text.Trim() : string.Empty;
 	}
 
 	/// <summary>When DEBUG is checked, shows a modal with the detailed error log and a Copy Log button.

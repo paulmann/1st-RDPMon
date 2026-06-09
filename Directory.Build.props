@@ -17,21 +17,20 @@
 		<!-- Central version surface. publish.ps1 -p:VersionPrefix overrides this for releases;
 		     the default below ensures the assembly version embedded in the binary is something
 		     other than the implicit 1.0.0.0 placeholder so the Service tab can distinguish
-		     runtime / installed / distribution binaries by version. Pinned to 1.3.1 for the
-		     current release stream — see RdpAuditVersionMetadataTests for the gate. The 1.3.1
-		     patch release stabilizes firewall blacklist Remove / Repair / diagnostics: Remove Selected
-		     now targets the exact selected BlocklistEntry.Id (including already-disabled rows) and
-		     returns a structured result that synchronizes ActiveBlocks / firewall rules only when the
-		     last enabled row for an IP is removed; Repair is a no-op for already-verified rows; the
-		     Diagnostic tab gains a DEBUG mode with a copyable detailed error log; the firewall backend
-		     command is rendered from the same structured argument vector used for execution (no more
-		     duplicated 'New-NetFirewallRule ... New-NetFirewallRule'); a DB maintenance dedupe action
-		     collapses duplicate BlocklistEntries per IP with an audit trail; and the ProductVersion
-		     SemVer build-metadata suffix is no longer duplicated. It carries forward the 1.3.0 IPC
-		     reliability/diagnostics overhaul (per-command IPC timeouts, structured IpcCallResult,
-		     SCM-aware reachability diagnostics, last-known-data UI on transient timeout, and the
-		     Configurator-vs-Service version/SHA mismatch warning). -->
-		<VersionPrefix Condition="'$(VersionPrefix)' == ''">1.3.1</VersionPrefix>
+		     runtime / installed / distribution binaries by version. Pinned to 1.3.2 for the
+		     current release stream — see RdpAuditVersionMetadataTests for the gate. The 1.3.2
+		     release adds three guarded cleanup operations to the Firewall tab: a full blacklist
+		     cleanup button (visible in normal mode) that soft-disables every enabled BlockList row
+		     and synchronizes the cleared IPs' ActiveBlocks and RdpAudit-created firewall rules; a
+		     DEBUG-gated full firewall cleanup that removes every RdpAudit-owned firewall rule and
+		     marks active blocks Removed; and a DEBUG-gated full application-data cleanup that
+		     transactionally clears the accumulated operational tables (preserving schema, migrations,
+		     configuration and event-log bookmarks) and reclaims SQLite space via WAL checkpoint and
+		     VACUUM, behind a typed confirmation phrase re-validated server-side. Three append-only IPC
+		     commands (ClearAllBlocklist=55, ClearAllFirewallRules=56, ClearAllApplicationData=57) back
+		     these, each on the long IPC deadline. It carries forward the 1.3.1 firewall Remove / Repair /
+		     diagnostics stabilization and the 1.3.0 IPC reliability/diagnostics overhaul. -->
+		<VersionPrefix Condition="'$(VersionPrefix)' == ''">1.3.2</VersionPrefix>
 		<FileVersion>$(VersionPrefix).0</FileVersion>
 		<AssemblyVersion>$(VersionPrefix).0</AssemblyVersion>
 		<!-- Build SHA surface: when the build/publish pipeline passes -p:SourceRevisionId=<short-sha>
