@@ -167,9 +167,10 @@ public class ConnectionFactsExportFormatterTests
 
 		string body = ConnectionFactsExportFormatter.Format(dto, ConnectionFactsExportFormat.Csv);
 		string[] lines = body.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+		string header = lines[0].TrimEnd('\r', '\n');
 
 		Assert.EndsWith("IsActive,Classification,IsPublic,IsWhitelisted,IsReportableToAbuseIPDB,IsEligibleForAutoBlock",
-			lines[0], StringComparison.Ordinal);
+			header, StringComparison.Ordinal);
 		// First fact row reflects the reportability cells (…,yes,Public,yes,no,yes,yes).
 		Assert.Contains(",Public,yes,no,yes,yes", body, StringComparison.Ordinal);
 	}
