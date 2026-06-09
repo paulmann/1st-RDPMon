@@ -18,13 +18,34 @@ using RdpAudit.Core.Firewall;
 
 namespace RdpAudit.Service.Firewall;
 
+/// <summary>Which enumeration backend produced a <see cref="FirewallScanResult"/>. Surfaced in
+/// diagnostics so the operator can tell a locale-independent PowerShell read from the legacy
+/// English-text netsh parse (which silently returns zero rules on a localized host).</summary>
+public enum FirewallScanBackend
+{
+	/// <summary>No scan was attempted (non-Windows host).</summary>
+	None = 0,
+
+	/// <summary>`Get-NetFirewallRule | ConvertTo-Json` — locale-independent, preferred.</summary>
+	PowerShellJson = 1,
+
+	/// <summary>`netsh advfirewall firewall show rule name=all verbose` text parse — locale-fragile
+	/// fallback used only when the PowerShell path is unavailable or fails.</summary>
+	NetshText = 2,
+}
+
 /// <summary>Outcome of a single live firewall scan for RdpAudit-owned block rules.</summary>
-/// <param name="Scannable">False when the backend cannot be enumerated here (non-Windows, or netsh
-/// failed); the reconciler maps this to EffectiveUnknown rather than MissingRule.</param>
+/// <param name="Scannable">False when the backend cannot be enumerated here (non-Windows, or every
+/// backend failed); the reconciler maps this to EffectiveUnknown rather than MissingRule.</param>
 /// <param name="Rules">Discovered RdpAudit-owned inbound block rules (empty when scannable but none
 /// exist).</param>
 /// <param name="Note">Optional human-readable note (failure cause / environment detail).</param>
-public sealed record FirewallScanResult(bool Scannable, IReadOnlyList<DiscoveredBlockRule> Rules, string? Note);
+/// <param name="Backend">Which enumeration backend produced this result.</param>
+public sealed record FirewallScanResult(
+	bool Scannable,
+	IReadOnlyList<DiscoveredBlockRule> Rules,
+	string? Note,
+	FirewallScanBackend Backend = FirewallScanBackend.None);
 
 /// <summary>Enumerates RdpAudit-owned firewall block rules that really exist in the local store.</summary>
 public interface IFirewallRuleScanner
@@ -67,7 +88,8 @@ public sealed class NetshFirewallRuleScanner : IFirewallRuleScanner
 			return new FirewallScanResult(
 				Scannable: false,
 				Rules: Array.Empty<DiscoveredBlockRule>(),
-				Note: "Windows Firewall cannot be live-scanned on a non-Windows host.");
+				Note: "Windows Firewall cannot be live-scanned on a non-Windows host.",
+				Backend: FirewallScanBackend.None);
 		}
 
 		NetshResult result;
@@ -85,7 +107,8 @@ public sealed class NetshFirewallRuleScanner : IFirewallRuleScanner
 			return new FirewallScanResult(
 				Scannable: false,
 				Rules: Array.Empty<DiscoveredBlockRule>(),
-				Note: "netsh show rule name=all failed to execute.");
+				Note: "netsh show rule name=all failed to execute.",
+				Backend: FirewallScanBackend.NetshText);
 		}
 
 		if (!result.Success)
@@ -94,12 +117,18 @@ public sealed class NetshFirewallRuleScanner : IFirewallRuleScanner
 			return new FirewallScanResult(
 				Scannable: false,
 				Rules: Array.Empty<DiscoveredBlockRule>(),
-				Note: "netsh show rule name=all returned a non-zero exit code.");
+				Note: "netsh show rule name=all returned a non-zero exit code.",
+				Backend: FirewallScanBackend.NetshText);
 		}
 
 		IReadOnlyList<DiscoveredBlockRule> rules =
 			NetshRuleScanner.DiscoverRdpAuditBlockRules(result.StdOut, ruleNamePrefix);
-		return new FirewallScanResult(Scannable: true, Rules: rules, Note: null);
+		return new FirewallScanResult(
+			Scannable: true,
+			Rules: rules,
+			Note: "Enumerated via netsh verbose text parse (locale-fragile; rule labels are "
+				+ "translated on non-English hosts and may yield zero matches).",
+			Backend: FirewallScanBackend.NetshText);
 	}
 }
 
@@ -116,6 +145,7 @@ public sealed class UnsupportedFirewallRuleScanner : IFirewallRuleScanner
 		return Task.FromResult(new FirewallScanResult(
 			Scannable: false,
 			Rules: Array.Empty<DiscoveredBlockRule>(),
-			Note: "Windows Firewall live scan is not supported on this host."));
+			Note: "Windows Firewall live scan is not supported on this host.",
+			Backend: FirewallScanBackend.None));
 	}
 }

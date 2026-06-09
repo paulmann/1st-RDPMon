@@ -11,6 +11,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Runtime.Versioning;
+using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -577,11 +578,15 @@ public sealed class IpcDispatcher
 		int rdpAuditRuleCount = 0;
 		bool thirdPartySuspected = false;
 		string? thirdPartyNote = null;
+		string scannerBackend = "None";
+		string? scannerNote = null;
 		if (_reconciliation is not null)
 		{
 			ReconciliationReportDto rec = await _reconciliation.ReconcileAsync(ct).ConfigureAwait(false);
 			verifiedEnforced = rec.VerifiedCount;
 			rdpAuditRuleCount = rec.VerifiedCount;
+			scannerBackend = rec.ScannerBackend;
+			scannerNote = rec.ScannerNote;
 			foreach (ReconciledBlockDto b in rec.Blocks)
 			{
 				reconciledLines.Add(new ReconciledEnforcementLine(
@@ -636,6 +641,8 @@ public sealed class IpcDispatcher
 		{
 			ReconciledBlocks = reconciledLines,
 			OrphanedRuleNames = orphanNames,
+			ScannerBackend = scannerBackend,
+			ScannerNote = scannerNote,
 		};
 
 		return new FirewallDiagnosticsDto
@@ -734,25 +741,51 @@ public sealed class IpcDispatcher
 	{
 		AddressListMutationRequest req = DeserializeMutation(payload, "RemoveFromBlocklist");
 
-		// Prefer the stable surrogate key so we delete exactly the selected row even when several
-		// rows share an address (e.g. one Manual + one AutoBlock). Fall back to address matching for
-		// legacy callers that do not carry an Id.
-		string? ip = null;
+		// Defensive: a malformed client could send an address wrapped in quotes (e.g. a
+		// double-serialized '"80.244.40.164"'). Strip surrounding quotes / whitespace before any
+		// matching so the value compares equal to the canonical stored IP.
+		string rawAddress = req.Address ?? string.Empty;
+		string cleanedAddress = StripSurroundingQuotes(rawAddress);
+
 		List<BlocklistEntry> rows;
+		string matchMode;
+		string? normalizedIp = null;
 		await using (AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false))
 		{
+			// 1) Prefer the stable surrogate key so we delete exactly the selected row even when
+			//    several rows share an address (e.g. one Manual + one AutoBlock).
 			if (req.Id > 0)
 			{
-				_logger.LogDebug("RemoveFromBlocklist by Id={Id} (address hint '{Address}')", req.Id, req.Address);
+				matchMode = "Id";
+				_logger.LogDebug("RemoveFromBlocklist by Id={Id} (address hint '{Address}')", req.Id, cleanedAddress);
 				rows = await db.BlocklistEntries
 					.Where(b => b.Id == req.Id && b.IsEnabled).ToListAsync(ct).ConfigureAwait(false);
+
+				// 2) Fallback: the Id did not match an enabled row (stale grid selection / row already
+				//    disabled). Try the normalized IP so the operator still gets the intended removal,
+				//    and gather diagnostics describing exactly what DOES exist for that IP.
+				if (rows.Count == 0 && !string.IsNullOrWhiteSpace(cleanedAddress)
+					&& TryNormalizeAddress(cleanedAddress, out normalizedIp))
+				{
+					matchMode = "Id-miss→IP-fallback";
+					rows = await db.BlocklistEntries
+						.Where(b => b.Ip == normalizedIp && b.IsEnabled).ToListAsync(ct).ConfigureAwait(false);
+
+					if (rows.Count == 0)
+					{
+						string diag = await BuildRemoveDiagnosticAsync(db, req.Id, rawAddress, cleanedAddress, normalizedIp, ct)
+							.ConfigureAwait(false);
+						throw new IpcException(diag);
+					}
+				}
 			}
 			else
 			{
-				ip = NormalizeAndValidateAddress(req.Address);
-				_logger.LogDebug("RemoveFromBlocklist by address '{Address}'", ip);
+				matchMode = "IP";
+				normalizedIp = NormalizeAndValidateAddress(cleanedAddress);
+				_logger.LogDebug("RemoveFromBlocklist by address '{Address}'", normalizedIp);
 				rows = await db.BlocklistEntries
-					.Where(b => b.Ip == ip && b.IsEnabled).ToListAsync(ct).ConfigureAwait(false);
+					.Where(b => b.Ip == normalizedIp && b.IsEnabled).ToListAsync(ct).ConfigureAwait(false);
 			}
 
 			foreach (BlocklistEntry row in rows)
@@ -764,19 +797,101 @@ public sealed class IpcDispatcher
 		}
 
 		int removed = rows.Count;
-		string targetIp = ip ?? rows.Select(r => r.Ip).FirstOrDefault(x => x is not null) ?? req.Address;
+		string targetIp = normalizedIp ?? rows.Select(r => r.Ip).FirstOrDefault(x => x is not null) ?? cleanedAddress;
 		_logger.LogInformation(
-			"RemoveFromBlocklist soft-disabled {Removed} row(s) for Id={Id} address='{Address}'",
-			removed, req.Id, targetIp);
+			"RemoveFromBlocklist soft-disabled {Removed} row(s) via {MatchMode} for Id={Id} address='{Address}'",
+			removed, matchMode, req.Id, targetIp);
 
 		if (removed == 0)
 		{
-			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
-				"No enabled blocklist row matched {0} (Id={1}); nothing was removed.",
-				targetIp, req.Id));
+			await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+			string diag = await BuildRemoveDiagnosticAsync(db, req.Id, rawAddress, cleanedAddress, normalizedIp, ct)
+				.ConfigureAwait(false);
+			throw new IpcException(diag);
 		}
 
-		return new { status = IpcResultStatus.Success.ToString(), address = targetIp, removed };
+		return new { status = IpcResultStatus.Success.ToString(), address = targetIp, removed, matchMode };
+	}
+
+	/// <summary>Builds a precise "nothing removed" diagnostic listing the selected Id, the raw and
+	/// normalized address received, and every blocklist row (enabled or disabled) currently matching
+	/// that IP — so the operator sees exactly why the removal matched no enabled row.</summary>
+	private static async Task<string> BuildRemoveDiagnosticAsync(
+		AuditDbContext db,
+		long selectedId,
+		string rawAddress,
+		string cleanedAddress,
+		string? normalizedIp,
+		CancellationToken ct)
+	{
+		List<BlocklistEntry> matching = string.IsNullOrWhiteSpace(normalizedIp)
+			? new List<BlocklistEntry>()
+			: await db.BlocklistEntries
+				.AsNoTracking()
+				.Where(b => b.Ip == normalizedIp)
+				.OrderBy(b => b.Id)
+				.ToListAsync(ct).ConfigureAwait(false);
+
+		StringBuilder sb = new();
+		sb.Append(CultureInfo.InvariantCulture,
+			$"No enabled blocklist row matched the request, so nothing was removed (selected Id={selectedId}). ");
+		sb.Append(CultureInfo.InvariantCulture,
+			$"Address received raw='{rawAddress}', cleaned='{cleanedAddress}', normalized='{normalizedIp ?? "(invalid)"}'. ");
+		if (matching.Count == 0)
+		{
+			sb.Append("No blocklist rows exist for that IP at all (enabled or disabled).");
+		}
+		else
+		{
+			sb.Append(CultureInfo.InvariantCulture, $"{matching.Count} row(s) exist for that IP: ");
+			for (int i = 0; i < matching.Count; i++)
+			{
+				BlocklistEntry r = matching[i];
+				if (i > 0)
+				{
+					sb.Append("; ");
+				}
+
+				sb.Append(CultureInfo.InvariantCulture,
+					$"Id={r.Id} enabled={(r.IsEnabled ? "yes" : "no")} source={r.Source}");
+			}
+
+			sb.Append(". The row may already be disabled, or the grid selection Id is stale — refresh the list and retry.");
+		}
+
+		return sb.ToString();
+	}
+
+	/// <summary>Removes a single pair of surrounding ASCII double / single quotes (and whitespace)
+	/// from <paramref name="value"/>. Defends against a malformed client that double-serializes the
+	/// address field.</summary>
+	internal static string StripSurroundingQuotes(string value)
+	{
+		string trimmed = value.Trim();
+		if (trimmed.Length >= 2)
+		{
+			char first = trimmed[0];
+			char last = trimmed[^1];
+			if ((first == '"' && last == '"') || (first == '\'' && last == '\''))
+			{
+				trimmed = trimmed[1..^1].Trim();
+			}
+		}
+
+		return trimmed;
+	}
+
+	/// <summary>Non-throwing variant of <see cref="NormalizeAndValidateAddress"/>.</summary>
+	private static bool TryNormalizeAddress(string address, out string? normalized)
+	{
+		if (!string.IsNullOrWhiteSpace(address) && IPAddress.TryParse(address.Trim(), out IPAddress? parsed))
+		{
+			normalized = parsed.ToString();
+			return true;
+		}
+
+		normalized = null;
+		return false;
 	}
 
 	private async Task<object?> AddToWhitelistAsync(string? payload, CancellationToken ct)

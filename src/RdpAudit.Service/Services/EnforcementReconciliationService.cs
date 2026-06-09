@@ -528,6 +528,17 @@ public sealed class EnforcementReconciliationService
 		FirewallScanResult scan = await _scanner.ScanRdpAuditBlockRulesAsync(rulePrefix, ct).ConfigureAwait(false);
 		bool thirdPartyMayBypass = await DetectThirdPartyBypassAsync(ct).ConfigureAwait(false);
 
+		string? thirdPartyNote = thirdPartyMayBypass
+			? "A third-party provider may control effective enforcement."
+			: null;
+		string? note = (scan.Note, thirdPartyNote) switch
+		{
+			(null, null) => null,
+			(string s, null) => s,
+			(null, string t) => t,
+			(string s, string t) => s + " " + t,
+		};
+
 		return new BackendScanResult(
 			Provider: FirewallProviderKind.Windows,
 			Backend: backend,
@@ -535,9 +546,10 @@ public sealed class EnforcementReconciliationService
 			Scannable: scan.Scannable,
 			DiscoveredRules: scan.Rules,
 			ThirdPartyMayBypass: thirdPartyMayBypass,
-			Note: scan.Note ?? (thirdPartyMayBypass
-				? "Windows Firewall rule verified; a third-party provider may control effective enforcement."
-				: null));
+			Note: note)
+		{
+			ScannerBackend = scan.Backend.ToString(),
+		};
 	}
 
 	private BackendScanResult BuildUnscannableScan(FirewallProviderKind kind, FirewallOptions cfg)
@@ -630,6 +642,8 @@ public sealed class EnforcementReconciliationService
 			GeneratedUtc = report.GeneratedUtc,
 			VerifiedCount = report.VerifiedCount,
 			UnenforcedCount = report.UnenforcedCount,
+			ScannerBackend = report.ScannerBackend,
+			ScannerNote = report.ScannerNote,
 		};
 
 		foreach (ReconciledBlock b in report.Blocks)

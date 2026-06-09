@@ -357,29 +357,44 @@ public static class NetshRuleScanner
 	{
 		foreach (string part in raw.Split(','))
 		{
-			string token = part.Trim();
-			if (token.Length == 0)
-			{
-				continue;
-			}
+			ParsePortToken(part, ports);
+		}
+	}
 
-			if (int.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out int single))
-			{
-				ports.Add(single);
-				continue;
-			}
+	/// <summary>Parses a single port token (a bare number or an inclusive range such as
+	/// <c>5000-5050</c>) into <paramref name="ports"/>. Tolerates surrounding whitespace and ignores
+	/// non-numeric tokens (e.g. the literal <c>Any</c>). Shared by the netsh text scanner and the
+	/// locale-independent <see cref="PowerShellFirewallRuleParser"/> so both expand ranges the same
+	/// way.</summary>
+	internal static void ParsePortToken(string? rawToken, List<int> ports)
+	{
+		if (rawToken is null)
+		{
+			return;
+		}
 
-			// Range form: "5000-5050".
-			int dash = token.IndexOf('-');
-			if (dash > 0
-				&& int.TryParse(token[..dash], NumberStyles.Integer, CultureInfo.InvariantCulture, out int from)
-				&& int.TryParse(token[(dash + 1)..], NumberStyles.Integer, CultureInfo.InvariantCulture, out int to)
-				&& from > 0 && to >= from && to <= 65535)
+		string token = rawToken.Trim();
+		if (token.Length == 0)
+		{
+			return;
+		}
+
+		if (int.TryParse(token, NumberStyles.Integer, CultureInfo.InvariantCulture, out int single))
+		{
+			ports.Add(single);
+			return;
+		}
+
+		// Range form: "5000-5050".
+		int dash = token.IndexOf('-');
+		if (dash > 0
+			&& int.TryParse(token[..dash], NumberStyles.Integer, CultureInfo.InvariantCulture, out int from)
+			&& int.TryParse(token[(dash + 1)..], NumberStyles.Integer, CultureInfo.InvariantCulture, out int to)
+			&& from > 0 && to >= from && to <= 65535)
+		{
+			for (int p = from; p <= to; p++)
 			{
-				for (int p = from; p <= to; p++)
-				{
-					ports.Add(p);
-				}
+				ports.Add(p);
 			}
 		}
 	}

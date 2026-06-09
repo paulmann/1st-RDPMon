@@ -94,7 +94,14 @@ public sealed record BackendScanResult(
 	bool Scannable,
 	IReadOnlyList<DiscoveredBlockRule> DiscoveredRules,
 	bool ThirdPartyMayBypass,
-	string? Note);
+	string? Note)
+{
+	/// <summary>Which enumeration backend produced this scan ("PowerShellJson" / "NetshText" /
+	/// "None"). Diagnostic-only; flows into <see cref="ReconciliationReport.ScannerBackend"/> for the
+	/// Windows provider. Defaults to "None" so existing constructions (route / IPsec / tests) stay
+	/// valid without naming it.</summary>
+	public string ScannerBackend { get; init; } = "None";
+}
 
 /// <summary>One reconciled row: a desired block (or an orphan) with its derived status, confidence,
 /// concrete backend object id, and a recommended next action. The Service maps this into a DTO and
@@ -118,6 +125,13 @@ public sealed record ReconciliationReport(
 	IReadOnlyList<ReconciledBlock> Orphans,
 	DateTime GeneratedUtc)
 {
+	/// <summary>Which Windows-firewall enumeration backend produced this report's scan
+	/// (PowerShellJson / NetshText / None). Diagnostic-only; defaults to None when no scan ran.</summary>
+	public string ScannerBackend { get; init; } = "None";
+
+	/// <summary>Human-readable note from the Windows firewall scan (backend detail / failure cause).</summary>
+	public string? ScannerNote { get; init; }
+
 	/// <summary>Count of blocks with verified live enforcement.</summary>
 	public int VerifiedCount
 	{
@@ -192,7 +206,19 @@ public static class EnforcementReconciler
 
 		List<ReconciledBlock> orphans = CollectOrphans(scans, consumedRuleNames, nowUtc);
 
-		return new ReconciliationReport(blocks, orphans, nowUtc);
+		string scannerBackend = "None";
+		string? scannerNote = null;
+		if (scanByProvider.TryGetValue(FirewallProviderKind.Windows, out BackendScanResult? windowsScan))
+		{
+			scannerBackend = windowsScan.ScannerBackend;
+			scannerNote = windowsScan.Note;
+		}
+
+		return new ReconciliationReport(blocks, orphans, nowUtc)
+		{
+			ScannerBackend = scannerBackend,
+			ScannerNote = scannerNote,
+		};
 	}
 
 	private static ReconciledBlock ReconcileOne(
