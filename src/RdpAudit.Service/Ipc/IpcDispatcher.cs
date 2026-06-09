@@ -1314,7 +1314,9 @@ public sealed class IpcDispatcher
 
 		long failed = 0;
 		long successful = 0;
+		long unresolvedFailed = 0;
 		HashSet<string> distinctIpSet = new(StringComparer.OrdinalIgnoreCase);
+		bool sawUnresolved = false;
 		foreach (var fact in windowFacts)
 		{
 			switch (fact.Outcome)
@@ -1324,6 +1326,8 @@ public sealed class IpcDispatcher
 					failed++;
 					if (string.IsNullOrEmpty(fact.SourceIp))
 					{
+						unresolvedFailed++;
+						sawUnresolved = true;
 						distinctIpSet.Add(AttackStatsAggregator.SentinelUnresolvedIp);
 					}
 					break;
@@ -1338,6 +1342,8 @@ public sealed class IpcDispatcher
 			}
 		}
 		long distinctIps = distinctIpSet.Count;
+		// The sentinel is never a genuine attacker IP — exclude it from the resolved-IP population.
+		long distinctResolvedIps = sawUnresolved ? distinctIps - 1 : distinctIps;
 		long alertsRaised = await db.Alerts.AsNoTracking()
 			.Where(a => a.TimeUtc >= windowStart && a.TimeUtc <= windowEnd)
 			.LongCountAsync(ct).ConfigureAwait(false);
@@ -1361,6 +1367,8 @@ public sealed class IpcDispatcher
 				totalMatching, rows.Count),
 			TotalMatching = totalMatching,
 			AppliedLimit = limit,
+			UnresolvedFailedLogons = unresolvedFailed,
+			DistinctResolvedSourceIps = distinctResolvedIps,
 		};
 
 		// Stage IP-D: augment with RdpConnectionFacts aggregates for the IPs in this page. We never
@@ -1370,6 +1378,9 @@ public sealed class IpcDispatcher
 
 		foreach (AttackStat row in rows)
 		{
+			bool isUnresolved = AttackStatsAggregator.IsSentinelUnresolvedIp(row.Ip);
+			IpReportabilityResult classification = IpReportability.Classify(row.Ip);
+
 			AttackStatEntryDto entry = new()
 			{
 				Ip = row.Ip,
@@ -1385,6 +1396,11 @@ public sealed class IpcDispatcher
 				ThreatLevel = AttackThreatScoring.ClassifyScore(row.ThreatScore),
 				IsBlocked = row.IsBlocked,
 				LastUpdatedUtc = row.LastUpdatedUtc,
+				IsUnresolved = isUnresolved,
+				Classification = isUnresolved
+					? IpReportability.Describe(IpReportClassification.Unresolved)
+					: IpReportability.Describe(classification.Classification),
+				DisplayIp = isUnresolved ? AttackStatsAggregator.SentinelDisplayLabel : row.Ip,
 			};
 
 			if (factAggregates.TryGetValue(row.Ip, out FactAggregate agg))
