@@ -42,7 +42,12 @@ public sealed class RdpSessionDto
 	[Key(8)]
 	public string? SessionName { get; set; }
 
-	/// <summary>True when this row corresponds to the session the query was issued from.</summary>
+	/// <summary>v1.3.8 — operator-visible "Current?" flag: true only when this session belongs to
+	/// the user running the Configurator. It is decided by <c>CurrentRdpSessionMatcher</c> in the
+	/// operator's interactive process (the LocalSystem service cannot know which session the
+	/// operator uses), correlating the running process SessionId with the normalized current Windows
+	/// identity. The mapper leaves it false; only the matcher sets it. Do NOT conflate with
+	/// <see cref="IsActiveRdp"/> (any active rdp-tcp# session of any user).</summary>
 	[Key(9)]
 	public bool IsCurrent { get; set; }
 
@@ -109,15 +114,17 @@ public sealed class RdpSessionDto
 
 	/// <summary>v1.2.2 — raw <c>&gt;</c> marker emitted by qwinsta for the session the query was
 	/// issued from. Under LocalSystem this marker can point at session 0 (services) — never use
-	/// it directly for the operator-visible "Current?" column. <see cref="IsCurrent"/> carries the
-	/// validated operator-visible semantics (Active AND rdp-tcp# AND user AND 1 &lt; SessionId &lt; 65536).</summary>
+	/// it directly for the operator-visible "Current?" column. <see cref="IsActiveRdp"/> carries the
+	/// validated active-RDP semantics (Active AND rdp-tcp# AND user AND 1 &lt; SessionId &lt; 65536);
+	/// <see cref="IsCurrent"/> is the narrower operator-scoped flag set by <c>CurrentRdpSessionMatcher</c>.</summary>
 	[Key(22)]
 	public bool IsQueryCurrent { get; set; }
 
 	/// <summary>v1.2.2 — validated operator-visible "active RDP" flag. True when this row is the
 	/// session an operator would consider the live remote RDP session — Active state, rdp-tcp#
 	/// station name, non-empty user name, and a SessionId strictly greater than 1 and strictly less
-	/// than 65536. Matches <see cref="IsCurrent"/>; kept as a discoverable name for the UI column.</summary>
+	/// than 65536. Distinct from <see cref="IsCurrent"/>, which is the narrower operator-scoped
+	/// flag; this one is true for any logged-in user's active RDP session.</summary>
 	[Key(23)]
 	public bool IsActiveRdp { get; set; }
 }
