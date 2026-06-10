@@ -55,6 +55,7 @@ public sealed class IpcDispatcher
 	private readonly IOperationLogWriter? _opLog;
 	private readonly Core.Diagnostics.OverviewProgressState? _overviewProgress;
 	private readonly Workers.AttackStatsRefreshWorker? _attackStatsWorker;
+	private readonly Firewall.IFirewallRuleScanner? _ruleScanner;
 
 	public IpcDispatcher(
 		IDbContextFactory<AuditDbContext> factory,
@@ -78,7 +79,8 @@ public sealed class IpcDispatcher
 		ApplicationDataPurgeService? dataPurge = null,
 		IOperationLogWriter? opLog = null,
 		Core.Diagnostics.OverviewProgressState? overviewProgress = null,
-		Workers.AttackStatsRefreshWorker? attackStatsWorker = null)
+		Workers.AttackStatsRefreshWorker? attackStatsWorker = null,
+		Firewall.IFirewallRuleScanner? ruleScanner = null)
 	{
 		_factory = factory;
 		_metrics = metrics;
@@ -102,6 +104,7 @@ public sealed class IpcDispatcher
 		_opLog = opLog;
 		_overviewProgress = overviewProgress;
 		_attackStatsWorker = attackStatsWorker;
+		_ruleScanner = ruleScanner;
 	}
 
 	/// <summary>Best-effort durable operation-log record for an operator action taken through IPC.
@@ -694,6 +697,36 @@ public sealed class IpcDispatcher
 			rdpAuditRuleCount = verifiedEnforced;
 		}
 
+		// Project the live RdpAudit rule shapes so the report can flag rules that no longer match the
+		// configured block scope (e.g. AllInbound rules left over after switching to RdpPortOnly). The
+		// scan is best-effort: any failure leaves the shapes empty and the report says "not scanned"
+		// rather than fabricating a mismatch.
+		List<FirewallRuleShape> ruleShapes = new();
+		if (_ruleScanner is not null)
+		{
+			try
+			{
+				string prefix = Firewall.NetshCommandBuilder.NormalizeRulePrefix(cfg.BlockRuleName);
+				Firewall.FirewallScanResult shapeScan =
+					await _ruleScanner.ScanRdpAuditBlockRulesAsync(prefix, ct).ConfigureAwait(false);
+				foreach (DiscoveredBlockRule r in shapeScan.Rules)
+				{
+					if (r.DirectionInbound && r.ActionBlock)
+					{
+						ruleShapes.Add(new FirewallRuleShape(r.RuleName, r.Protocol, r.LocalPorts));
+					}
+				}
+			}
+			catch (OperationCanceledException)
+			{
+				throw;
+			}
+			catch (Exception ex)
+			{
+				_logger.LogWarning(ex, "Firewall rule-shape scan for block-scope diagnostics failed");
+			}
+		}
+
 		FirewallDiagnosticsInput input = new(
 			ConfiguredProviderKind: cfg.Provider.ToString(),
 			ConfiguredEnforcementBackend: cfg.EnforcementBackend.ToString(),
@@ -716,6 +749,7 @@ public sealed class IpcDispatcher
 			OrphanedRuleNames = orphanNames,
 			ScannerBackend = scannerBackend,
 			ScannerNote = scannerNote,
+			DiscoveredRuleShapes = ruleShapes,
 		};
 
 		return new FirewallDiagnosticsDto

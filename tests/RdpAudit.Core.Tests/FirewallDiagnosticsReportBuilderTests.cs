@@ -108,4 +108,56 @@ public class FirewallDiagnosticsReportBuilderTests
 		Assert.Contains("(no providers registered)", text, StringComparison.Ordinal);
 		Assert.Contains("Enabled allow-inbound TCP ports: (none)", text, StringComparison.Ordinal);
 	}
+
+	[Fact]
+	public void Report_RdpPortOnly_ShowsExpectedRuleShapeWithResolvedPort()
+	{
+		// Configured RdpPortOnly with resolved port 55554: the expected-shape line must pin TCP 55554,
+		// proving the report drives off the dynamically resolved port and never a hardcoded 3389.
+		string text = FirewallDiagnosticsReportBuilder.Build(Sample());
+		Assert.Contains("[Block scope]", text, StringComparison.Ordinal);
+		Assert.Contains("Configured scope: RdpPortOnly", text, StringComparison.Ordinal);
+		Assert.Contains("Expected rule shape: inbound block, TCP, LocalPort=55554", text, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public void Report_AllInbound_ExplainsLocalPortAnyIsExpected()
+	{
+		FirewallDiagnosticsInput input = Sample() with { ConfiguredBlockScope = "AllInbound" };
+		string text = FirewallDiagnosticsReportBuilder.Build(input);
+		Assert.Contains("Configured scope: AllInbound", text, StringComparison.Ordinal);
+		Assert.Contains("LocalPort=Any is EXPECTED because BlockScope=AllInbound", text, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public void Report_DetectsMismatch_WhenConfiguredRdpOnlyButRuleIsAllInbound()
+	{
+		// Live rule pins no port (AllInbound shape) while config says RdpPortOnly — the report must
+		// name the rule and warn, instead of silently claiming RdpPortOnly.
+		FirewallDiagnosticsInput input = Sample() with
+		{
+			DiscoveredRuleShapes = new[]
+			{
+				new FirewallRuleShape("RdpAudit-Block-203.0.113.10", null, Array.Empty<int>()),
+			},
+		};
+		string text = FirewallDiagnosticsReportBuilder.Build(input);
+		Assert.Contains("RdpAudit rule(s) do NOT match the configured scope", text, StringComparison.Ordinal);
+		Assert.Contains("RdpAudit-Block-203.0.113.10", text, StringComparison.Ordinal);
+		Assert.Contains("still blocks all inbound", text, StringComparison.Ordinal);
+	}
+
+	[Fact]
+	public void Report_NoMismatch_WhenRuleMatchesConfiguredRdpOnlyScope()
+	{
+		FirewallDiagnosticsInput input = Sample() with
+		{
+			DiscoveredRuleShapes = new[]
+			{
+				new FirewallRuleShape("RdpAudit-Block-203.0.113.10", "TCP", new[] { 55554 }),
+			},
+		};
+		string text = FirewallDiagnosticsReportBuilder.Build(input);
+		Assert.Contains("Existing rule mismatches: none", text, StringComparison.Ordinal);
+	}
 }
