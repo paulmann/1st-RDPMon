@@ -52,6 +52,9 @@ public sealed class OverviewPage : TabPage
 	private readonly SummaryCard _cardFailedLogins;
 	private readonly SummaryCard _cardServiceHealth;
 	private readonly SummaryCard _cardDbSize;
+	private readonly ProgressBar _analysisBar;
+	private readonly Label _analysisLabel;
+	private readonly System.Windows.Forms.Timer _progressTimer;
 
 	public OverviewPage() : this(null)
 	{
@@ -190,13 +193,35 @@ public sealed class OverviewPage : TabPage
 		cardsRow.Controls.Add(_cardServiceHealth, 4, 0);
 		cardsRow.Controls.Add(_cardDbSize, 5, 0);
 
+		// Historical-analysis progress: lets the Overview tab open immediately and show that the
+		// service is working through a large historical backlog (e.g. a 1 GB DB / >1M events) instead
+		// of appearing hung. Driven by lightly polling GetOverviewProgress over IPC.
+		_analysisLabel = new Label
+		{
+			Text = "Historical analysis: idle",
+			AutoSize = false,
+			Width = 1100,
+			Height = 18,
+			Location = new Point(12, 380),
+		};
+		_analysisBar = new ProgressBar
+		{
+			Width = 1100,
+			Height = 16,
+			Location = new Point(12, 400),
+			Style = ProgressBarStyle.Continuous,
+			Minimum = 0,
+			Maximum = 100,
+			Visible = false,
+		};
+
 		_status = new Label
 		{
 			Text = "Ready",
 			AutoSize = false,
 			Width = 1100,
 			Height = 22,
-			Location = new Point(12, 384),
+			Location = new Point(12, 424),
 		};
 
 		_statusReport = new TextBox
@@ -207,8 +232,8 @@ public sealed class OverviewPage : TabPage
 			WordWrap = true,
 			Font = new Font(FontFamily.GenericMonospace, 9.5f),
 			Width = 1100,
-			Height = 332,
-			Location = new Point(12, 412),
+			Height = 296,
+			Location = new Point(12, 452),
 		};
 
 		Controls.Add(_title);
@@ -223,10 +248,85 @@ public sealed class OverviewPage : TabPage
 		Controls.Add(_backup);
 		Controls.Add(_restore);
 		Controls.Add(cardsRow);
+		Controls.Add(_analysisLabel);
+		Controls.Add(_analysisBar);
 		Controls.Add(_status);
 		Controls.Add(_statusReport);
 
-		HandleCreated += async (_, _) => await RefreshAsync().ConfigureAwait(true);
+		_progressTimer = new System.Windows.Forms.Timer { Interval = 2_000 };
+		_progressTimer.Tick += async (_, _) => await PollProgressAsync().ConfigureAwait(true);
+
+		HandleCreated += async (_, _) =>
+		{
+			_progressTimer.Start();
+			await RefreshAsync().ConfigureAwait(true);
+			await PollProgressAsync().ConfigureAwait(true);
+		};
+		HandleDestroyed += (_, _) => _progressTimer.Stop();
+	}
+
+	/// <summary>Polls the service for historical-analysis progress and updates the progress bar.
+	/// Best-effort: when the service is unreachable the bar simply hides. Never throws.</summary>
+	private async Task PollProgressAsync()
+	{
+		if (_ipc is null)
+		{
+			return;
+		}
+
+		try
+		{
+			OverviewProgressDto? progress =
+				await _ipc.SendAsync<OverviewProgressDto>(IpcCommand.GetOverviewProgress).ConfigureAwait(true);
+
+			if (progress is null || progress.Status != IpcResultStatus.Success || !progress.IsRunning)
+			{
+				_analysisBar.Visible = false;
+				_analysisLabel.Text = progress is { IsRunning: false }
+					? "Historical analysis: idle" + (string.IsNullOrEmpty(progress.Message) ? string.Empty : " — " + progress.Message)
+					: "Historical analysis: idle";
+				return;
+			}
+
+			_analysisBar.Visible = true;
+			if (progress.TotalRows > 0 && progress.Percent > 0)
+			{
+				_analysisBar.Style = ProgressBarStyle.Continuous;
+				_analysisBar.Value = (int)Math.Clamp(progress.Percent, 0, 100);
+				_analysisLabel.Text = string.Format(
+					CultureInfo.InvariantCulture,
+					"Historical analysis: {0} — {1:0}% ({2:N0}/{3:N0})",
+					progress.Stage,
+					progress.Percent,
+					progress.ProcessedRows,
+					progress.TotalRows);
+			}
+			else
+			{
+				// Total unknown by design (bounded backfill) — show marquee + processed count.
+				_analysisBar.Style = ProgressBarStyle.Marquee;
+				_analysisLabel.Text = string.Format(
+					CultureInfo.InvariantCulture,
+					"Historical analysis: {0} — {1:N0} processed{2}",
+					progress.Stage,
+					progress.ProcessedRows,
+					string.IsNullOrEmpty(progress.CurrentChannel) ? string.Empty : " (" + progress.CurrentChannel + ")");
+			}
+		}
+		catch (Exception)
+		{
+			_analysisBar.Visible = false;
+		}
+	}
+
+	protected override void Dispose(bool disposing)
+	{
+		if (disposing)
+		{
+			_progressTimer.Dispose();
+		}
+
+		base.Dispose(disposing);
 	}
 
 	private static string GetProductVersion()

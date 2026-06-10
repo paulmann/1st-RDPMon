@@ -22,6 +22,9 @@ public sealed class RdpAuditOptions
 
 	public DiagnosticsOptions Diagnostics { get; set; } = new();
 
+	/// <summary>Operation-log viewing depth and retention settings (Logs tab + retention pass).</summary>
+	public LogsOptions Logs { get; set; } = new();
+
 	/// <summary>AbuseIPDB external reputation / reporting provider settings.</summary>
 	public AbuseIpDbOptions AbuseIpDb { get; set; } = new();
 

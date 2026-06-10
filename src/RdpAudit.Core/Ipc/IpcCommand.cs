@@ -189,4 +189,18 @@ public enum IpcCommand
 	/// the client. Returns a structured report with per-table row counts cleared, vacuum / checkpoint
 	/// flags, failures and a debug log.</summary>
 	ClearAllApplicationData = 57,
+
+	// --- v1.3.3 observability additions (append-only). ---
+
+	/// <summary>Returns a bounded, filtered, paged window over the durable OperationLogs table (program
+	/// actions — bans, firewall, settings, maintenance, IPC failures, background jobs — not security
+	/// attack events) for the Configurator's Logs tab. The server clamps DepthDays and PageSize to safe
+	/// ranges and populates DEBUG-only detail fields (DetailsJson, StackTrace) only when DEBUG mode is on.</summary>
+	QueryOperationLogs = 58,
+
+	/// <summary>Returns a light snapshot of the long-running historical analysis / backfill / indexing
+	/// job (IsRunning, Stage, ProcessedRows, TotalRows, Percent, started/updated timestamps, current
+	/// channel, last event, errors). Polled by the Overview tab so the UI opens immediately and shows a
+	/// progress bar instead of blocking on a full historical analysis of a large database.</summary>
+	GetOverviewProgress = 59,
 }

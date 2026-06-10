@@ -54,6 +54,7 @@ public sealed class MainForm : Form
 		_tabs.TabPages.Add(new RdpConfigurationPage(_ipc) { Text = "\U0001F5A5️ RDP Configuration" });
 		_tabs.TabPages.Add(new SettingsPage(_ipc) { Text = "\U0001F527 Settings" });
 		_tabs.TabPages.Add(new LiveEventsPage(_ipc) { Text = "\U0001F4E1 Live Events" });
+		_tabs.TabPages.Add(new LogsPage(_ipc) { Text = "\U0001F4DC Logs" });
 		_tabs.TabPages.Add(new FirewallPage(_ipc) { Text = "\U0001F6E1️ Firewall" });
 		_tabs.TabPages.Add(new AttackStatisticsPage(_ipc) { Text = "\U0001F4C8 Attack Statistics" });
 		_tabs.TabPages.Add(new RemoteRdpClientsPage(_ipc) { Text = "\U0001F310 Remote RDP Clients" });

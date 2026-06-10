@@ -79,6 +79,11 @@ public static class AppSettingsTemplate
 			"LogChannelDrops": true,
 			"LogAlertEvaluationTimings": false
 		},
+		"Logs": {
+			"ViewDepthDays": 60,
+			"RetentionDays": 60,
+			"DefaultPageSize": 500
+		},
 		"AbuseIpDb": {
 			"Enabled": false,
 			"ReportAttacks": false,

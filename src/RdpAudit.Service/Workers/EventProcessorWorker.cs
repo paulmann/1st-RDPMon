@@ -45,6 +45,7 @@ public sealed class EventProcessorWorker : BackgroundService
 	private readonly ServiceMetrics _metrics;
 	private readonly ILogger<EventProcessorWorker> _logger;
 	private readonly IOptionsMonitor<RdpAuditOptions> _options;
+	private readonly IOperationLogWriter _opLog;
 	private int _consecutiveFailures;
 
 	public EventProcessorWorker(
@@ -57,7 +58,8 @@ public sealed class EventProcessorWorker : BackgroundService
 		SecurityCorrelationWatchdog securityWatchdog,
 		ServiceMetrics metrics,
 		ILogger<EventProcessorWorker> logger,
-		IOptionsMonitor<RdpAuditOptions> options)
+		IOptionsMonitor<RdpAuditOptions> options,
+		IOperationLogWriter opLog)
 	{
 		_channel = channel;
 		_factory = factory;
@@ -69,6 +71,7 @@ public sealed class EventProcessorWorker : BackgroundService
 		_metrics = metrics;
 		_logger = logger;
 		_options = options;
+		_opLog = opLog;
 	}
 
 	protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -78,39 +81,62 @@ public sealed class EventProcessorWorker : BackgroundService
 		{
 			while (!stoppingToken.IsCancellationRequested)
 			{
-				List<RawEventDto> batch = await DrainBatchAsync(stoppingToken).ConfigureAwait(false);
-				if (batch.Count == 0)
-				{
-					continue;
-				}
-
 				try
 				{
-					await WithRetryAsync(ct => PersistBatchAsync(batch, ct), stoppingToken).ConfigureAwait(false);
-					_consecutiveFailures = 0;
+					List<RawEventDto> batch = await DrainBatchAsync(stoppingToken).ConfigureAwait(false);
+					if (batch.Count == 0)
+					{
+						continue;
+					}
+
+					try
+					{
+						await WithRetryAsync(ct => PersistBatchAsync(batch, ct), stoppingToken).ConfigureAwait(false);
+						_consecutiveFailures = 0;
+					}
+					catch (Exception ex)
+					{
+						_consecutiveFailures++;
+						_logger.LogError(ex, "Persist batch of {Count} failed (consecutiveFailures={ConsecutiveFailures})",
+							batch.Count, _consecutiveFailures);
+						if (_consecutiveFailures >= MaxConsecutiveFailures)
+						{
+							_logger.LogCritical(
+								"DB persistence has failed {ConsecutiveFailures} batches in a row — pausing 30s before retry",
+								_consecutiveFailures);
+							await _opLog.ErrorAsync("EventProcessor", "PersistBatch",
+								$"DB persistence failed {_consecutiveFailures} batches in a row; pausing 30s.",
+								ex, OperationLogSeverity.Critical, stoppingToken).ConfigureAwait(false);
+							await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken).ConfigureAwait(false);
+						}
+					}
+				}
+				catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+				{
+					break;
 				}
 				catch (Exception ex)
 				{
-					_consecutiveFailures++;
-					_logger.LogError(ex, "Persist batch of {Count} failed (consecutiveFailures={ConsecutiveFailures})",
-						batch.Count, _consecutiveFailures);
-					if (_consecutiveFailures >= MaxConsecutiveFailures)
+					// A worker must never take the whole service down. Record the fault as Critical and
+					// continue the loop after a short backoff so a transient or unexpected error in one
+					// iteration cannot kill the host (the original `throw` here was a crash root cause).
+					_logger.LogCritical(ex, "{Worker} loop iteration faulted — continuing", nameof(EventProcessorWorker));
+					await _opLog.ErrorAsync("EventProcessor", "LoopFault",
+						"Unhandled loop-iteration fault; worker continuing.", ex,
+						OperationLogSeverity.Critical, stoppingToken).ConfigureAwait(false);
+					try
 					{
-						_logger.LogCritical(
-							"DB persistence has failed {ConsecutiveFailures} batches in a row — pausing 30s before retry",
-							_consecutiveFailures);
-						await Task.Delay(TimeSpan.FromSeconds(30), stoppingToken).ConfigureAwait(false);
+						await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken).ConfigureAwait(false);
+					}
+					catch (OperationCanceledException)
+					{
+						break;
 					}
 				}
 			}
 		}
 		catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
 		{
-		}
-		catch (Exception ex)
-		{
-			_logger.LogCritical(ex, "{Worker} unhandled — service will stop", nameof(EventProcessorWorker));
-			throw;
 		}
 		finally
 		{

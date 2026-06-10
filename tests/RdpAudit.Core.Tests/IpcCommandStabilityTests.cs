@@ -80,6 +80,8 @@ public class IpcCommandStabilityTests
 	[InlineData(IpcCommand.ClearAllBlocklist, 55)]
 	[InlineData(IpcCommand.ClearAllFirewallRules, 56)]
 	[InlineData(IpcCommand.ClearAllApplicationData, 57)]
+	[InlineData(IpcCommand.QueryOperationLogs, 58)]
+	[InlineData(IpcCommand.GetOverviewProgress, 59)]
 	public void Ordinal_IsStable(IpcCommand command, int expected)
 	{
 		Assert.Equal(expected, (int)command);
