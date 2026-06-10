@@ -49,6 +49,14 @@ public sealed class ServiceMetrics
 	private long _statsWorkerRunCount;
 	private string? _statsWorkerLastError;
 
+	// --- v1.3.6: extra projection-worker liveness fields so a stale RDP Activity tab can be diagnosed
+	// without log access: when the worker last STARTED (vs completed), whether the last run was a full
+	// DEBUG rebuild, and whether the worker is registered/enabled in this build. ---
+	private DateTime? _statsWorkerLastStartedUtc;
+	private DateTime? _statsWorkerLastCompletedUtc;
+	private bool _statsWorkerLastRunFullRebuild;
+	private bool _statsWorkerEnabled;
+
 	public long EventsCaptured => Interlocked.Read(ref _captured);
 
 	public long EventsDropped => Interlocked.Read(ref _dropped);
@@ -181,6 +189,34 @@ public sealed class ServiceMetrics
 	public string? StatsWorkerLastError
 	{
 		get { lock (_diagGate) { return _statsWorkerLastError; } }
+	}
+
+	/// <summary>v1.3.6 — UTC the most recent projection pass STARTED. Diverging from
+	/// <see cref="StatsWorkerLastCompletedUtc"/> by more than a pass means the worker hung mid-pass.</summary>
+	public DateTime? StatsWorkerLastStartedUtc
+	{
+		get { lock (_diagGate) { return _statsWorkerLastStartedUtc; } }
+	}
+
+	/// <summary>v1.3.6 — UTC the most recent projection pass COMPLETED (success or failure).</summary>
+	public DateTime? StatsWorkerLastCompletedUtc
+	{
+		get { lock (_diagGate) { return _statsWorkerLastCompletedUtc; } }
+	}
+
+	/// <summary>v1.3.6 — true when the most recent pass was a full DEBUG rebuild (paged every in-window
+	/// fact) rather than the bounded incremental newest-first slice.</summary>
+	public bool StatsWorkerLastRunFullRebuild
+	{
+		get { lock (_diagGate) { return _statsWorkerLastRunFullRebuild; } }
+	}
+
+	/// <summary>v1.3.6 — true once the projection worker has been registered and armed in this build.
+	/// A false value with a stale RDP Activity tab localises the fault to a disabled / unregistered
+	/// worker rather than the projection logic.</summary>
+	public bool StatsWorkerEnabled
+	{
+		get { lock (_diagGate) { return _statsWorkerEnabled; } }
 	}
 
 	public void IncrementCaptured() => Interlocked.Increment(ref _captured);
@@ -340,6 +376,27 @@ public sealed class ServiceMetrics
 		}
 	}
 
+	/// <summary>v1.3.6 — mark the worker as enabled/armed (called once when the worker registers).</summary>
+	public void SetStatsWorkerEnabled(bool enabled)
+	{
+		lock (_diagGate)
+		{
+			_statsWorkerEnabled = enabled;
+		}
+	}
+
+	/// <summary>v1.3.6 — record that a projection pass STARTED. Captures the start UTC and whether the
+	/// pass is a full DEBUG rebuild so the Diagnostic tab can distinguish a hung pass from an idle one.</summary>
+	public void RecordStatsWorkerStarted(DateTime utcNow, bool fullRebuild)
+	{
+		lock (_diagGate)
+		{
+			_statsWorkerEnabled = true;
+			_statsWorkerLastStartedUtc = utcNow;
+			_statsWorkerLastRunFullRebuild = fullRebuild;
+		}
+	}
+
 	/// <summary>v1.3.4 — record a completed <see cref="Workers.AttackStatsRefreshWorker"/> projection
 	/// pass. <paramref name="error"/> is null on success and clears the previously recorded error.</summary>
 	public void RecordStatsWorkerRun(DateTime utcNow, long rowsUpserted, string? error)
@@ -353,6 +410,7 @@ public sealed class ServiceMetrics
 		lock (_diagGate)
 		{
 			_statsWorkerLastRunUtc = utcNow;
+			_statsWorkerLastCompletedUtc = utcNow;
 			_statsWorkerLastError = error;
 		}
 	}

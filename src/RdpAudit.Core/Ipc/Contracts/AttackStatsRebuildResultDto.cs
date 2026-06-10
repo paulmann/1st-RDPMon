@@ -28,4 +28,23 @@ public sealed class AttackStatsRebuildResultDto
 
 	/// <summary>Total rows in AttackStats after the rebuild.</summary>
 	public long AttackStatsTotal { get; set; }
+
+	// --- v1.3.6: prove the rebuild advanced the projection and re-derived current-day LastSeenUtc. ---
+
+	/// <summary>True when this was a full rebuild (paged every in-window fact) rather than an
+	/// incremental newest-first slice. The DEBUG action always requests a full rebuild.</summary>
+	public bool FullRebuild { get; set; }
+
+	/// <summary>AttackStats row count before the rebuild.</summary>
+	public long RowsBefore { get; set; }
+
+	/// <summary>AttackStats row count after the rebuild.</summary>
+	public long RowsAfter { get; set; }
+
+	/// <summary>Newest AuthAttemptFact.TimeUtc the rebuild considered (projection INPUT watermark).</summary>
+	public DateTime? LatestSourceFactUtc { get; set; }
+
+	/// <summary>Newest AttackStat.LastSeenUtc after the rebuild (projection OUTPUT watermark). After a
+	/// successful rebuild on a host with fresh logins this should equal the current-day source fact.</summary>
+	public DateTime? LatestAttackStatLastSeenUtc { get; set; }
 }

@@ -176,6 +176,31 @@ public sealed class DiagnosticsSnapshotDto
 	/// <summary>Last projection-worker error, or null when the last pass succeeded.</summary>
 	public string? StatsWorkerLastError { get; set; }
 
+	// --- v1.3.6: extra projection-worker liveness + watermark fields for stale-RDP-Activity triage. ---
+
+	/// <summary>True once the AttackStats projection worker has been registered and armed in this build.
+	/// False with a stale RDP Activity tab points at a disabled/unregistered worker, not the logic.</summary>
+	public bool StatsWorkerEnabled { get; set; }
+
+	/// <summary>UTC the most recent projection pass STARTED (vs completed). A start far newer than
+	/// <see cref="StatsWorkerLastCompletedUtc"/> indicates a pass that hung mid-run.</summary>
+	public DateTime? StatsWorkerLastStartedUtc { get; set; }
+
+	/// <summary>UTC the most recent projection pass COMPLETED (success or failure).</summary>
+	public DateTime? StatsWorkerLastCompletedUtc { get; set; }
+
+	/// <summary>True when the most recent pass was a full DEBUG rebuild (paged every in-window fact).</summary>
+	public bool StatsWorkerLastRunFullRebuild { get; set; }
+
+	/// <summary>Newest AuthAttemptFact.TimeUtc — the projection INPUT watermark. Compared with
+	/// <see cref="LatestAttackStatLastSeenUtc"/>: if this advances but the stat watermark does not, the
+	/// projection is stale even though ingestion is healthy (the v1.3.6 root-cause signature).</summary>
+	public DateTime? LatestSourceFactUtc { get; set; }
+
+	/// <summary>Newest AttackStat.LastSeenUtc — the projection OUTPUT watermark. Should track
+	/// <see cref="LatestSourceFactUtc"/> within one worker period once the projection is healthy.</summary>
+	public DateTime? LatestAttackStatLastSeenUtc { get; set; }
+
 	/// <summary>Total rows currently in AttackStats.</summary>
 	public long AttackStatsTotal { get; set; }
 
