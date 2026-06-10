@@ -42,6 +42,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 	private readonly LocalShadowPolicyReader _localShadowPolicy = new();
 	private readonly LocalSessionEnrichmentProvider _localEnrichment = new();
 	private readonly LocalActiveTcpEnrichmentProvider _localTcpEnrichment = new();
+	private readonly OperatorSessionContextProvider _operatorContext = new();
 
 	private readonly DataGridView _grid;
 	private readonly BindingList<SessionRow> _binding = new();
@@ -522,14 +523,23 @@ public sealed class RemoteRdpClientsPage : TabPage
 			_allSessions.Clear();
 			_allSessions.AddRange(snapshot.Sessions);
 
+			// v1.3.8 — scope the operator-visible "Current?" flag to the session owned by the user
+			// running the Configurator. The service (and the parser) cannot know which interactive
+			// session the operator uses, so we compute it here from the running process SessionId
+			// and the current Windows identity. This replaces the prior behaviour where every active
+			// rdp-tcp# session of every logged-in user was flagged Current.
+			OperatorSessionContext operatorContext = _operatorContext.Capture();
+			CurrentRdpMatchResult currentMatch = CurrentRdpSessionMatcher.ApplyTo(_allSessions, operatorContext);
+
 			if (snapshot.Source == RdpSessionListSource.ServiceIpc)
 			{
 				ApplyLocalFilter();
 				SetStatus(string.Format(CultureInfo.InvariantCulture,
-					"Sessions refresh OK (service IPC). count={0}, active={1}, disconnected={2}.",
+					"Sessions refresh OK (service IPC). count={0}, active={1}, disconnected={2}. {3}",
 					_allSessions.Count,
 					_allSessions.Count(s => s.IsActive),
-					_allSessions.Count(s => s.IsDisconnected)));
+					_allSessions.Count(s => s.IsDisconnected),
+					currentMatch.Describe()));
 			}
 			else
 			{
@@ -553,14 +563,15 @@ public sealed class RemoteRdpClientsPage : TabPage
 
 				SetStatus(string.Format(CultureInfo.InvariantCulture,
 					"Source: local session fallback ({4}); {5}; {6}. "
-					+ "count={0}, active={1}, disconnected={2}. Service IPC: {3}.",
+					+ "count={0}, active={1}, disconnected={2}. Service IPC: {3}. {7}",
 					_allSessions.Count,
 					_allSessions.Count(s => s.IsActive),
 					_allSessions.Count(s => s.IsDisconnected),
 					snapshot.IpcDetail ?? "unreachable",
 					snapshot.LocalDetail ?? "unspecified mode",
 					enrichmentStatus,
-					tcpStatus));
+					tcpStatus,
+					currentMatch.Describe()));
 			}
 		}
 		catch (Exception ex)

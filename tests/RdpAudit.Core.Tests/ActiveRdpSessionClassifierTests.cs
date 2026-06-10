@@ -107,16 +107,22 @@ public class ActiveRdpSessionClassifierTests
 	}
 
 	[Fact]
-	public void Parser_PlusMapper_OnRealQwinstaSample_MarksOnlySession15Current()
+	public void Parser_PlusMapper_OnRealQwinstaSample_MarksOnlySession15ActiveRdp()
 	{
 		// Drive the full Parser → Mapper pipeline so we catch any regression where the
-		// IsCurrent semantics drift apart between unit and integration paths.
+		// active-RDP semantics drift apart between unit and integration paths.
+		// v1.3.8 — the mapper no longer owns IsCurrent (that is now scoped to the operator by
+		// CurrentRdpSessionMatcher), so every row must have IsCurrent == false here. IsActiveRdp
+		// remains the "is this an active RDP session" flag and must be set only on session 15.
 		IReadOnlyList<QwinstaSessionRow> rows = QwinstaParser.Parse(QwinstaSample);
 		IReadOnlyList<RdpSessionDto> dtos = QwinstaSessionMapper.MapAll(rows);
 
 		RdpSessionDto? session15 = null;
 		foreach (RdpSessionDto dto in dtos)
 		{
+			// The mapper never sets IsCurrent now — that is the operator-scoped matcher's job.
+			Assert.False(dto.IsCurrent);
+
 			if (dto.SessionId == 15)
 			{
 				session15 = dto;
@@ -124,24 +130,22 @@ public class ActiveRdpSessionClassifierTests
 			}
 
 			// Every other row — services/0, console/1, af/2, mid/14, listeners — must
-			// be excluded from the operator-visible active-RDP set.
-			Assert.False(dto.IsCurrent);
+			// be excluded from the active-RDP set.
 			Assert.False(dto.IsActiveRdp);
 		}
 
 		Assert.NotNull(session15);
-		Assert.True(session15!.IsCurrent);
-		Assert.True(session15.IsActiveRdp);
+		Assert.True(session15!.IsActiveRdp);
 		Assert.Equal("md", session15.UserName);
 		Assert.Equal("rdp-tcp#117", session15.SessionName);
 	}
 
 	[Fact]
-	public void Parser_PlusMapper_ServicesRowWithRawMarker_DoesNotPropagateToCurrent()
+	public void Parser_PlusMapper_ServicesRowWithRawMarker_DoesNotMarkActiveRdp()
 	{
 		// Service-side marker test from the v1.2.2 brief: qwinsta marks ">services" but
 		// the real session is rdp-tcp#117 / id 15 / Active. The pipeline must mark id 15
-		// current and leave services false.
+		// as active RDP and leave services false. The raw marker is preserved for diagnostics.
 		const string sample = """
  SESSIONNAME       USERNAME                 ID  STATE   TYPE        DEVICE
 >services                                    0  Disc
@@ -156,18 +160,18 @@ public class ActiveRdpSessionClassifierTests
 
 		// The raw query-current marker WAS on services — preserve it for diagnostics.
 		Assert.True(services.IsQueryCurrent);
-		// But operator-visible Current? / ActiveRdp must NOT be on services.
-		Assert.False(services.IsCurrent);
+		// But ActiveRdp must NOT be on services, and the mapper sets IsCurrent on nobody.
 		Assert.False(services.IsActiveRdp);
+		Assert.False(services.IsCurrent);
 
-		Assert.True(md.IsCurrent);
 		Assert.True(md.IsActiveRdp);
+		Assert.False(md.IsCurrent);
 	}
 
 	[Fact]
-	public void Parser_PlusMapper_MultipleActiveRdpSessions_AllMarkedDeterministically()
+	public void Parser_PlusMapper_MultipleActiveRdpSessions_AllMarkedActiveRdp()
 	{
-		// Two concurrent active RDP user sessions — both must classify as current,
+		// Two concurrent active RDP user sessions — both must classify as active RDP,
 		// neither one should be elected over the other (no winner-take-all semantics).
 		QwinstaSessionRow a = new("rdp-tcp#10", "alice", 10, "Active", false);
 		QwinstaSessionRow b = new("rdp-tcp#11", "bob", 11, "Active", false);
@@ -175,8 +179,11 @@ public class ActiveRdpSessionClassifierTests
 
 		IReadOnlyList<RdpSessionDto> dtos = QwinstaSessionMapper.MapAll(new[] { a, b, listener });
 
-		Assert.True(dtos.Single(d => d.SessionId == 10).IsCurrent);
-		Assert.True(dtos.Single(d => d.SessionId == 11).IsCurrent);
-		Assert.False(dtos.Single(d => d.SessionId == 65537).IsCurrent);
+		Assert.True(dtos.Single(d => d.SessionId == 10).IsActiveRdp);
+		Assert.True(dtos.Single(d => d.SessionId == 11).IsActiveRdp);
+		Assert.False(dtos.Single(d => d.SessionId == 65537).IsActiveRdp);
+
+		// None are operator-Current at the mapper level.
+		Assert.All(dtos, d => Assert.False(d.IsCurrent));
 	}
 }

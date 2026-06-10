@@ -21,10 +21,15 @@ public static class QwinstaSessionMapper
 	{
 		ArgumentNullException.ThrowIfNull(row);
 		string state = QwinstaParser.NormalizeState(row.State);
-		// v1.2.2 — operator-visible Current? must reflect the validated active-RDP
-		// semantics, not the raw qwinsta ">" marker (which under LocalSystem can point at
-		// session 0 / services). The raw marker is preserved on IsQueryCurrent for the
-		// diagnostic support bundle only.
+		// v1.2.2 — IsActiveRdp reflects the validated active-RDP semantics, not the raw qwinsta
+		// ">" marker (which under LocalSystem can point at session 0 / services). The raw marker
+		// is preserved on IsQueryCurrent for the diagnostic support bundle only.
+		// v1.3.8 — the mapper no longer owns the operator-visible IsCurrent flag. "Current" means
+		// "this session belongs to the user running the Configurator", which depends on the caller's
+		// process SessionId / Windows identity and so cannot be decided from a qwinsta row alone.
+		// CurrentRdpSessionMatcher (applied by the Configurator in the operator's interactive
+		// session) sets IsCurrent; the mapper leaves it false. This stops every active rdp-tcp#
+		// session of every logged-in user being mislabelled Current on a multi-session host.
 		ActiveRdpClassification classification = ActiveRdpSessionClassifier.Classify(
 			sessionId: row.SessionId,
 			sessionName: row.SessionName,
@@ -36,7 +41,7 @@ public static class QwinstaSessionMapper
 			UserName = row.UserName,
 			SessionName = row.SessionName,
 			State = state,
-			IsCurrent = classification.IsActiveRdp,
+			IsCurrent = false,
 			IsQueryCurrent = row.IsCurrent,
 			IsActiveRdp = classification.IsActiveRdp,
 			IsActive = string.Equals(state, "Active", StringComparison.OrdinalIgnoreCase),
