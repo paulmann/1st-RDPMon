@@ -25,8 +25,8 @@ namespace RdpAudit.Core.Tests;
 /// blocking the prior 1.0.0 placeholder default and the 1.2.x stream from regressing.</summary>
 public class RdpAuditVersionMetadataTests
 {
-	private const string ExpectedSemVer = "1.3.5";
-	private const string ExpectedFourPart = "1.3.5.0";
+	private const string ExpectedSemVer = "1.3.6";
+	private const string ExpectedFourPart = "1.3.6.0";
 	private const string ForbiddenLegacy = "1.0.0";
 	private const string ForbiddenPrev = "1.2.";
 

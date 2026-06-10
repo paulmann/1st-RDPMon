@@ -3838,6 +3838,10 @@ public sealed class IpcDispatcher
 			StatsWorkerLastRowsUpserted = _metrics.StatsWorkerLastRowsUpserted,
 			StatsWorkerRunCount = _metrics.StatsWorkerRunCount,
 			StatsWorkerLastError = _metrics.StatsWorkerLastError,
+			StatsWorkerEnabled = _metrics.StatsWorkerEnabled,
+			StatsWorkerLastStartedUtc = _metrics.StatsWorkerLastStartedUtc,
+			StatsWorkerLastCompletedUtc = _metrics.StatsWorkerLastCompletedUtc,
+			StatsWorkerLastRunFullRebuild = _metrics.StatsWorkerLastRunFullRebuild,
 		};
 
 		// v1.3.4: surface the resolved RDP listener port and the firewall block scope so an operator on
@@ -3915,10 +3919,17 @@ public sealed class IpcDispatcher
 			if (dto.AuthAttemptFactsTotal > 0)
 			{
 				dto.LatestAuthAttemptFactUtc = await db.AuthAttemptFacts.AsNoTracking().MaxAsync(f => (DateTime?)f.TimeUtc, ct).ConfigureAwait(false);
+				// v1.3.6: projection INPUT watermark (newest source fact). Mirrors LatestAuthAttemptFactUtc
+				// but named for the stale-projection triage so it pairs with LatestAttackStatLastSeenUtc.
+				dto.LatestSourceFactUtc = dto.LatestAuthAttemptFactUtc;
 			}
 			if (dto.AttackStatsTotal > 0)
 			{
 				dto.LatestAttackStatUpdatedUtc = await db.AttackStats.AsNoTracking().MaxAsync(s => (DateTime?)s.LastUpdatedUtc, ct).ConfigureAwait(false);
+				// v1.3.6: projection OUTPUT watermark. When this lags LatestSourceFactUtc the projection
+				// is stale even though ingestion (RawEvents/AuthAttemptFacts) is fresh — the exact symptom
+				// the v1.3.6 worker ordering fix addresses.
+				dto.LatestAttackStatLastSeenUtc = await db.AttackStats.AsNoTracking().MaxAsync(s => (DateTime?)s.LastSeenUtc, ct).ConfigureAwait(false);
 			}
 
 			// v1.3.4: tail of the durable OperationLog so the Diagnostic tab always has actionable recent
@@ -4038,19 +4049,32 @@ public sealed class IpcDispatcher
 		Stopwatch sw = Stopwatch.StartNew();
 		try
 		{
-			int rows = await _attackStatsWorker.RefreshOnceAsync(ct).ConfigureAwait(false);
+			// v1.3.6: the DEBUG action forces a FULL rebuild — page through every in-window fact and
+			// re-derive every AttackStat row's LastSeenUtc from current facts. This guarantees a manual
+			// rebuild advances stale rows even when the incremental window backlog exceeded the cap.
+			Workers.AttackStatsRefreshResult refresh = await _attackStatsWorker
+				.RefreshOnceDetailedAsync(true, ct)
+				.ConfigureAwait(false);
 			sw.Stop();
-			result.RowsUpserted = rows;
+			result.RowsUpserted = refresh.RowsUpserted;
 			result.ElapsedMilliseconds = sw.ElapsedMilliseconds;
-
-			await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
-			result.AttackStatsTotal = await db.AttackStats.AsNoTracking().LongCountAsync(ct).ConfigureAwait(false);
+			result.FullRebuild = refresh.FullRebuild;
+			result.RowsBefore = refresh.RowsBefore;
+			result.RowsAfter = refresh.RowsAfter;
+			result.LatestSourceFactUtc = refresh.LatestSourceFactUtc;
+			result.LatestAttackStatLastSeenUtc = refresh.LatestAttackStatLastSeenUtc;
+			result.AttackStatsTotal = refresh.RowsAfter;
 
 			result.Status = IpcResultStatus.Success;
 			result.Message = string.Format(
 				CultureInfo.InvariantCulture,
-				"Rebuild complete: {0} rows upserted in {1} ms; AttackStats now holds {2} rows.",
-				rows, result.ElapsedMilliseconds, result.AttackStatsTotal);
+				"Full rebuild complete: {0} rows upserted in {1} ms; AttackStats {2} -> {3} rows; latest source fact {4:O}, latest stat LastSeen {5:O}.",
+				refresh.RowsUpserted,
+				result.ElapsedMilliseconds,
+				refresh.RowsBefore,
+				refresh.RowsAfter,
+				refresh.LatestSourceFactUtc,
+				refresh.LatestAttackStatLastSeenUtc);
 			LogOperation(OperationLogSeverity.Information, "RebuildAttackStats", result.Message);
 		}
 		catch (OperationCanceledException) when (ct.IsCancellationRequested)
