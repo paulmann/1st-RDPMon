@@ -25,7 +25,7 @@
 
 [CmdletBinding()]
 param(
-	[string]$Version = "1.3.6",
+	[string]$Version = "1.3.7",
 	[string]$Configuration = "Release",
 	# Build SHA stamped into AssemblyInformationalVersion as SemVer build metadata (after '+').
 	# Left empty here on purpose: when not supplied it is auto-resolved from `git rev-parse HEAD`
@@ -462,6 +462,158 @@ function Publish-Project {
 }
 
 # -----------------------------------------------------------------------------
+# SQLite diagnostic support bundle
+# -----------------------------------------------------------------------------
+# The Configurator is published as a self-contained single-file executable, so the
+# SQLite dependency graph (Microsoft.Data.Sqlite + SQLitePCLRaw.* + the native
+# e_sqlite3.dll) is embedded INSIDE the .exe and extracted only at process start.
+# That is fine for the running app, but it is NOT enough for external PowerShell
+# diagnostics that call Add-Type / [System.Runtime.InteropServices.NativeLibrary]::Load
+# against loose files on disk. This stage guarantees those exact files are physically
+# present next to the published Configurator, resolved from the SAME NuGet dependency
+# graph/version the app builds against — never downloaded from sqlite.org and never a
+# global C:\sqlite install.
+#
+# These names MUST match RdpAudit.Core.Util.SqliteSupportBundle.RequiredFiles exactly.
+$script:SqliteSupportFiles = @(
+	"Microsoft.Data.Sqlite.dll",
+	"SQLitePCLRaw.core.dll",
+	"SQLitePCLRaw.provider.e_sqlite3.dll",
+	"SQLitePCLRaw.batteries_v2.dll",
+	"e_sqlite3.dll"
+)
+
+# Produces a directory tree that contains the SQLite support files as LOOSE files by
+# building (not single-file publishing) the Configurator for win-x64. The regular build
+# output flattens both the managed SQLitePCLRaw / Microsoft.Data.Sqlite assemblies and the
+# native e_sqlite3.dll into the RID output folder, all from the restored NuGet packages —
+# so it is the deterministic, user-path-free source for the bundle. Returns the resolved
+# output directory or throws an actionable error naming the project and the restore command.
+function Resolve-SqliteBundleSource {
+	param(
+		[Parameter(Mandatory = $true)][string]$Project,
+		[Parameter(Mandatory = $true)][string]$Version
+	)
+
+	$projectFull = Join-Path $PSScriptRoot $Project
+	if (-not (Test-Path $projectFull)) {
+		throw "Cannot resolve SQLite support bundle: project not found at '$projectFull'."
+	}
+
+	# Ensure packages are restored before we attempt to resolve any dependency file. A missing
+	# or stale NuGet cache is repaired here rather than failing later with an opaque copy error.
+	Write-Host "Restoring $Project for SQLite bundle resolution..." -ForegroundColor DarkCyan
+	# Pipe to Out-Host so the dotnet console output is shown but NEVER leaks into this function's
+	# success stream — otherwise the returned value would be an array of log lines, not the path.
+	dotnet restore $projectFull -r win-x64 | Out-Host
+	if ($LASTEXITCODE -ne 0) {
+		throw ("dotnet restore failed for '{0}' (exit {1}). The SQLite support bundle cannot be assembled without restored NuGet packages. Run:`n    dotnet restore `"{0}`" -r win-x64`nand retry." -f $projectFull, $LASTEXITCODE)
+	}
+
+	$bundleObjDir = Join-Path $PSScriptRoot "publish/.sqlite-bundle"
+	if (Test-Path $bundleObjDir) {
+		Remove-Item -Recurse -Force $bundleObjDir -ErrorAction SilentlyContinue
+	}
+
+	Write-Host "Building $Project (framework-dependent, loose files) for SQLite bundle resolution..." -ForegroundColor DarkCyan
+	# Self-contained=false keeps the build fast and small; the SQLite managed + native files are
+	# still emitted into the RID output folder because they are direct/transitive package assets.
+	dotnet build $projectFull -c $Configuration -r win-x64 --self-contained false `
+		-p:PublishSingleFile=false -p:VersionPrefix=$Version -o $bundleObjDir | Out-Host
+	if ($LASTEXITCODE -ne 0) {
+		throw ("dotnet build failed for '{0}' (exit {1}) while assembling the SQLite support bundle. Inspect the build output above; the most common cause is a missing NuGet package, which `dotnet restore` should repair." -f $projectFull, $LASTEXITCODE)
+	}
+
+	return $bundleObjDir
+}
+
+# Copies the SQLite support files into $TargetDir, resolving each from $SourceDir (the loose
+# build output). The native e_sqlite3.dll can land either in the RID root or under
+# runtimes/win-x64/native depending on the SDK, so both are searched. Throws an actionable
+# error listing every file that could not be resolved.
+function Copy-SqliteSupportFiles {
+	param(
+		[Parameter(Mandatory = $true)][string]$SourceDir,
+		[Parameter(Mandatory = $true)][string]$TargetDir
+	)
+
+	if (-not (Test-Path $TargetDir)) {
+		New-Item -ItemType Directory -Path $TargetDir | Out-Null
+	}
+
+	$missing = New-Object 'System.Collections.Generic.List[string]'
+	$copied = New-Object 'System.Collections.Generic.List[string]'
+
+	foreach ($name in $script:SqliteSupportFiles) {
+		$resolved = $null
+		$direct = Join-Path $SourceDir $name
+		if (Test-Path $direct) {
+			$resolved = $direct
+		} else {
+			# Native libraries are frequently emitted under runtimes/<rid>/native rather than the
+			# RID root; search the whole build tree for the leaf name as a last resort.
+			$candidate = Get-ChildItem -Path $SourceDir -Filter $name -Recurse -File -ErrorAction SilentlyContinue |
+				Select-Object -First 1
+			if ($null -ne $candidate) {
+				$resolved = $candidate.FullName
+			}
+		}
+
+		if ($null -eq $resolved) {
+			$missing.Add($name) | Out-Null
+			continue
+		}
+
+		$dest = Join-Path $TargetDir $name
+		Copy-Item -Path $resolved -Destination $dest -Force
+		$copied.Add($name) | Out-Null
+		Write-Diag ("SQLite bundle: copied {0} <- {1}" -f $name, $resolved)
+	}
+
+	if ($missing.Count -gt 0) {
+		throw ("SQLite support bundle incomplete: could not resolve {0} of {1} required file(s): {2}. Searched '{3}'. These files come from the Microsoft.EntityFrameworkCore.Sqlite -> Microsoft.Data.Sqlite -> SQLitePCLRaw.* NuGet graph; ensure `dotnet restore` succeeded and do NOT substitute a sqlite.org download." -f `
+			$missing.Count, $script:SqliteSupportFiles.Count, ($missing -join ", "), $SourceDir)
+	}
+
+	return $copied
+}
+
+# Top-level orchestration for the bundle: resolves a loose-file source, copies the required
+# files next to the published Configurator, then verifies the target now holds every file.
+function Ensure-SqliteSupportBundle {
+	param(
+		[Parameter(Mandatory = $true)][string]$ConfiguratorPublishDir,
+		[Parameter(Mandatory = $true)][string]$Version
+	)
+
+	Write-Host "Ensuring SQLite diagnostic support bundle in $ConfiguratorPublishDir" -ForegroundColor Cyan
+
+	$source = Resolve-SqliteBundleSource -Project "src/RdpAudit.Configurator/RdpAudit.Configurator.csproj" -Version $Version
+	$copied = Copy-SqliteSupportFiles -SourceDir $source -TargetDir $ConfiguratorPublishDir
+
+	# Post-condition verification: re-check the TARGET directly so a silently failed copy is caught.
+	$stillMissing = New-Object 'System.Collections.Generic.List[string]'
+	foreach ($name in $script:SqliteSupportFiles) {
+		if (-not (Test-Path (Join-Path $ConfiguratorPublishDir $name))) {
+			$stillMissing.Add($name) | Out-Null
+		}
+	}
+	if ($stillMissing.Count -gt 0) {
+		throw ("SQLite support bundle verification failed after copy: {0} file(s) still missing in '{1}': {2}." -f `
+			$stillMissing.Count, $ConfiguratorPublishDir, ($stillMissing -join ", "))
+	}
+
+	# Clean up the transient loose-build output so it does not ship in the publish tree.
+	$bundleObjDir = Join-Path $PSScriptRoot "publish/.sqlite-bundle"
+	if (Test-Path $bundleObjDir) {
+		Remove-Item -Recurse -Force $bundleObjDir -ErrorAction SilentlyContinue
+	}
+
+	Write-Host ("SQLite support bundle complete: {0}/{1} file(s) present next to the Configurator." -f `
+		$copied.Count, $script:SqliteSupportFiles.Count) -ForegroundColor Green
+}
+
+# -----------------------------------------------------------------------------
 # Self-test (-SelfTest)
 # -----------------------------------------------------------------------------
 # Validates the structural invariants of this script without publishing or
@@ -606,6 +758,91 @@ function Invoke-PublishScriptSelfCheck {
 		Add-Failure ("Separation self-check threw: " + $_.Exception.Message)
 	}
 
+	# 8. The SQLite support-bundle file list must be exactly the five files the app's NuGet graph
+	#    produces and that RdpAudit.Core.Util.SqliteSupportBundle.RequiredFiles enumerates. A drift
+	#    here means the published Configurator would ship an incomplete diagnostic bundle.
+	try {
+		$expected = @(
+			"Microsoft.Data.Sqlite.dll",
+			"SQLitePCLRaw.core.dll",
+			"SQLitePCLRaw.provider.e_sqlite3.dll",
+			"SQLitePCLRaw.batteries_v2.dll",
+			"e_sqlite3.dll"
+		)
+		$actual = @($script:SqliteSupportFiles)
+		$diff = Compare-Object -ReferenceObject $expected -DifferenceObject $actual
+		if ($actual.Count -ne $expected.Count -or $null -ne $diff) {
+			Add-Failure ("SqliteSupportFiles drifted from the expected five-file bundle: " + ($actual -join ", "))
+		} else {
+			Add-Pass "SqliteSupportFiles matches the canonical five-file SQLite diagnostic bundle"
+		}
+	} catch {
+		Add-Failure ("SQLite bundle file-list self-check threw: " + $_.Exception.Message)
+	}
+
+	# 9. Copy-SqliteSupportFiles must fail with an actionable error (not silently succeed) when the
+	#    source directory cannot supply the required files. Use an empty temp dir as the source.
+	try {
+		$srcDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rdpaudit-bundle-src-" + [Guid]::NewGuid().ToString('N'))
+		$dstDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rdpaudit-bundle-dst-" + [Guid]::NewGuid().ToString('N'))
+		New-Item -ItemType Directory -Path $srcDir | Out-Null
+		try {
+			$threw = $false
+			try {
+				$null = Copy-SqliteSupportFiles -SourceDir $srcDir -TargetDir $dstDir
+			} catch {
+				$threw = $true
+				if ($_.Exception.Message -notmatch 'SQLite support bundle incomplete') {
+					Add-Failure ("Copy-SqliteSupportFiles threw an unexpected message: " + $_.Exception.Message)
+				}
+			}
+			if ($threw) {
+				Add-Pass "Copy-SqliteSupportFiles fails actionably when the source lacks the bundle files"
+			} else {
+				Add-Failure "Copy-SqliteSupportFiles silently succeeded with an empty source directory"
+			}
+		} finally {
+			Remove-Item -Recurse -Force $srcDir -ErrorAction SilentlyContinue
+			Remove-Item -Recurse -Force $dstDir -ErrorAction SilentlyContinue
+		}
+	} catch {
+		Add-Failure ("Copy-SqliteSupportFiles self-check threw: " + $_.Exception.Message)
+	}
+
+	# 10. Copy-SqliteSupportFiles must succeed and report all five files when the source supplies them,
+	#     including a native library that lives under runtimes/<rid>/native rather than the root.
+	try {
+		$srcDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rdpaudit-bundle-ok-src-" + [Guid]::NewGuid().ToString('N'))
+		$dstDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rdpaudit-bundle-ok-dst-" + [Guid]::NewGuid().ToString('N'))
+		New-Item -ItemType Directory -Path $srcDir | Out-Null
+		$nativeDir = Join-Path $srcDir "runtimes/win-x64/native"
+		New-Item -ItemType Directory -Path $nativeDir | Out-Null
+		try {
+			foreach ($name in $script:SqliteSupportFiles) {
+				if ($name -eq "e_sqlite3.dll") {
+					Set-Content -Path (Join-Path $nativeDir $name) -Value "native" -NoNewline
+				} else {
+					Set-Content -Path (Join-Path $srcDir $name) -Value "managed" -NoNewline
+				}
+			}
+			$copied = @(Copy-SqliteSupportFiles -SourceDir $srcDir -TargetDir $dstDir)
+			$allPresent = $true
+			foreach ($name in $script:SqliteSupportFiles) {
+				if (-not (Test-Path (Join-Path $dstDir $name))) { $allPresent = $false }
+			}
+			if ($copied.Count -eq $script:SqliteSupportFiles.Count -and $allPresent) {
+				Add-Pass "Copy-SqliteSupportFiles resolves root + runtimes/native files and copies the full bundle"
+			} else {
+				Add-Failure ("Copy-SqliteSupportFiles did not lay down the full bundle (copied=" + $copied.Count + ", allPresent=" + $allPresent + ")")
+			}
+		} finally {
+			Remove-Item -Recurse -Force $srcDir -ErrorAction SilentlyContinue
+			Remove-Item -Recurse -Force $dstDir -ErrorAction SilentlyContinue
+		}
+	} catch {
+		Add-Failure ("Copy-SqliteSupportFiles success-path self-check threw: " + $_.Exception.Message)
+	}
+
 	if ($failures.Count -gt 0) {
 		Write-Host ""
 		Write-Host ("Self-test FAILED ({0} failure(s))" -f $failures.Count) -ForegroundColor Red
@@ -635,5 +872,10 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedRevision)) {
 
 Publish-Project -Project "src/RdpAudit.Service/RdpAudit.Service.csproj"           -Subdir "Service"      -RevisionId $resolvedRevision
 Publish-Project -Project "src/RdpAudit.Configurator/RdpAudit.Configurator.csproj" -Subdir "Configurator" -RevisionId $resolvedRevision
+
+# The single-file Configurator embeds its SQLite dependencies; lay them down as loose files so
+# external PowerShell diagnostics can load the provider. This runs AFTER the publish so it copies
+# into the final published Configurator folder.
+Ensure-SqliteSupportBundle -ConfiguratorPublishDir (Join-Path $publishRoot "Configurator") -Version $Version
 
 Write-Host "Done -> $publishRoot" -ForegroundColor Green

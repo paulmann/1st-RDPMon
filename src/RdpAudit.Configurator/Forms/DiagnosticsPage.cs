@@ -11,6 +11,7 @@
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
 
+using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.Versioning;
 using System.Text;
@@ -102,7 +103,9 @@ public sealed class DiagnosticsPage : TabPage
 
 			if (call.IsSuccess && call.Value is { } snapshot)
 			{
-				_report.Text = DiagnosticsReportFormatter.Format(snapshot);
+				_report.Text = DiagnosticsReportFormatter.Format(snapshot)
+					+ Environment.NewLine
+					+ SqliteSupportBundleReportFormatter.Format(AppContext.BaseDirectory);
 				_status.Text = string.Format(
 					CultureInfo.InvariantCulture,
 					"Snapshot at {0:yyyy-MM-dd HH:mm:ss}Z  |  Status={1}  |  RawEvents={2}  AuthAttemptFacts={3}  RdpPort={4}",
@@ -120,7 +123,9 @@ public sealed class DiagnosticsPage : TabPage
 				? await TryLoadOperationLogTailAsync().ConfigureAwait(true)
 				: new List<OperationLogDto>();
 
-			_report.Text = DiagnosticsReportFormatter.FormatFailure(call, logTail);
+			_report.Text = DiagnosticsReportFormatter.FormatFailure(call, logTail)
+				+ Environment.NewLine
+				+ SqliteSupportBundleReportFormatter.Format(AppContext.BaseDirectory);
 			_status.Text = "Diagnostics " + call.Headline();
 		}
 		catch (Exception ex)
@@ -626,5 +631,78 @@ public static class SecurityAuthProbeReportFormatter
 		}
 
 		return sb.ToString();
+	}
+}
+
+/// <summary>Renders a bounded, read-only preflight report describing whether the SQLite diagnostic
+/// support bundle (Microsoft.Data.Sqlite + SQLitePCLRaw.* + native e_sqlite3.dll) is physically
+/// present next to the running Configurator. External PowerShell diagnostics need these as loose
+/// files; this section tells the operator the exact path of each required file and its on-disk
+/// version. It performs at most one existence check and one metadata read per required file, never
+/// loads a managed assembly, and never throws — a failure to read a version degrades to "(unknown)".</summary>
+internal static class SqliteSupportBundleReportFormatter
+{
+	public static string Format(string configuratorDirectory)
+	{
+		StringBuilder sb = new();
+		sb.AppendLine();
+		sb.AppendLine("SQLite diagnostic support bundle (Configurator-local)");
+		sb.AppendLine("=====================================================");
+
+		if (string.IsNullOrWhiteSpace(configuratorDirectory))
+		{
+			sb.AppendLine("Configurator directory: (unknown)");
+			sb.AppendLine("Bundle status:          cannot inspect — base directory is not resolvable.");
+			return sb.ToString();
+		}
+
+		SqliteSupportBundleStatus status = SqliteSupportBundle.Verify(configuratorDirectory);
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Configurator directory: {0}", configuratorDirectory).AppendLine();
+		sb.AppendFormat(
+			CultureInfo.InvariantCulture,
+			"Bundle complete:        {0} ({1}/{2} files present)",
+			status.Complete ? "Yes" : "No",
+			status.PresentFiles.Count,
+			SqliteSupportBundle.RequiredFiles.Count).AppendLine();
+		sb.AppendLine();
+		sb.AppendLine("Required files");
+		sb.AppendLine("--------------");
+
+		foreach (string fileName in SqliteSupportBundle.RequiredFiles)
+		{
+			string fullPath = Path.Combine(configuratorDirectory, fileName);
+			bool present = File.Exists(fullPath);
+			string marker = present ? "[OK ]" : "[!! ]";
+			sb.AppendFormat(CultureInfo.InvariantCulture, "{0} {1}", marker, fullPath).AppendLine();
+			if (present)
+			{
+				sb.AppendFormat(CultureInfo.InvariantCulture, "      version: {0}", TryReadFileVersion(fullPath)).AppendLine();
+			}
+		}
+
+		if (!status.Complete)
+		{
+			sb.AppendLine();
+			sb.AppendLine(SqliteSupportBundle.DescribeMissing(status));
+		}
+
+		return sb.ToString();
+	}
+
+	/// <summary>Reads file/product version strings without loading the assembly. Bounded and
+	/// exception-safe: any IO or metadata failure degrades to "(unknown)".</summary>
+	private static string TryReadFileVersion(string fullPath)
+	{
+		try
+		{
+			FileVersionInfo info = FileVersionInfo.GetVersionInfo(fullPath);
+			string file = string.IsNullOrWhiteSpace(info.FileVersion) ? "(none)" : info.FileVersion!;
+			string product = string.IsNullOrWhiteSpace(info.ProductVersion) ? "(none)" : info.ProductVersion!;
+			return string.Format(CultureInfo.InvariantCulture, "file={0}, product={1}", file, product);
+		}
+		catch
+		{
+			return "(unknown)";
+		}
 	}
 }

@@ -109,6 +109,7 @@ public sealed class InstallationService
 
 		Record(EnsureProgramDataLayout, steps, errors, logger);
 		Record(EnsureAppSettings, steps, errors, logger);
+		VerifySqliteSupportBundle(steps, warnings, logger);
 
 		if (_layout.DistributionExists && _layout.ServiceExecutableExists)
 		{
@@ -189,6 +190,41 @@ public sealed class InstallationService
 		{
 			return new InstallStep("Write appsettings.json", false, ex.Message);
 		}
+	}
+
+	/// <summary>Verifies that the SQLite diagnostic support bundle (Microsoft.Data.Sqlite +
+	/// SQLitePCLRaw.* + native e_sqlite3.dll) is physically present next to the running Configurator.
+	/// The single-file Configurator embeds these for its own use, but external PowerShell diagnostics
+	/// need them as loose files; publish.ps1 (Ensure-SqliteSupportBundle) lays them down. A complete
+	/// bundle is recorded as a successful step; an incomplete one is surfaced as a warning that names
+	/// every missing file by exact path so the operator can re-run publish.ps1 — it does not block the
+	/// service install, which does not itself depend on the loose bundle.</summary>
+	internal void VerifySqliteSupportBundle(List<string> steps, List<string> warnings, InstallUpdateLogger? logger = null)
+	{
+		string configuratorDir = _layout.ConfiguratorDirectory;
+		SqliteSupportBundleStatus status = SqliteSupportBundle.Verify(configuratorDir);
+		if (status.Complete)
+		{
+			string ok = string.Format(CultureInfo.InvariantCulture,
+				"SQLite diagnostic support bundle verified ({0}/{0} files) in {1}",
+				SqliteSupportBundle.RequiredFiles.Count, configuratorDir);
+			steps.Add(ok);
+			logger?.Info(ok);
+			return;
+		}
+
+		StringBuilder sb = new();
+		sb.Append(SqliteSupportBundle.DescribeMissing(status));
+		foreach (string missing in status.MissingFiles)
+		{
+			sb.AppendLine();
+			sb.AppendFormat(CultureInfo.InvariantCulture, "  - missing: {0}",
+				Path.Combine(configuratorDir, missing));
+		}
+
+		string warning = sb.ToString();
+		warnings.Add(warning);
+		logger?.Warn(warning);
 	}
 
 	internal static InstallStep CopyDistribution(string source, string destination)
