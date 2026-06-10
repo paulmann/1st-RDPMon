@@ -47,21 +47,15 @@ public sealed class MainForm : Form
 			ItemSize = new Size(160, 30),
 			Padding = new Point(10, 4),
 		};
-		_tabs.TabPages.Add(new OverviewPage(_ipc) { Text = "\U0001F4CA Overview" });
-		_tabs.TabPages.Add(new PrerequisitesPage { Text = "✅ Prerequisites" });
-		_tabs.TabPages.Add(new AuditPolicyPage { Text = "\U0001F4DC Audit Policy" });
-		_tabs.TabPages.Add(new ServicePage(_ipc) { Text = "⚙️ Service" });
-		_tabs.TabPages.Add(new RdpConfigurationPage(_ipc) { Text = "\U0001F5A5️ RDP Configuration" });
-		_tabs.TabPages.Add(new SettingsPage(_ipc) { Text = "\U0001F527 Settings" });
-		_tabs.TabPages.Add(new LiveEventsPage(_ipc) { Text = "\U0001F4E1 Live Events" });
-		_tabs.TabPages.Add(new LogsPage(_ipc) { Text = "\U0001F4DC Logs" });
-		_tabs.TabPages.Add(new FirewallPage(_ipc) { Text = "\U0001F6E1️ Firewall" });
-		_tabs.TabPages.Add(new AttackStatisticsPage(_ipc) { Text = "\U0001F4C8 Attack Statistics" });
-		_tabs.TabPages.Add(new RemoteRdpClientsPage(_ipc) { Text = "\U0001F310 Remote RDP Clients" });
-		_tabs.TabPages.Add(new AbuseIpDbPage(_ipc) { Text = "\U0001F9FE AbuseIPDB" });
-		_tabs.TabPages.Add(new MikroTikPage(_ipc) { Text = "\U0001F4F6 MikroTik" });
-		_tabs.TabPages.Add(new DiagnosticsPage(_ipc) { Text = "\U0001FA7A Diagnostic" });
-		_tabs.TabPages.Add(new ToolsDiagPage(_ipc) { Text = "\U0001F9EA Tools Diag" });
+		// Tab order is FIXED and MUST stay stable across releases: Overview is always first and Settings
+		// is always last, with the operational pages in between in a deterministic sequence. The order is
+		// built from a single explicit list (see BuildOrderedPages) so it cannot drift accidentally and is
+		// covered by a unit test. The tab strip may *wrap* onto multiple rows when narrow (Multiline=true)
+		// but the page sequence never changes.
+		foreach (TabPage page in BuildOrderedPages())
+		{
+			_tabs.TabPages.Add(page);
+		}
 
 		_tabs.DrawItem += OnDrawTab;
 
@@ -81,6 +75,51 @@ public sealed class MainForm : Form
 		};
 		FormClosing += (_, _) => _statusTimer.Stop();
 	}
+
+	/// <summary>Builds the tab pages in their FIXED display order. Overview is always first and Settings is
+	/// always last; the operational pages sit in between in a deterministic sequence. Keep this list and
+	/// <see cref="OrderedPageTitles"/> in lock-step — the stable-order unit test asserts the rendered tab
+	/// titles match <see cref="OrderedPageTitles"/> exactly.</summary>
+	private TabPage[] BuildOrderedPages() => new TabPage[]
+	{
+		new OverviewPage(_ipc) { Text = "\U0001F4CA Overview" },
+		new PrerequisitesPage { Text = "✅ Prerequisites" },
+		new AuditPolicyPage { Text = "\U0001F4DC Audit Policy" },
+		new ServicePage(_ipc) { Text = "⚙️ Service" },
+		new RdpConfigurationPage(_ipc) { Text = "\U0001F5A5️ RDP Configuration" },
+		new LiveEventsPage(_ipc) { Text = "\U0001F4E1 Live Events" },
+		new LogsPage(_ipc) { Text = "\U0001F4DC Logs" },
+		new FirewallPage(_ipc) { Text = "\U0001F6E1️ Firewall" },
+		new AttackStatisticsPage(_ipc) { Text = "\U0001F4C8 RDP Activity" },
+		new RemoteRdpClientsPage(_ipc) { Text = "\U0001F310 RDP Clients" },
+		new AbuseIpDbPage(_ipc) { Text = "\U0001F9FE AbuseIPDB" },
+		new MikroTikPage(_ipc) { Text = "\U0001F4F6 MikroTik" },
+		new DiagnosticsPage(_ipc) { Text = "\U0001FA7A Diagnostic" },
+		new ToolsDiagPage(_ipc) { Text = "\U0001F9EA Tools Diag" },
+		new SettingsPage(_ipc) { Text = "\U0001F527 Settings" },
+	};
+
+	/// <summary>The FIXED tab titles in display order, mirroring <see cref="BuildOrderedPages"/>. Exposed so
+	/// the stable-order unit test can assert the order without instantiating the live IPC-backed pages.
+	/// Overview MUST be first and Settings MUST be last.</summary>
+	public static IReadOnlyList<string> OrderedPageTitles { get; } = new[]
+	{
+		"\U0001F4CA Overview",
+		"✅ Prerequisites",
+		"\U0001F4DC Audit Policy",
+		"⚙️ Service",
+		"\U0001F5A5️ RDP Configuration",
+		"\U0001F4E1 Live Events",
+		"\U0001F4DC Logs",
+		"\U0001F6E1️ Firewall",
+		"\U0001F4C8 RDP Activity",
+		"\U0001F310 RDP Clients",
+		"\U0001F9FE AbuseIPDB",
+		"\U0001F4F6 MikroTik",
+		"\U0001FA7A Diagnostic",
+		"\U0001F9EA Tools Diag",
+		"\U0001F527 Settings",
+	};
 
 	/// <summary>Owner-draws a single tab header: emoji-prefixed label, with the selected tab rendered
 	/// bold on a highlighted background so the active page stands out. Falls back gracefully if the

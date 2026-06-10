@@ -61,6 +61,12 @@ public sealed class OperationLogDto
 
 	[Key(13)]
 	public string? Actor { get; set; }
+
+	/// <summary>Number of consecutive identical rows (same Source + Operation + Message) this row
+	/// represents when the query collapsed duplicates. <c>1</c> for an ungrouped or unique row. The Logs
+	/// tab appends "(×N)" to the message when this exceeds 1. Append-only ABI field (Key 14).</summary>
+	[Key(14)]
+	public int OccurrenceCount { get; set; } = 1;
 }
 
 /// <summary>Paged envelope returned by <c>QueryOperationLogs</c>.</summary>

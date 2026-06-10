@@ -67,6 +67,9 @@ public sealed class AttackStatisticsPage : TabPage
 	private readonly CheckBox _autoRefreshCheck;
 	private readonly Button _refreshButton;
 	private readonly Button _clearFiltersButton;
+#if DEBUG
+	private readonly Button _rebuildButton;
+#endif
 
 	private readonly StatusStrip _statusStrip;
 	private readonly ToolStripStatusLabel _statusLabel;
@@ -91,7 +94,7 @@ public sealed class AttackStatisticsPage : TabPage
 	{
 		ArgumentNullException.ThrowIfNull(ipc);
 		_ipc = ipc;
-		Text = "Attack Statistics";
+		Text = "RDP Activity";
 
 		// --- Toolbar ---------------------------------------------------------------------------
 		_ipFilter = new TextBox
@@ -175,6 +178,11 @@ public sealed class AttackStatisticsPage : TabPage
 		_clearFiltersButton = new Button { Text = "Clear filters", Dock = DockStyle.Fill, AutoSize = false };
 		_clearFiltersButton.Click += async (_, _) => await OnClearFiltersAsync().ConfigureAwait(true);
 
+#if DEBUG
+		_rebuildButton = new Button { Text = "Rebuild stats", Dock = DockStyle.Fill, AutoSize = false };
+		_rebuildButton.Click += async (_, _) => await OnRebuildAsync().ConfigureAwait(true);
+#endif
+
 		TableLayoutPanel toolbar = BuildToolbar();
 
 		// --- Grid ------------------------------------------------------------------------------
@@ -248,17 +256,22 @@ public sealed class AttackStatisticsPage : TabPage
 
 	private TableLayoutPanel BuildToolbar()
 	{
+#if DEBUG
+		const int columnCount = 10;
+#else
+		const int columnCount = 9;
+#endif
 		TableLayoutPanel toolbar = new()
 		{
 			Dock = DockStyle.Top,
 			Height = 72,
-			ColumnCount = 9,
+			ColumnCount = columnCount,
 			RowCount = 2,
 			Padding = new Padding(4),
 		};
-		for (int i = 0; i < 9; i++)
+		for (int i = 0; i < columnCount; i++)
 		{
-			toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 9));
+			toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / columnCount));
 		}
 		toolbar.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
 		toolbar.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
@@ -289,6 +302,11 @@ public sealed class AttackStatisticsPage : TabPage
 
 		toolbar.Controls.Add(MakeCaption(" "), 8, 0);
 		toolbar.Controls.Add(_clearFiltersButton, 8, 1);
+
+#if DEBUG
+		toolbar.Controls.Add(MakeCaption(" "), 9, 0);
+		toolbar.Controls.Add(_rebuildButton, 9, 1);
+#endif
 
 		return toolbar;
 	}
@@ -548,6 +566,56 @@ public sealed class AttackStatisticsPage : TabPage
 
 		await RefreshAsync().ConfigureAwait(true);
 	}
+
+#if DEBUG
+	/// <summary>DEBUG-only: forces a synchronous AttackStats projection pass via
+	/// <see cref="IpcCommand.RebuildAttackStats"/>, then refreshes the grid. Lets an operator confirm a
+	/// stale RDP Activity table advances after a manual rebuild without waiting for the background worker.</summary>
+	private async Task OnRebuildAsync()
+	{
+		_rebuildButton.Enabled = false;
+		SetStatus("Rebuilding RDP Activity statistics…");
+		try
+		{
+			AttackStatsRebuildResultDto? result = await _ipc
+				.SendAsync<AttackStatsRebuildResultDto>(IpcCommand.RebuildAttackStats)
+				.ConfigureAwait(true);
+
+			if (result is null)
+			{
+				SetStatus("Rebuild FAILED: service unreachable.");
+				return;
+			}
+
+			if (result.Status != IpcResultStatus.Success)
+			{
+				SetStatus(string.Format(
+					CultureInfo.InvariantCulture,
+					"Rebuild returned status {0}: {1}",
+					result.Status,
+					result.Message ?? "no message"));
+				return;
+			}
+
+			SetStatus(string.Format(
+				CultureInfo.InvariantCulture,
+				"Rebuild OK. upserted={0}, elapsed={1} ms, total rows={2}.",
+				result.RowsUpserted,
+				result.ElapsedMilliseconds,
+				result.AttackStatsTotal));
+		}
+		catch (Exception ex)
+		{
+			SetStatus("Rebuild FAILED: " + ex.GetType().Name + " — " + ex.Message);
+		}
+		finally
+		{
+			_rebuildButton.Enabled = true;
+		}
+
+		await RefreshAsync().ConfigureAwait(true);
+	}
+#endif
 
 	// ---------------------------------------------------------------------------------------------
 	// Row coloring

@@ -54,6 +54,7 @@ public sealed class IpcDispatcher
 	private readonly ApplicationDataPurgeService? _dataPurge;
 	private readonly IOperationLogWriter? _opLog;
 	private readonly Core.Diagnostics.OverviewProgressState? _overviewProgress;
+	private readonly Workers.AttackStatsRefreshWorker? _attackStatsWorker;
 
 	public IpcDispatcher(
 		IDbContextFactory<AuditDbContext> factory,
@@ -76,7 +77,8 @@ public sealed class IpcDispatcher
 		ToolsDiagnosticsService? toolsDiagnostics = null,
 		ApplicationDataPurgeService? dataPurge = null,
 		IOperationLogWriter? opLog = null,
-		Core.Diagnostics.OverviewProgressState? overviewProgress = null)
+		Core.Diagnostics.OverviewProgressState? overviewProgress = null,
+		Workers.AttackStatsRefreshWorker? attackStatsWorker = null)
 	{
 		_factory = factory;
 		_metrics = metrics;
@@ -99,6 +101,7 @@ public sealed class IpcDispatcher
 		_dataPurge = dataPurge;
 		_opLog = opLog;
 		_overviewProgress = overviewProgress;
+		_attackStatsWorker = attackStatsWorker;
 	}
 
 	/// <summary>Best-effort durable operation-log record for an operator action taken through IPC.
@@ -221,6 +224,9 @@ public sealed class IpcDispatcher
 				// --- v1.3.3: observability (Logs tab + Overview progress) ---
 				IpcCommand.QueryOperationLogs => await QueryOperationLogsAsync(request.Payload, ct).ConfigureAwait(false),
 				IpcCommand.GetOverviewProgress => GetOverviewProgressHandler(),
+
+				// --- v1.3.4: RDP Activity rebuild ---
+				IpcCommand.RebuildAttackStats => await RebuildAttackStatsAsync(ct).ConfigureAwait(false),
 
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
@@ -3249,6 +3255,15 @@ public sealed class IpcDispatcher
 					|| EF.Functions.Like(r.Source, "%" + term + "%"));
 			}
 
+			// Default-view noise suppression: hide Debug-classified rows and the high-volume IPC
+			// accept-loop / connection chatter so the operator sees meaningful operations and errors.
+			// A genuine fault is recorded above Debug (Error/Critical) and is never suppressed here.
+			if (req.ExcludeDebugNoise)
+			{
+				q = q.Where(r => !r.IsDebug
+					&& !(r.Source == IpcLogSource && r.Severity < OperationLogSeverity.Warning));
+			}
+
 			dto.TotalMatching = await q.LongCountAsync(ct).ConfigureAwait(false);
 
 			List<OperationLog> rows = await q
@@ -3259,9 +3274,10 @@ public sealed class IpcDispatcher
 				.ToListAsync(ct)
 				.ConfigureAwait(false);
 
+			List<OperationLogDto> projected = new(rows.Count);
 			foreach (OperationLog r in rows)
 			{
-				dto.Items.Add(new OperationLogDto
+				projected.Add(new OperationLogDto
 				{
 					Id = r.Id,
 					TimeUtc = r.TimeUtc,
@@ -3277,12 +3293,20 @@ public sealed class IpcDispatcher
 					DurationMs = r.DurationMs,
 					IsDebug = r.IsDebug,
 					Actor = r.Actor,
+					OccurrenceCount = 1,
 				});
 			}
 
+			// Collapse consecutive identical rows (same Source + Operation + Message) within the served
+			// page into a single representative carrying an occurrence count, so a repeated identical
+			// entry does not flood the view. The DEBUG "expand repeated entries" view sets
+			// GroupDuplicates=false to see every row individually.
+			dto.Items = req.GroupDuplicates ? CollapseConsecutiveDuplicates(projected) : projected;
+
 			dto.Message = string.Format(CultureInfo.InvariantCulture,
-				"matched={0} page={1} pageSize={2} depthDays={3} debug={4}",
-				dto.TotalMatching, page, pageSize, depthDays, debug);
+				"matched={0} page={1} pageSize={2} depthDays={3} debug={4} excludeNoise={5} grouped={6} shown={7}",
+				dto.TotalMatching, page, pageSize, depthDays, debug,
+				req.ExcludeDebugNoise, req.GroupDuplicates, dto.Items.Count);
 		}
 		catch (OperationCanceledException) when (ct.IsCancellationRequested)
 		{
@@ -3296,6 +3320,37 @@ public sealed class IpcDispatcher
 		}
 
 		return dto;
+	}
+
+	/// <summary>Operation-log Source used for IPC-channel records; below-Warning entries from this source
+	/// are the high-volume accept-loop / connection chatter suppressed from the default Logs view.</summary>
+	private const string IpcLogSource = "Ipc";
+
+	/// <summary>Collapses runs of consecutive rows that share the same Source + Operation + Message into a
+	/// single representative row whose <see cref="OperationLogDto.OccurrenceCount"/> records how many rows
+	/// it stands in for. Input order is preserved; the representative is the first (newest) row of each run.
+	/// Non-consecutive duplicates are intentionally left distinct so the operator still sees the timeline.</summary>
+	internal static List<OperationLogDto> CollapseConsecutiveDuplicates(List<OperationLogDto> rows)
+	{
+		List<OperationLogDto> result = new(rows.Count);
+		foreach (OperationLogDto row in rows)
+		{
+			OperationLogDto? last = result.Count > 0 ? result[^1] : null;
+			if (last is not null
+				&& string.Equals(last.Source, row.Source, StringComparison.Ordinal)
+				&& string.Equals(last.Operation, row.Operation, StringComparison.Ordinal)
+				&& string.Equals(last.Message, row.Message, StringComparison.Ordinal)
+				&& last.Severity == row.Severity)
+			{
+				last.OccurrenceCount++;
+			}
+			else
+			{
+				result.Add(row);
+			}
+		}
+
+		return result;
 	}
 
 	private async Task<object?> GetEventsForIpAsync(string? payload, CancellationToken ct)
@@ -3745,7 +3800,18 @@ public sealed class IpcDispatcher
 			AuthAttemptFactFailed = _metrics.AuthAttemptFactFailed,
 			AuthAttemptFactSucceeded = _metrics.AuthAttemptFactSucceeded,
 			LastAuthAttemptFactCreatedUtc = _metrics.LastAuthAttemptFactCreatedUtc,
+			StatsWorkerLastRunUtc = _metrics.StatsWorkerLastRunUtc,
+			StatsWorkerLastRowsUpserted = _metrics.StatsWorkerLastRowsUpserted,
+			StatsWorkerRunCount = _metrics.StatsWorkerRunCount,
+			StatsWorkerLastError = _metrics.StatsWorkerLastError,
 		};
+
+		// v1.3.4: surface the resolved RDP listener port and the firewall block scope so an operator on
+		// a host that moved RDP off 3389 (e.g. to 55554) can confirm the service tracks the live port —
+		// never a hardcoded 3389. The provider abstraction yields the port; on Windows we also resolve
+		// the source (registry vs documented default) for the diagnostic detail line.
+		PopulateRdpPortDiagnostics(dto);
+		dto.FirewallBlockScope = _options.CurrentValue.Firewall.BlockScope.ToString();
 
 		// Effective channels/event IDs come from the live options snapshot — the post-configure
 		// repair has already run by the time options are materialised here.
@@ -3803,6 +3869,39 @@ public sealed class IpcDispatcher
 
 			dto.RawEventsTotal = await db.RawEvents.AsNoTracking().LongCountAsync(ct).ConfigureAwait(false);
 			dto.AuthAttemptFactsTotal = await db.AuthAttemptFacts.AsNoTracking().LongCountAsync(ct).ConfigureAwait(false);
+			dto.AttackStatsTotal = await db.AttackStats.AsNoTracking().LongCountAsync(ct).ConfigureAwait(false);
+
+			// v1.3.4: freshness markers across the three pipeline stages so a stale RDP Activity tab can be
+			// localised — newest RawEvent (ingest), newest AuthAttemptFact (normalisation), newest
+			// AttackStat.LastUpdatedUtc (projection). Diverging timestamps tell the operator which stage stalled.
+			if (dto.RawEventsTotal > 0)
+			{
+				dto.LatestRawEventUtc = await db.RawEvents.AsNoTracking().MaxAsync(e => (DateTime?)e.TimeUtc, ct).ConfigureAwait(false);
+			}
+			if (dto.AuthAttemptFactsTotal > 0)
+			{
+				dto.LatestAuthAttemptFactUtc = await db.AuthAttemptFacts.AsNoTracking().MaxAsync(f => (DateTime?)f.TimeUtc, ct).ConfigureAwait(false);
+			}
+			if (dto.AttackStatsTotal > 0)
+			{
+				dto.LatestAttackStatUpdatedUtc = await db.AttackStats.AsNoTracking().MaxAsync(s => (DateTime?)s.LastUpdatedUtc, ct).ConfigureAwait(false);
+			}
+
+			// v1.3.4: tail of the durable OperationLog so the Diagnostic tab always has actionable recent
+			// program-action context (bans, firewall, settings, IPC faults) even when the heavier probes fail.
+			List<DiagnosticsOperationLogLine> opLogTail = await db.OperationLogs.AsNoTracking()
+				.OrderByDescending(o => o.Id)
+				.Take(20)
+				.Select(o => new DiagnosticsOperationLogLine
+				{
+					TimeUtc = o.TimeUtc,
+					Severity = o.Severity.ToString(),
+					Source = o.Source,
+					Operation = o.Operation,
+					Message = o.Message,
+				})
+				.ToListAsync(ct).ConfigureAwait(false);
+			dto.RecentOperationLog.AddRange(opLogTail);
 
 			List<DiagnosticsChannelCount> byChannel = await db.RawEvents.AsNoTracking()
 				.GroupBy(e => e.Channel)
@@ -3854,6 +3953,87 @@ public sealed class IpcDispatcher
 			dto.MonitoringConfigRepairChanged);
 
 		return dto;
+	}
+
+	/// <summary>v1.3.4: fill the resolved-RDP-port diagnostic fields. On Windows the registry resolver
+	/// supplies both the port and its source (registry vs documented default); off Windows (CI / tests)
+	/// the injected provider's port is reported with an Unknown source so the field is never blank. Never
+	/// throws — a registry failure resolves to the documented default rather than failing the snapshot.</summary>
+	private void PopulateRdpPortDiagnostics(DiagnosticsSnapshotDto dto)
+	{
+		try
+		{
+			if (OperatingSystem.IsWindows())
+			{
+				RdpListenerPortResolution res = RdpListenerPortResolver.Resolve();
+				dto.ResolvedRdpPort = res.Port;
+				dto.ResolvedRdpPortSource = res.Source.ToString();
+				dto.ResolvedRdpPortDetail = res.Detail;
+				return;
+			}
+
+			int port = _rdpPortProvider?.GetRdpPort() ?? RdpConfigurationModel.DefaultRdpPort;
+			dto.ResolvedRdpPort = port;
+			dto.ResolvedRdpPortSource = "Unknown";
+			dto.ResolvedRdpPortDetail = "Port provider reported " + port.ToString(CultureInfo.InvariantCulture)
+				+ " (registry source resolution is Windows-only).";
+		}
+		catch (Exception ex)
+		{
+			dto.ResolvedRdpPort = RdpConfigurationModel.DefaultRdpPort;
+			dto.ResolvedRdpPortSource = "Default";
+			dto.ResolvedRdpPortDetail = "Port resolution failed (" + ex.GetType().Name + "); using default.";
+			dto.RecentPipelineErrors.Add("RDP port resolution failed: " + ex.GetType().Name + " — " + ex.Message);
+		}
+	}
+
+	/// <summary>v1.3.4: forces one synchronous AttackStatsRefreshWorker projection pass (DEBUG-gated on
+	/// the client) and reports rows upserted, elapsed ms, and the post-rebuild AttackStats total. Shares
+	/// the worker's re-entrancy gate so a concurrent background pass cannot double-run.</summary>
+	private async Task<AttackStatsRebuildResultDto> RebuildAttackStatsAsync(CancellationToken ct)
+	{
+		AttackStatsRebuildResultDto result = new() { GeneratedUtc = DateTime.UtcNow };
+
+		if (_attackStatsWorker is null)
+		{
+			result.Status = IpcResultStatus.Unavailable;
+			result.Message = "AttackStats projection worker is not registered in this build.";
+			return result;
+		}
+
+		Stopwatch sw = Stopwatch.StartNew();
+		try
+		{
+			int rows = await _attackStatsWorker.RefreshOnceAsync(ct).ConfigureAwait(false);
+			sw.Stop();
+			result.RowsUpserted = rows;
+			result.ElapsedMilliseconds = sw.ElapsedMilliseconds;
+
+			await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+			result.AttackStatsTotal = await db.AttackStats.AsNoTracking().LongCountAsync(ct).ConfigureAwait(false);
+
+			result.Status = IpcResultStatus.Success;
+			result.Message = string.Format(
+				CultureInfo.InvariantCulture,
+				"Rebuild complete: {0} rows upserted in {1} ms; AttackStats now holds {2} rows.",
+				rows, result.ElapsedMilliseconds, result.AttackStatsTotal);
+			LogOperation(OperationLogSeverity.Information, "RebuildAttackStats", result.Message);
+		}
+		catch (OperationCanceledException) when (ct.IsCancellationRequested)
+		{
+			result.Status = IpcResultStatus.Unavailable;
+			result.Message = "Rebuild cancelled.";
+		}
+		catch (Exception ex)
+		{
+			sw.Stop();
+			result.Status = IpcResultStatus.Unavailable;
+			result.ElapsedMilliseconds = sw.ElapsedMilliseconds;
+			result.Message = "Rebuild failed: " + ex.GetType().Name + " — " + ex.Message;
+			LogOperation(OperationLogSeverity.Error, "RebuildAttackStats", result.Message);
+		}
+
+		return result;
 	}
 
 	// ----------------------------------------------------------------------------------------------

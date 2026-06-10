@@ -134,6 +134,68 @@ public sealed class DiagnosticsSnapshotDto
 	/// RDP sessions according to the validated Current? semantics
 	/// (Active AND rdp-tcp# AND username AND 1 &lt; SessionId &lt; 65536).</summary>
 	public List<int> RdpClientsActiveRdpSessionIds { get; set; } = new();
+
+	// --- v1.3.4: resolved RDP listener port (never hardcoded 3389 — see RdpListenerPortResolver). ---
+
+	/// <summary>The TCP port the local RDP listener is configured on, resolved at snapshot time. On a
+	/// host where the operator moved RDP to e.g. 55554 this reflects 55554, never the 3389 default.</summary>
+	public int ResolvedRdpPort { get; set; }
+
+	/// <summary>Where <see cref="ResolvedRdpPort"/> came from: "Registry" (PortNumber present and in
+	/// range) or "Default" (missing/invalid — Microsoft default used).</summary>
+	public string? ResolvedRdpPortSource { get; set; }
+
+	/// <summary>Human-readable detail behind the port resolution (e.g. "PortNumber=55554").</summary>
+	public string? ResolvedRdpPortDetail { get; set; }
+
+	/// <summary>The firewall block scope the service enforces: "RdpOnly" blocks the resolved RDP port
+	/// (TCP LocalPort=&lt;port&gt;); "AllInbound" blocks every inbound port (LocalPort=Any).</summary>
+	public string? FirewallBlockScope { get; set; }
+
+	// --- v1.3.4: RDP Activity (Attack Statistics) freshness diagnostics. ---
+
+	/// <summary>UTC of the newest RawEvent row, or null when the table is empty. Compared against the
+	/// AuthAttemptFact / AttackStat freshness below to localise where the pipeline went stale.</summary>
+	public DateTime? LatestRawEventUtc { get; set; }
+
+	/// <summary>UTC of the newest AuthAttemptFact row (the atomic source of truth for outcomes).</summary>
+	public DateTime? LatestAuthAttemptFactUtc { get; set; }
+
+	/// <summary>UTC of the newest AttackStat.LastUpdatedUtc — when the projection last touched any row.</summary>
+	public DateTime? LatestAttackStatUpdatedUtc { get; set; }
+
+	/// <summary>UTC of the most recent AttackStatsRefreshWorker pass completion (success or failure).</summary>
+	public DateTime? StatsWorkerLastRunUtc { get; set; }
+
+	/// <summary>Rows upserted on the most recent successful projection pass.</summary>
+	public long StatsWorkerLastRowsUpserted { get; set; }
+
+	/// <summary>Cumulative count of projection passes since service start.</summary>
+	public long StatsWorkerRunCount { get; set; }
+
+	/// <summary>Last projection-worker error, or null when the last pass succeeded.</summary>
+	public string? StatsWorkerLastError { get; set; }
+
+	/// <summary>Total rows currently in AttackStats.</summary>
+	public long AttackStatsTotal { get; set; }
+
+	/// <summary>Most recent durable OperationLog entries (program actions), newest first. Bounded.
+	/// Surfaced so the Diagnostic tab can show recent activity even when other probes fail.</summary>
+	public List<DiagnosticsOperationLogLine> RecentOperationLog { get; set; } = new();
+}
+
+/// <summary>v1.3.4 — one compact recent OperationLog line for the Diagnostic snapshot tail.</summary>
+public sealed class DiagnosticsOperationLogLine
+{
+	public DateTime TimeUtc { get; set; }
+
+	public string Severity { get; set; } = string.Empty;
+
+	public string Source { get; set; } = string.Empty;
+
+	public string Operation { get; set; } = string.Empty;
+
+	public string Message { get; set; } = string.Empty;
 }
 
 /// <summary>v1.2.2 — one row of per-id Security backfill diagnostic detail.</summary>

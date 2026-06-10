@@ -88,30 +88,78 @@ public sealed class DiagnosticsPage : TabPage
 	private async Task RefreshAsync()
 	{
 		_status.Text = "Refreshing…";
+		_refresh.Enabled = false;
 		try
 		{
-			DiagnosticsSnapshotDto? snapshot = await _ipc.SendAsync<DiagnosticsSnapshotDto>(IpcCommand.GetDiagnostics).ConfigureAwait(true);
-			if (snapshot is null)
+			// Use the structured call shape so a connect-failure, a timeout, a service-side error and a
+			// genuinely empty payload are each distinguishable — the historic SendAsync collapsed all of
+			// them to null and produced the misleading bare "No diagnostics available". When the pipe is
+			// reachable we always render an actionable structured failure (command, outcome, duration,
+			// exception type/message, pipe state, plus a tail of recent OperationLog entries) rather than
+			// a generic placeholder.
+			IpcCallResult<DiagnosticsSnapshotDto> call =
+				await _ipc.SendDetailedAsync<DiagnosticsSnapshotDto>(IpcCommand.GetDiagnostics).ConfigureAwait(true);
+
+			if (call.IsSuccess && call.Value is { } snapshot)
 			{
-				_status.Text = "Service: IPC GetDiagnostics returned nothing — is the service running?";
-				_report.Text = "No diagnostics available. Start the service or run as administrator and retry.";
+				_report.Text = DiagnosticsReportFormatter.Format(snapshot);
+				_status.Text = string.Format(
+					CultureInfo.InvariantCulture,
+					"Snapshot at {0:yyyy-MM-dd HH:mm:ss}Z  |  Status={1}  |  RawEvents={2}  AuthAttemptFacts={3}  RdpPort={4}",
+					snapshot.GeneratedUtc,
+					snapshot.Status,
+					snapshot.RawEventsTotal,
+					snapshot.AuthAttemptFactsTotal,
+					snapshot.ResolvedRdpPort);
 				return;
 			}
 
-			_report.Text = DiagnosticsReportFormatter.Format(snapshot);
-			_status.Text = string.Format(
-				CultureInfo.InvariantCulture,
-				"Snapshot at {0:yyyy-MM-dd HH:mm:ss}Z  |  Status={1}  |  RawEvents={2}  AuthAttemptFacts={3}",
-				snapshot.GeneratedUtc,
-				snapshot.Status,
-				snapshot.RawEventsTotal,
-				snapshot.AuthAttemptFactsTotal);
+			// Not a clean success. Build a structured failure report. If the pipe connected we can still
+			// pull a tail of the durable OperationLog to give the operator real recent context.
+			List<OperationLogDto> logTail = call.ServiceLikelyReachable
+				? await TryLoadOperationLogTailAsync().ConfigureAwait(true)
+				: new List<OperationLogDto>();
+
+			_report.Text = DiagnosticsReportFormatter.FormatFailure(call, logTail);
+			_status.Text = "Diagnostics " + call.Headline();
 		}
 		catch (Exception ex)
 		{
 			_status.Text = "Service: error — " + ex.GetType().Name;
-			_report.Text = ex.Message;
+			_report.Text = "Unexpected error while requesting diagnostics: " + ex.GetType().Name + " — " + ex.Message;
 		}
+		finally
+		{
+			_refresh.Enabled = true;
+		}
+	}
+
+	/// <summary>Best-effort tail of the durable OperationLog used to enrich a structured diagnostics
+	/// failure report. Never throws — on any error it returns an empty list so the failure report still
+	/// renders.</summary>
+	private async Task<List<OperationLogDto>> TryLoadOperationLogTailAsync()
+	{
+		try
+		{
+			OperationLogQueryRequest request = new()
+			{
+				DepthDays = 7,
+				Page = 0,
+				PageSize = 25,
+			};
+			IpcCallResult<OperationLogPageDto> call =
+				await _ipc.SendDetailedAsync<OperationLogPageDto>(IpcCommand.QueryOperationLogs, request).ConfigureAwait(true);
+			if (call.IsSuccess && call.Value is { } page && page.Status == IpcResultStatus.Success)
+			{
+				return page.Items.ToList();
+			}
+		}
+		catch
+		{
+			// best-effort — the failure report is still useful without the tail
+		}
+
+		return new List<OperationLogDto>();
 	}
 
 	private async Task RunProbeAsync()
@@ -221,6 +269,38 @@ public static class DiagnosticsReportFormatter
 		sb.AppendFormat(CultureInfo.InvariantCulture, "Service version:       {0}", dto.ServiceVersion ?? "(unknown)").AppendLine();
 		sb.AppendFormat(CultureInfo.InvariantCulture, "Install path:          {0}", dto.InstallPath ?? "(unknown)").AppendLine();
 		sb.AppendFormat(CultureInfo.InvariantCulture, "Database path:         {0}", dto.DatabasePath ?? "(unknown)").AppendLine();
+		sb.AppendLine();
+
+		sb.AppendLine("RDP listener & firewall scope");
+		sb.AppendLine("-----------------------------");
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Resolved RDP port:     {0}", dto.ResolvedRdpPort).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Port source:           {0}", dto.ResolvedRdpPortSource ?? "(unknown)").AppendLine();
+		if (!string.IsNullOrWhiteSpace(dto.ResolvedRdpPortDetail))
+		{
+			sb.AppendFormat(CultureInfo.InvariantCulture, "Port detail:           {0}", dto.ResolvedRdpPortDetail).AppendLine();
+		}
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Firewall block scope:  {0}", dto.FirewallBlockScope ?? "(unknown)").AppendLine();
+		// Make the LocalPort semantics explicit so an operator can map scope -> firewall rule shape without
+		// guessing: RdpPortOnly pins the resolved port; AllInbound deliberately matches every inbound port.
+		if (string.Equals(dto.FirewallBlockScope, "RdpPortOnly", StringComparison.OrdinalIgnoreCase))
+		{
+			sb.AppendFormat(CultureInfo.InvariantCulture, "  -> RdpOnly rules block TCP LocalPort={0} (the resolved RDP port).", dto.ResolvedRdpPort).AppendLine();
+		}
+		else if (string.Equals(dto.FirewallBlockScope, "AllInbound", StringComparison.OrdinalIgnoreCase))
+		{
+			sb.AppendLine("  -> AllInbound rules block LocalPort=Any (every inbound port from the source IP).");
+		}
+		sb.AppendLine();
+
+		sb.AppendLine("RDP Activity (AttackStats) freshness");
+		sb.AppendLine("------------------------------------");
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Latest RawEvent (local):        {0}", FormatLocalWithUtc(dto.LatestRawEventUtc)).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Latest AuthAttemptFact (local): {0}", FormatLocalWithUtc(dto.LatestAuthAttemptFactUtc)).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Latest AttackStat upd. (local): {0}", FormatLocalWithUtc(dto.LatestAttackStatUpdatedUtc)).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "AttackStats rows:               {0}", dto.AttackStatsTotal).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Stats worker last run (local):  {0}", FormatLocalWithUtc(dto.StatsWorkerLastRunUtc)).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Stats worker runs / last rows:  {0} / {1}", dto.StatsWorkerRunCount, dto.StatsWorkerLastRowsUpserted).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Stats worker last error:        {0}", dto.StatsWorkerLastError ?? "(none)").AppendLine();
 		sb.AppendLine();
 
 		sb.AppendLine("Effective monitoring configuration");
@@ -368,6 +448,101 @@ public static class DiagnosticsReportFormatter
 			foreach (string err in dto.RecentPipelineErrors)
 			{
 				sb.AppendFormat(CultureInfo.InvariantCulture, "  - {0}", err).AppendLine();
+			}
+		}
+		sb.AppendLine();
+
+		sb.AppendLine("Recent operation log (newest first)");
+		sb.AppendLine("-----------------------------------");
+		if (dto.RecentOperationLog.Count == 0)
+		{
+			sb.AppendLine("  (no recent program-action log entries)");
+		}
+		else
+		{
+			foreach (DiagnosticsOperationLogLine line in dto.RecentOperationLog)
+			{
+				sb.AppendFormat(
+					CultureInfo.InvariantCulture,
+					"  {0:yyyy-MM-dd HH:mm:ss}Z  {1,-11}  {2}/{3}: {4}",
+					line.TimeUtc,
+					line.Severity,
+					line.Source,
+					line.Operation,
+					line.Message).AppendLine();
+			}
+		}
+
+		return sb.ToString();
+	}
+
+	/// <summary>Build an actionable structured failure report when GetDiagnostics did not return a clean
+	/// snapshot. Never the bare "No diagnostics available": it states the command, outcome, duration,
+	/// pipe/response state, exception type/message and, when the service was reachable, a tail of recent
+	/// OperationLog entries so the operator has real context to act on. Always English; never throws.</summary>
+	public static string FormatFailure(IpcCallResult<DiagnosticsSnapshotDto> call, IReadOnlyList<OperationLogDto> logTail)
+	{
+		ArgumentNullException.ThrowIfNull(call);
+		StringBuilder sb = new();
+		sb.AppendLine("RdpAudit diagnostics — could not build a full snapshot");
+		sb.AppendLine("======================================================");
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Command:               {0}", call.Command).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Outcome:               {0}", call.Outcome).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Headline:              {0}", call.Headline()).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Started (UTC):         {0:O}", call.StartUtc).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Duration / timeout:    {0} ms / {1} ms", call.DurationMs, call.TimeoutMs).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Pipe connected:        {0}", call.PipeConnected).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Response received:     {0}", call.ResponseReceived).AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Exception type:        {0}", call.ErrorType ?? "(none)").AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Error message:         {0}", call.Error ?? "(none)").AppendLine();
+		sb.AppendLine();
+
+		sb.AppendLine("What this means");
+		sb.AppendLine("---------------");
+		sb.AppendLine(call.Outcome switch
+		{
+			IpcCallOutcome.ConnectFailed =>
+				"The service named pipe did not accept a connection. The service is most likely stopped or not installed. Start the RdpAudit service (run the Configurator as administrator) and retry.",
+			IpcCallOutcome.Timeout =>
+				"The service is reachable but did not finish within the deadline. A long-running operation may be in progress; wait a moment and retry.",
+			IpcCallOutcome.ServiceError =>
+				"The service handled the request but reported an error. See the error message above and the recent operation log below.",
+			IpcCallOutcome.TransportError =>
+				"A transport / framing error occurred mid-stream after connecting. This usually indicates a version mismatch between the Configurator and the running service — re-publish and restart the service.",
+			IpcCallOutcome.SuccessNoPayload =>
+				"The service reported success but returned no diagnostics payload. This is unexpected; the recent operation log below may show why.",
+			_ => "Unexpected outcome — see the trace line and recent operation log below.",
+		});
+		sb.AppendLine();
+		sb.AppendFormat(CultureInfo.InvariantCulture, "Trace: {0}", call.TraceLine).AppendLine();
+		sb.AppendLine();
+
+		sb.AppendLine("Recent operation log (newest first)");
+		sb.AppendLine("-----------------------------------");
+		if (!call.ServiceLikelyReachable)
+		{
+			sb.AppendLine("  (service unreachable — operation log could not be queried)");
+		}
+		else if (logTail.Count == 0)
+		{
+			sb.AppendLine("  (no recent program-action log entries returned)");
+		}
+		else
+		{
+			foreach (OperationLogDto line in logTail)
+			{
+				sb.AppendFormat(
+					CultureInfo.InvariantCulture,
+					"  {0:yyyy-MM-dd HH:mm:ss}Z  {1,-11}  {2}/{3}: {4}",
+					line.TimeUtc,
+					line.Severity,
+					line.Source,
+					line.Operation,
+					line.Message).AppendLine();
+				if (!string.IsNullOrEmpty(line.ExceptionType))
+				{
+					sb.AppendFormat(CultureInfo.InvariantCulture, "      exception: {0}: {1}", line.ExceptionType, line.ExceptionMessage ?? "(no message)").AppendLine();
+				}
 			}
 		}
 

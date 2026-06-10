@@ -203,4 +203,12 @@ public enum IpcCommand
 	/// channel, last event, errors). Polled by the Overview tab so the UI opens immediately and shows a
 	/// progress bar instead of blocking on a full historical analysis of a large database.</summary>
 	GetOverviewProgress = 59,
+
+	// --- v1.3.4 RDP Activity rebuild (append-only). ---
+
+	/// <summary>Forces a single synchronous AttackStatsRefreshWorker projection pass (the same pass the
+	/// 60-second background loop runs), then returns a short report with rows upserted, elapsed ms, and
+	/// the post-rebuild AttackStats total. Used by the RDP Activity tab's DEBUG "Rebuild RDP Activity
+	/// statistics" action to recover from a stale projection without restarting the service.</summary>
+	RebuildAttackStats = 60,
 }
