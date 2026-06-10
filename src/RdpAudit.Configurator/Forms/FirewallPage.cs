@@ -52,8 +52,15 @@ public sealed class FirewallPage : TabPage
 	private readonly NumericUpDown _durationMinutes;
 	private readonly CheckBox _blockOnBlacklistedLoginCheck;
 	private readonly CheckBox _refusePrivateAddressCheck;
+	private readonly ComboBox _blockScopeCombo;
 	private readonly Button _savePolicyButton;
 	private readonly Button _reloadPolicyButton;
+	private readonly Button _applyScopeToExistingButton;
+
+	/// <summary>Block scope persisted at the last successful load / save, used to detect when the
+	/// operator changed the dropdown so the Save handler can warn that existing RdpAudit rules still
+	/// carry the previous shape until reconciled.</summary>
+	private FirewallBlockScope _lastSavedBlockScope = FirewallBlockScope.AllInbound;
 
 	// Grids ----------------------------------------------------------------------------------------
 	private readonly BindingList<AddressListRow> _blocklistRows = new();
@@ -217,14 +224,14 @@ public sealed class FirewallPage : TabPage
 		{
 			Dock = DockStyle.Fill,
 			ColumnCount = 2,
-			RowCount = 6,
+			RowCount = 7,
 			Padding = new Padding(8),
 			AutoSize = true,
 			AutoSizeMode = AutoSizeMode.GrowAndShrink,
 		};
 		policyLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 		policyLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-		for (int i = 0; i < 6; i++)
+		for (int i = 0; i < 7; i++)
 		{
 			policyLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 		}
@@ -244,6 +251,21 @@ public sealed class FirewallPage : TabPage
 			Text = "Refuse blocks against loopback / private / multicast addresses",
 			AutoSize = true,
 		};
+
+		// Block scope dropdown: drives the shape of every new firewall block rule. AllInbound blocks
+		// every protocol/port from the source IP; RdpPortOnly restricts the block to TCP on the
+		// dynamically resolved RDP listener port (never a hardcoded 3389 / 55554). The internal enum
+		// ordinal is what gets persisted; the Display text is operator-facing only.
+		_blockScopeCombo = new ComboBox
+		{
+			DropDownStyle = ComboBoxStyle.DropDownList,
+			Width = 320,
+			Anchor = AnchorStyles.Left,
+			Margin = new Padding(0, 2, 0, 2),
+		};
+		_blockScopeCombo.Items.Add(new BlockScopeChoice("All inbound traffic from IP", FirewallBlockScope.AllInbound));
+		_blockScopeCombo.Items.Add(new BlockScopeChoice("RDP port only", FirewallBlockScope.RdpPortOnly));
+		_blockScopeCombo.SelectedIndex = 0;
 
 		_thresholdInput = new NumericUpDown
 		{
@@ -284,6 +306,13 @@ public sealed class FirewallPage : TabPage
 		_reloadPolicyButton = new Button { Text = "Reload from service", AutoSize = true };
 		_reloadPolicyButton.Click += async (_, _) => await ReloadPolicyAsync().ConfigureAwait(true);
 
+		// Explicit reconcile path: re-installs every enabled blocklist rule so existing RdpAudit-owned
+		// rules adopt the currently-configured block scope and resolved RDP port. This reuses the same
+		// RepairAllEnabledBlocklistEnforcement IPC the Blocklist tab exposes, surfaced here next to the
+		// scope dropdown so changing scope and reconciling live rules is one obvious two-step action.
+		_applyScopeToExistingButton = new Button { Text = "Apply scope to existing rules", AutoSize = true };
+		_applyScopeToExistingButton.Click += async (_, _) => await OnApplyScopeToExistingAsync().ConfigureAwait(true);
+
 		// Row 0 — full-width brute-force checkbox.
 		policyLayout.Controls.Add(_autoBlockBruteForceCheck, 0, 0);
 		policyLayout.SetColumnSpan(_autoBlockBruteForceCheck, 2);
@@ -304,10 +333,17 @@ public sealed class FirewallPage : TabPage
 		policyLayout.Controls.Add(_refusePrivateAddressCheck, 0, 4);
 		policyLayout.SetColumnSpan(_refusePrivateAddressCheck, 2);
 
+		// Row 5 — block scope dropdown (label | combo). Saved with the rest of the policy via the
+		// Save policy button; changing it then pressing Save persists the new scope and warns that
+		// existing rules still carry the old shape until reconciled with Apply scope to existing rules.
+		policyLayout.Controls.Add(MakePolicyLabel("Block scope (new rules):"), 0, 5);
+		policyLayout.Controls.Add(_blockScopeCombo, 1, 5);
+
 		FlowLayoutPanel policyButtons = new() { FlowDirection = FlowDirection.LeftToRight, AutoSize = true, Margin = new Padding(0, 4, 0, 0) };
 		policyButtons.Controls.Add(_savePolicyButton);
 		policyButtons.Controls.Add(_reloadPolicyButton);
-		policyLayout.Controls.Add(policyButtons, 0, 5);
+		policyButtons.Controls.Add(_applyScopeToExistingButton);
+		policyLayout.Controls.Add(policyButtons, 0, 6);
 		policyLayout.SetColumnSpan(policyButtons, 2);
 
 		policyBox.Controls.Add(policyLayout);
@@ -819,6 +855,8 @@ public sealed class FirewallPage : TabPage
 			_refusePrivateAddressCheck.Checked = cfg.RefusePrivateAddressBlock;
 			_thresholdInput.Value = ClampToRange(cfg.AutoBlockThreshold, (int)_thresholdInput.Minimum, (int)_thresholdInput.Maximum);
 			SetDurationFromMinutes(cfg.DefaultBlockDurationMinutes);
+			SelectBlockScopeCombo(cfg.BlockScope);
+			_lastSavedBlockScope = cfg.BlockScope;
 			ApplyGlobalDebugGate(opts.Diagnostics.DebugMode);
 			SetStatus("Policy reloaded from service.");
 		}
@@ -871,15 +909,41 @@ public sealed class FirewallPage : TabPage
 			firewall["RefusePrivateAddressBlock"] = _refusePrivateAddressCheck.Checked;
 			firewall["DefaultBlockDurationMinutes"] = ComputeDurationMinutes();
 
+			BlockScopeChoice scopeChoice = (BlockScopeChoice)_blockScopeCombo.SelectedItem!;
+			FirewallBlockScope previousScope = _lastSavedBlockScope;
+			bool scopeChanged = scopeChoice.Scope != previousScope;
+			firewall["BlockScope"] = (int)scopeChoice.Scope;
+
 			JsonObject wrapped = new()
 			{
 				[RdpAuditOptions.SectionName] = settings.DeepClone(),
 			};
 
 			object? saveResp = await _ipc.SendAsync<object>(IpcCommand.SaveSettings, wrapped.ToJsonString()).ConfigureAwait(true);
-			SetStatus(saveResp is null
-				? "Save FAILED: service unreachable."
-				: "Save OK. Service will hot-reload from disk.");
+			if (saveResp is null)
+			{
+				SetStatus("Save FAILED: service unreachable.");
+				return;
+			}
+
+			_lastSavedBlockScope = scopeChoice.Scope;
+			if (scopeChanged)
+			{
+				// Do not let the UI claim the new scope while existing RdpAudit rules still carry the old
+				// shape. The dropdown only governs NEW rules; existing rules keep their shape until the
+				// operator reconciles them. Make that explicit instead of silently diverging.
+				SetStatus(string.Format(
+					CultureInfo.InvariantCulture,
+					"Save OK — block scope changed {0} -> {1}. NEW rules use the new scope; existing "
+						+ "RdpAudit rules still use the previous shape until you press "
+						+ "'Apply scope to existing rules'.",
+					previousScope,
+					scopeChoice.Scope));
+			}
+			else
+			{
+				SetStatus("Save OK. Service will hot-reload from disk.");
+			}
 
 			await RefreshAllAsync().ConfigureAwait(true);
 		}
@@ -908,6 +972,72 @@ public sealed class FirewallPage : TabPage
 				_providerCombo.SelectedIndex = i;
 				return;
 			}
+		}
+	}
+
+	private void SelectBlockScopeCombo(FirewallBlockScope scope)
+	{
+		for (int i = 0; i < _blockScopeCombo.Items.Count; i++)
+		{
+			if (_blockScopeCombo.Items[i] is BlockScopeChoice c && c.Scope == scope)
+			{
+				_blockScopeCombo.SelectedIndex = i;
+				return;
+			}
+		}
+
+		// Unknown / future ordinal: fall back to the first entry so the combo always has a selection.
+		if (_blockScopeCombo.Items.Count > 0)
+		{
+			_blockScopeCombo.SelectedIndex = 0;
+		}
+	}
+
+	/// <summary>Reconciles existing RdpAudit-managed rules to the currently-configured block scope by
+	/// re-installing every enabled blocklist rule through the service. Reuses the
+	/// <see cref="IpcCommand.RepairAllEnabledBlocklistEnforcement"/> round-trip the Blocklist tab uses;
+	/// each re-install reads the live <c>Firewall.BlockScope</c> and resolved RDP port, so after this
+	/// completes the live rule shapes match the dropdown. Save the policy first if the scope was just
+	/// changed, otherwise the service still enforces the previously-persisted scope.</summary>
+	private async Task OnApplyScopeToExistingAsync()
+	{
+		BlockScopeChoice scopeChoice = (BlockScopeChoice)_blockScopeCombo.SelectedItem!;
+		if (scopeChoice.Scope != _lastSavedBlockScope)
+		{
+			SetStatus("Apply aborted: the dropdown differs from the saved scope. Press 'Save policy' "
+				+ "first so the service enforces the new scope, then apply it to existing rules.");
+			return;
+		}
+
+		try
+		{
+			SetStatus(string.Format(
+				CultureInfo.InvariantCulture,
+				"Reconciling existing RdpAudit rules to scope {0}…",
+				scopeChoice.Scope));
+
+			IpcCallResult<ReconciliationReportDto> result =
+				await _ipc.SendDetailedAsync<ReconciliationReportDto>(IpcCommand.RepairAllEnabledBlocklistEnforcement).ConfigureAwait(true);
+
+			if (!result.IsSuccess || result.Value is null)
+			{
+				SetStatus("Apply scope to existing rules FAILED: " + (result.Error ?? "service unreachable."));
+				return;
+			}
+
+			ReconciliationReportDto report = result.Value;
+			SetStatus(string.Format(
+				CultureInfo.InvariantCulture,
+				"Applied scope {0} to existing rules: {1} verified, {2} block(s) reconciled.",
+				scopeChoice.Scope,
+				report.VerifiedCount,
+				report.Blocks.Count));
+
+			await RefreshAllAsync().ConfigureAwait(true);
+		}
+		catch (Exception ex)
+		{
+			SetStatus("Apply scope to existing rules FAILED: " + ex.GetType().Name + " — " + ex.Message);
 		}
 	}
 
@@ -2358,6 +2488,14 @@ public sealed class FirewallPage : TabPage
 	// ---------------------------------------------------------------------------------------------
 
 	private sealed record ProviderChoice(string Display, FirewallProviderKind Kind, bool Enabled)
+	{
+		public override string ToString() => Display;
+	}
+
+	/// <summary>Combo-box view-model mapping a human-readable label to a <see cref="FirewallBlockScope"/>
+	/// enum value. The <see cref="Scope"/> ordinal is what gets persisted to appsettings.json; the
+	/// <see cref="Display"/> string is operator-facing only.</summary>
+	private sealed record BlockScopeChoice(string Display, FirewallBlockScope Scope)
 	{
 		public override string ToString() => Display;
 	}

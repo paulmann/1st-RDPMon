@@ -16,6 +16,7 @@
 
 using System.Globalization;
 using System.Text;
+using RdpAudit.Core.Config;
 
 namespace RdpAudit.Core.Firewall;
 
@@ -25,6 +26,90 @@ public sealed record FirewallProviderDiagnostic(
 	bool Available,
 	int ActiveBlockCount,
 	string? Message);
+
+/// <summary>The concrete shape of one live RdpAudit-owned inbound block rule, projected down to the
+/// fields that determine its block scope: the protocol it restricts to (if any) and the local ports
+/// it pins (empty when it blocks every port). Used to detect drift between the configured
+/// <see cref="FirewallBlockScope"/> and the rules actually installed in the firewall.</summary>
+public sealed record FirewallRuleShape(string RuleName, string? Protocol, IReadOnlyList<int> LocalPorts);
+
+/// <summary>One detected mismatch between a live rule's shape and the configured block scope.</summary>
+public sealed record FirewallScopeMismatch(string RuleName, string Detail);
+
+/// <summary>Pure analyzer that classifies live RdpAudit rule shapes against the configured block
+/// scope and resolved RDP port. Cross-platform / unit-testable: performs no I/O and depends only on
+/// the projected <see cref="FirewallRuleShape"/> values the service reads from the firewall.</summary>
+public static class FirewallScopeMismatchAnalyzer
+{
+	/// <summary>Returns one <see cref="FirewallScopeMismatch"/> per live rule whose shape does not match
+	/// the configured scope. For <see cref="FirewallBlockScope.AllInbound"/> a rule is expected to
+	/// pin no protocol / no local port (it blocks everything); a rule that restricts to a TCP local port
+	/// is flagged as still RDP-port-only. For <see cref="FirewallBlockScope.RdpPortOnly"/> a rule
+	/// is expected to restrict to TCP on <paramref name="resolvedRdpPort"/>; a rule that pins no port (or a
+	/// different port) is flagged as still all-inbound / wrong-port.</summary>
+	public static IReadOnlyList<FirewallScopeMismatch> Analyze(
+		FirewallBlockScope configuredScope,
+		int resolvedRdpPort,
+		IReadOnlyList<FirewallRuleShape> liveRules)
+	{
+		ArgumentNullException.ThrowIfNull(liveRules);
+
+		List<FirewallScopeMismatch> mismatches = new();
+		foreach (FirewallRuleShape rule in liveRules)
+		{
+			bool pinsPort = rule.LocalPorts is { Count: > 0 };
+			bool isTcp = string.Equals(rule.Protocol, "TCP", StringComparison.OrdinalIgnoreCase);
+
+			if (configuredScope == FirewallBlockScope.AllInbound)
+			{
+				if (pinsPort)
+				{
+					mismatches.Add(new FirewallScopeMismatch(
+						rule.RuleName,
+						string.Format(
+							CultureInfo.InvariantCulture,
+							"configured AllInbound but rule restricts to {0} LocalPort={1} (still RDP-port-only). "
+								+ "Re-apply to widen it to all inbound traffic.",
+							rule.Protocol ?? "TCP",
+							FormatPorts(rule.LocalPorts))));
+				}
+
+				continue;
+			}
+
+			// configuredScope == RdpPortOnly
+			if (!pinsPort)
+			{
+				mismatches.Add(new FirewallScopeMismatch(
+					rule.RuleName,
+					string.Format(
+						CultureInfo.InvariantCulture,
+						"configured RdpPortOnly (TCP {0}) but rule pins no local port (still blocks all inbound). "
+							+ "Re-apply to narrow it to the resolved RDP port.",
+						resolvedRdpPort)));
+			}
+			else if (!isTcp || !rule.LocalPorts.Contains(resolvedRdpPort))
+			{
+				mismatches.Add(new FirewallScopeMismatch(
+					rule.RuleName,
+					string.Format(
+						CultureInfo.InvariantCulture,
+						"configured RdpPortOnly (TCP {0}) but rule pins {1} LocalPort={2}. "
+							+ "Re-apply to match the resolved RDP port.",
+						resolvedRdpPort,
+						rule.Protocol ?? "(unspecified)",
+						FormatPorts(rule.LocalPorts))));
+			}
+		}
+
+		return mismatches;
+	}
+
+	private static string FormatPorts(IReadOnlyList<int> ports) =>
+		ports.Count == 0
+			? "(none)"
+			: string.Join(",", ports.Select(p => p.ToString(CultureInfo.InvariantCulture)));
+}
 
 /// <summary>Aggregate diagnostic input for <see cref="FirewallDiagnosticsReportBuilder.Build"/>.
 /// Every field is pre-resolved by the service so the builder performs no I/O.</summary>
@@ -60,6 +145,12 @@ public sealed record FirewallDiagnosticsInput(
 
 	/// <summary>Optional human-readable note from the firewall scan (backend detail / failure cause).</summary>
 	public string? ScannerNote { get; init; }
+
+	/// <summary>Live shapes of discovered RdpAudit-owned inbound block rules, used to detect scope drift
+	/// against <see cref="ConfiguredBlockScope"/> / <see cref="ResolvedRdpPort"/>. Empty when a live scan
+	/// was not available; optional so existing positional callers keep binding.</summary>
+	public IReadOnlyList<FirewallRuleShape> DiscoveredRuleShapes { get; init; } =
+		Array.Empty<FirewallRuleShape>();
 }
 
 /// <summary>One per-IP reconciled enforcement line for the diagnostics report.</summary>
@@ -188,6 +279,8 @@ public static class FirewallDiagnosticsReportBuilder
 		sb.Append("  Enabled allow-inbound TCP ports: ")
 			.AppendLine(FormatPorts(input.EnabledAllowInboundTcpPorts));
 		sb.AppendLine();
+
+		AppendBlockScopeSection(sb, input);
 
 		sb.AppendLine("[Alternate backends]");
 		sb.Append("  Route blackhole: ").AppendLine(input.RouteBackendState);
@@ -344,6 +437,59 @@ public static class FirewallDiagnosticsReportBuilder
 		{
 			sb.Append("      stderr: ").AppendLine(line.BackendStderrPreview);
 		}
+	}
+
+	/// <summary>Renders the configured block scope, the expected rule shape for that scope, and any
+	/// detected mismatches between the live RdpAudit rules and the configured scope. This is the section
+	/// that prevents the UI from silently claiming RdpPortOnly while existing rules still block all
+	/// inbound traffic — every drifting rule is named with a concrete remediation hint.</summary>
+	private static void AppendBlockScopeSection(StringBuilder sb, FirewallDiagnosticsInput input)
+	{
+		bool rdpOnly = string.Equals(input.ConfiguredBlockScope, "RdpPortOnly", StringComparison.OrdinalIgnoreCase);
+
+		sb.AppendLine("[Block scope]");
+		sb.Append("  Configured scope: ").AppendLine(input.ConfiguredBlockScope);
+		if (rdpOnly)
+		{
+			sb.Append("  Expected rule shape: inbound block, TCP, LocalPort=")
+				.Append(input.ResolvedRdpPort.ToString(CultureInfo.InvariantCulture))
+				.AppendLine(" (the resolved RDP listener port).");
+		}
+		else
+		{
+			sb.AppendLine("  Expected rule shape: inbound block, Protocol=Any, LocalPort=Any "
+				+ "(every inbound port from the source IP). LocalPort=Any is EXPECTED because BlockScope=AllInbound.");
+		}
+
+		FirewallBlockScope scopeEnum = rdpOnly ? FirewallBlockScope.RdpPortOnly : FirewallBlockScope.AllInbound;
+		IReadOnlyList<FirewallScopeMismatch> mismatches =
+			FirewallScopeMismatchAnalyzer.Analyze(scopeEnum, input.ResolvedRdpPort, input.DiscoveredRuleShapes);
+
+		if (input.DiscoveredRuleShapes.Count == 0)
+		{
+			sb.AppendLine("  Existing rule mismatches: (no live rule shapes were scanned).");
+		}
+		else if (mismatches.Count == 0)
+		{
+			sb.Append("  Existing rule mismatches: none — all ")
+				.Append(input.DiscoveredRuleShapes.Count.ToString(CultureInfo.InvariantCulture))
+				.AppendLine(" scanned RdpAudit rule(s) match the configured scope.");
+		}
+		else
+		{
+			sb.Append("  WARNING: ")
+				.Append(mismatches.Count.ToString(CultureInfo.InvariantCulture))
+				.Append(" of ")
+				.Append(input.DiscoveredRuleShapes.Count.ToString(CultureInfo.InvariantCulture))
+				.AppendLine(" RdpAudit rule(s) do NOT match the configured scope. Use the Firewall tab "
+					+ "'Apply scope to existing rules' (Repair all enabled) to reconcile them:");
+			foreach (FirewallScopeMismatch m in mismatches)
+			{
+				sb.Append("    ").Append(m.RuleName).Append(": ").AppendLine(m.Detail);
+			}
+		}
+
+		sb.AppendLine();
 	}
 
 	private static string DescribeScannerBackend(string backend) => backend switch
