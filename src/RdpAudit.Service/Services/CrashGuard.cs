@@ -57,7 +57,7 @@ public sealed class CrashGuard
 			string version = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
 				?? asm.GetName().Version?.ToString()
 				?? "unknown";
-			string exePath = Environment.ProcessPath ?? asm.Location;
+			string exePath = ResolveProcessPath();
 			string dbPath = SafeResolveDbPath(options);
 
 			string details = string.Join("; ", new[]
@@ -186,6 +186,12 @@ public sealed class CrashGuard
 		{
 			// ignored — Event Log may be unavailable in some environments
 		}
+	}
+
+	private static string ResolveProcessPath()
+	{
+		return Environment.ProcessPath
+			?? AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 	}
 
 	private static string SafeResolveDbPath(RdpAuditOptions options)
