@@ -171,17 +171,18 @@ public sealed record ReconciliationReport(
 /// status/confidence per (provider, ip), and surfaces orphaned RdpAudit rules.</summary>
 public static class EnforcementReconciler
 {
+	/// <summary>Default RdpAudit firewall group name. Kept in Core so the pure reconciler can attribute
+	/// group-owned rules without a Service dependency; the Service passes its own
+	/// <c>NetshCommandBuilder.RdpAuditGroup</c> (the same literal) explicitly.</summary>
+	public const string DefaultGroupName = "RdpAudit";
+
 	/// <summary>Reconciles the supplied desired blocks against the per-provider live scans.</summary>
 	/// <param name="desired">DB-intended blocks (ActiveBlock rows that are Active/Pending/Failed).</param>
 	/// <param name="scans">One scan result per provider that owns at least one desired block (or that
 	/// was scanned to detect orphans). Keyed implicitly by <see cref="BackendScanResult.Provider"/>.</param>
 	/// <param name="rulePrefix">The RdpAudit rule-name prefix used to attribute discovered rules.</param>
 	/// <param name="nowUtc">Reconciliation instant; expiry is computed against this.</param>
-	/// <summary>Default RdpAudit firewall group name. Kept in Core so the pure reconciler can attribute
-	/// group-owned rules without a Service dependency; the Service passes its own
-	/// <c>NetshCommandBuilder.RdpAuditGroup</c> (the same literal) explicitly.</summary>
-	public const string DefaultGroupName = "RdpAudit";
-
+	/// <param name="groupName">The RdpAudit firewall group name used to attribute group-owned rules.</param>
 	public static ReconciliationReport Reconcile(
 		IReadOnlyList<DesiredBlock> desired,
 		IReadOnlyList<BackendScanResult> scans,
