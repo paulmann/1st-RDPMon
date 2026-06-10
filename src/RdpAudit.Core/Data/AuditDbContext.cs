@@ -49,6 +49,8 @@ public sealed class AuditDbContext : DbContext
 
 	public DbSet<AuthAttemptFact> AuthAttemptFacts => Set<AuthAttemptFact>();
 
+	public DbSet<OperationLog> OperationLogs => Set<OperationLog>();
+
 	protected override void OnModelCreating(ModelBuilder modelBuilder)
 	{
 		base.OnModelCreating(modelBuilder);

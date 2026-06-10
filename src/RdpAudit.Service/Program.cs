@@ -17,6 +17,7 @@ using Microsoft.Extensions.Options;
 using RdpAudit.Core.AbuseIpDb;
 using RdpAudit.Core.Config;
 using RdpAudit.Core.Data;
+using RdpAudit.Core.Diagnostics;
 using RdpAudit.Core.Events;
 using RdpAudit.Core.Firewall;
 using RdpAudit.Core.MikroTik;
@@ -87,6 +88,14 @@ public static class Program
 		RegisterServices(builder.Services);
 
 		using IHost host = builder.Build();
+
+		// Install last-resort crash diagnostics before anything else can fault. From this point a
+		// fault anywhere in the process is recorded as a Critical OperationLog (DB permitting) and
+		// always to the Windows Event Log and a fallback file, instead of dying silently.
+		CrashGuard crashGuard = host.Services.GetRequiredService<CrashGuard>();
+		crashGuard.Install();
+		RdpAuditOptions effectiveOptions = host.Services.GetRequiredService<IOptions<RdpAuditOptions>>().Value;
+		crashGuard.LogStartupDiagnostics(effectiveOptions, configPath);
 
 		using (IServiceScope scope = host.Services.CreateScope())
 		{
@@ -170,6 +179,9 @@ public static class Program
 		});
 
 		services.AddSingleton<AuditDbInitializer>();
+		services.AddSingleton<IOperationLogWriter, DbOperationLogWriter>();
+		services.AddSingleton<OverviewProgressState>();
+		services.AddSingleton<CrashGuard>();
 		services.AddSingleton<BookmarkStore>();
 		services.AddSingleton<EventChannel>();
 		services.AddSingleton<ServiceMetrics>();
@@ -236,14 +248,16 @@ public static class Program
 			sp.GetRequiredService<ServiceMetrics>(),
 			sp.GetRequiredService<ILogger<EventCollectorWorker>>(),
 			sp.GetRequiredService<IOptionsMonitor<RdpAuditOptions>>(),
-			sp.GetRequiredService<IDbContextFactory<AuditDbContext>>()));
+			sp.GetRequiredService<IDbContextFactory<AuditDbContext>>(),
+			sp.GetRequiredService<IOperationLogWriter>()));
 		services.AddHostedService(sp => new SecurityBackfillWorker(
 			sp.GetRequiredService<EventChannel>(),
 			sp.GetRequiredService<ServiceMetrics>(),
 			sp.GetRequiredService<ILogger<SecurityBackfillWorker>>(),
 			sp.GetRequiredService<IOptionsMonitor<RdpAuditOptions>>(),
 			sp.GetRequiredService<BookmarkStore>(),
-			sp.GetRequiredService<IDbContextFactory<AuditDbContext>>()));
+			sp.GetRequiredService<IDbContextFactory<AuditDbContext>>(),
+			sp.GetRequiredService<OverviewProgressState>()));
 		services.AddHostedService<EventProcessorWorker>();
 		services.AddHostedService<SessionCorrelationHydrationWorker>();
 		services.AddHostedService<AlertWorker>();

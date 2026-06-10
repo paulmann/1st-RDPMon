@@ -24,6 +24,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RdpAudit.Core.Config;
 using RdpAudit.Core.Data;
+using RdpAudit.Core.Diagnostics;
 using RdpAudit.Core.Events;
 using RdpAudit.Service.Services;
 
@@ -87,6 +88,7 @@ public sealed class SecurityBackfillWorker : BackgroundService
 	private readonly IOptionsMonitor<RdpAuditOptions> _options;
 	private readonly BookmarkStore? _bookmarks;
 	private readonly IDbContextFactory<AuditDbContext>? _factory;
+	private readonly OverviewProgressState? _progress;
 	private readonly object _ringGate = new();
 	private readonly Queue<long> _seenOrder = new();
 	private readonly HashSet<long> _seen = new();
@@ -107,7 +109,8 @@ public sealed class SecurityBackfillWorker : BackgroundService
 		ILogger<SecurityBackfillWorker> logger,
 		IOptionsMonitor<RdpAuditOptions> options,
 		BookmarkStore? bookmarks,
-		IDbContextFactory<AuditDbContext>? factory)
+		IDbContextFactory<AuditDbContext>? factory,
+		OverviewProgressState? progress = null)
 	{
 		_channel = channel;
 		_metrics = metrics;
@@ -115,6 +118,7 @@ public sealed class SecurityBackfillWorker : BackgroundService
 		_options = options;
 		_bookmarks = bookmarks;
 		_factory = factory;
+		_progress = progress;
 	}
 
 	protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -156,8 +160,21 @@ public sealed class SecurityBackfillWorker : BackgroundService
 				try
 				{
 					bool latest = !_firstTickDone && needLatestBackfill;
+					if (latest)
+					{
+						// First wide pass on a fresh / upgraded host: surface it to the Overview tab so
+						// the Configurator shows a live progress bar instead of appearing to hang while
+						// the service works through the historical Security backlog.
+						_progress?.BeginPass("Backfilling Security", totalRows: 0, currentChannel: EventCatalog.ChannelSecurity);
+					}
+
 					await PollOnceAsync(stoppingToken, latest).ConfigureAwait(false);
 					_firstTickDone = true;
+
+					if (latest)
+					{
+						_progress?.Complete("Idle", "Initial Security backfill complete.");
+					}
 				}
 				catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
 				{
@@ -223,6 +240,19 @@ public sealed class SecurityBackfillWorker : BackgroundService
 			totalRead += r.Read;
 			totalForwarded += r.Forwarded;
 			totalDuplicate += r.Duplicate;
+
+			if (latestBackfill)
+			{
+				// Total is genuinely unknown without scanning the whole channel (the very scan we are
+				// avoiding), so percentage stays 0; the Overview tab renders an indeterminate bar plus
+				// the live processed-rows count and current event id as the stage detail.
+				_progress?.Report(
+					processedRows: totalForwarded,
+					stage: "Backfilling Security",
+					currentChannel: EventCatalog.ChannelSecurity,
+					message: string.Format(System.Globalization.CultureInfo.InvariantCulture,
+						"Processed event id {0} (forwarded {1} so far).", id, totalForwarded));
+			}
 
 			string statusToken;
 			string? lastExceptionType = null;

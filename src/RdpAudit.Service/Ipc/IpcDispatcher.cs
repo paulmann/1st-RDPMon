@@ -52,6 +52,8 @@ public sealed class IpcDispatcher
 	private readonly EnforcementReconciliationService? _reconciliation;
 	private readonly ToolsDiagnosticsService? _toolsDiagnostics;
 	private readonly ApplicationDataPurgeService? _dataPurge;
+	private readonly IOperationLogWriter? _opLog;
+	private readonly Core.Diagnostics.OverviewProgressState? _overviewProgress;
 
 	public IpcDispatcher(
 		IDbContextFactory<AuditDbContext> factory,
@@ -72,7 +74,9 @@ public sealed class IpcDispatcher
 		Firewall.IRdpPortProvider? rdpPortProvider = null,
 		EnforcementReconciliationService? reconciliation = null,
 		ToolsDiagnosticsService? toolsDiagnostics = null,
-		ApplicationDataPurgeService? dataPurge = null)
+		ApplicationDataPurgeService? dataPurge = null,
+		IOperationLogWriter? opLog = null,
+		Core.Diagnostics.OverviewProgressState? overviewProgress = null)
 	{
 		_factory = factory;
 		_metrics = metrics;
@@ -93,6 +97,28 @@ public sealed class IpcDispatcher
 		_reconciliation = reconciliation;
 		_toolsDiagnostics = toolsDiagnostics;
 		_dataPurge = dataPurge;
+		_opLog = opLog;
+		_overviewProgress = overviewProgress;
+	}
+
+	/// <summary>Best-effort durable operation-log record for an operator action taken through IPC.
+	/// Never throws and never blocks the action (the writer is itself best-effort).</summary>
+	private void LogOperation(OperationLogSeverity severity, string operation, string message, string? detailsJson = null)
+	{
+		if (_opLog is null)
+		{
+			return;
+		}
+
+		_ = _opLog.WriteAsync(new OperationLogEntry
+		{
+			Severity = severity,
+			Source = "Ipc",
+			Operation = operation,
+			Message = message,
+			DetailsJson = detailsJson,
+			Actor = "Configurator",
+		});
 	}
 
 	public async Task<IpcResponse> DispatchAsync(IpcRequest request, CancellationToken ct)
@@ -191,6 +217,10 @@ public sealed class IpcDispatcher
 				IpcCommand.ClearAllBlocklist => await ClearAllBlocklistAsync(ct).ConfigureAwait(false),
 				IpcCommand.ClearAllFirewallRules => await ClearAllFirewallRulesAsync(ct).ConfigureAwait(false),
 				IpcCommand.ClearAllApplicationData => await ClearAllApplicationDataAsync(request.Payload, ct).ConfigureAwait(false),
+
+				// --- v1.3.3: observability (Logs tab + Overview progress) ---
+				IpcCommand.QueryOperationLogs => await QueryOperationLogsAsync(request.Payload, ct).ConfigureAwait(false),
+				IpcCommand.GetOverviewProgress => GetOverviewProgressHandler(),
 
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
@@ -393,6 +423,10 @@ public sealed class IpcDispatcher
 			await ApplyFirewallChangeAsync(ip, blocked, ct).ConfigureAwait(false);
 		}
 
+		LogOperation(
+			OperationLogSeverity.Warning,
+			blocked ? "BlockAddress" : "UnblockAddress",
+			string.Format(CultureInfo.InvariantCulture, "{0} {1} via Configurator.", blocked ? "Blocked" : "Unblocked", ip));
 		return true;
 	}
 
@@ -444,6 +478,7 @@ public sealed class IpcDispatcher
 		try
 		{
 			_settings.Save(body);
+			LogOperation(OperationLogSeverity.Information, "SaveSettings", "Settings saved via Configurator.");
 			return new { saved = true };
 		}
 		catch (JsonException ex)
@@ -1440,6 +1475,7 @@ public sealed class IpcDispatcher
 			throw new IpcException("Enforcement reconciliation service is not available in this build.");
 		}
 
+		LogOperation(OperationLogSeverity.Warning, "ClearAllBlocklist", "Full blacklist cleanup requested via Configurator.");
 		return await _reconciliation.ClearAllBlocklistAsync(ct).ConfigureAwait(false);
 	}
 
@@ -1452,6 +1488,7 @@ public sealed class IpcDispatcher
 			throw new IpcException("Enforcement reconciliation service is not available in this build.");
 		}
 
+		LogOperation(OperationLogSeverity.Warning, "ClearAllFirewallRules", "DEBUG firewall-rules cleanup requested via Configurator.");
 		return await _reconciliation.ClearAllRdpAuditFirewallAsync(ct).ConfigureAwait(false);
 	}
 
@@ -1475,6 +1512,7 @@ public sealed class IpcDispatcher
 			};
 		}
 
+		LogOperation(OperationLogSeverity.Warning, "ClearAllApplicationData", "DEBUG application-data purge requested via Configurator.");
 		return await _dataPurge.PurgeAllAsync(ct).ConfigureAwait(false);
 	}
 
@@ -3124,6 +3162,137 @@ public sealed class IpcDispatcher
 			_logger.LogWarning(ex, "GetOverviewSummary lookup failed");
 			dto.Status = IpcResultStatus.Unavailable;
 			dto.Message = "Overview summary lookup failed — see service log.";
+		}
+
+		return dto;
+	}
+
+	/// <summary>Returns a light snapshot of the long-running historical-analysis job so the Overview
+	/// tab can show a progress bar. Never touches the database; always succeeds.</summary>
+	private OverviewProgressDto GetOverviewProgressHandler()
+	{
+		Core.Diagnostics.OverviewProgressSnapshot s = _overviewProgress?.Snapshot()
+			?? new Core.Diagnostics.OverviewProgressSnapshot { LastUpdatedUtc = DateTime.UtcNow };
+
+		return new OverviewProgressDto
+		{
+			Status = IpcResultStatus.Success,
+			IsRunning = s.IsRunning,
+			Stage = s.Stage,
+			ProcessedRows = s.ProcessedRows,
+			TotalRows = s.TotalRows,
+			Percent = s.Percent,
+			StartedUtc = s.StartedUtc,
+			LastUpdatedUtc = s.LastUpdatedUtc,
+			CurrentChannel = s.CurrentChannel,
+			LastEventUtc = s.LastEventUtc,
+			Errors = s.Errors,
+			Message = s.Message,
+		};
+	}
+
+	/// <summary>Bounded, filtered, paged query over the durable OperationLogs table for the Logs tab.
+	/// DepthDays and PageSize are clamped server-side; DEBUG-only detail fields are populated only when
+	/// DEBUG mode is enabled so a normal-mode client receives compact rows.</summary>
+	private async Task<object?> QueryOperationLogsAsync(string? payload, CancellationToken ct)
+	{
+		LogsOptions logs = _options.CurrentValue.Logs;
+		bool debug = _options.CurrentValue.Diagnostics.DebugMode;
+
+		OperationLogQueryRequest req = string.IsNullOrWhiteSpace(payload)
+			? new OperationLogQueryRequest()
+			: JsonSerializer.Deserialize<OperationLogQueryRequest>(payload, JsonOptions.Default) ?? new OperationLogQueryRequest();
+
+		int depthDays = req.DepthDays > 0 && LogsOptions.IsValidDepth(req.DepthDays)
+			? req.DepthDays
+			: logs.ResolveViewDepthDays();
+		int pageSize = logs.ResolvePageSize(req.PageSize);
+		int page = req.Page < 0 ? 0 : req.Page;
+
+		DateTime nowUtc = DateTime.UtcNow;
+		DateTime cutoff = nowUtc - TimeSpan.FromDays(depthDays);
+
+		OperationLogPageDto dto = new()
+		{
+			Status = IpcResultStatus.Success,
+			Page = page,
+			PageSize = pageSize,
+			DepthDays = depthDays,
+			DebugMode = debug,
+			QueriedUtc = nowUtc,
+		};
+
+		try
+		{
+			await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+
+			IQueryable<OperationLog> q = db.OperationLogs.AsNoTracking()
+				.Where(r => r.TimeUtc >= cutoff);
+
+			if (req.MinSeverity is { } minSev)
+			{
+				q = q.Where(r => r.Severity >= minSev);
+			}
+
+			if (!string.IsNullOrWhiteSpace(req.Source))
+			{
+				string src = req.Source.Trim();
+				q = q.Where(r => r.Source == src);
+			}
+
+			if (!string.IsNullOrWhiteSpace(req.SearchText))
+			{
+				string term = req.SearchText.Trim();
+				q = q.Where(r =>
+					EF.Functions.Like(r.Operation, "%" + term + "%")
+					|| EF.Functions.Like(r.Message, "%" + term + "%")
+					|| EF.Functions.Like(r.Source, "%" + term + "%"));
+			}
+
+			dto.TotalMatching = await q.LongCountAsync(ct).ConfigureAwait(false);
+
+			List<OperationLog> rows = await q
+				.OrderByDescending(r => r.TimeUtc)
+				.ThenByDescending(r => r.Id)
+				.Skip(page * pageSize)
+				.Take(pageSize)
+				.ToListAsync(ct)
+				.ConfigureAwait(false);
+
+			foreach (OperationLog r in rows)
+			{
+				dto.Items.Add(new OperationLogDto
+				{
+					Id = r.Id,
+					TimeUtc = r.TimeUtc,
+					Severity = r.Severity,
+					Source = r.Source,
+					Operation = r.Operation,
+					Message = r.Message,
+					DetailsJson = debug ? r.DetailsJson : null,
+					ExceptionType = r.ExceptionType,
+					ExceptionMessage = r.ExceptionMessage,
+					StackTrace = debug ? r.StackTrace : null,
+					CorrelationId = r.CorrelationId,
+					DurationMs = r.DurationMs,
+					IsDebug = r.IsDebug,
+					Actor = r.Actor,
+				});
+			}
+
+			dto.Message = string.Format(CultureInfo.InvariantCulture,
+				"matched={0} page={1} pageSize={2} depthDays={3} debug={4}",
+				dto.TotalMatching, page, pageSize, depthDays, debug);
+		}
+		catch (OperationCanceledException) when (ct.IsCancellationRequested)
+		{
+			throw;
+		}
+		catch (Exception ex)
+		{
+			_logger.LogWarning(ex, "QueryOperationLogs lookup failed");
+			dto.Status = IpcResultStatus.Unavailable;
+			dto.Message = "Operation-log query failed — see service log.";
 		}
 
 		return dto;

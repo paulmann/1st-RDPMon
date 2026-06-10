@@ -21,6 +21,7 @@ using Microsoft.Extensions.Options;
 using RdpAudit.Core.Config;
 using RdpAudit.Core.Data;
 using RdpAudit.Core.Events;
+using RdpAudit.Core.Models;
 using RdpAudit.Service.Collectors;
 
 namespace RdpAudit.Service.Workers;
@@ -42,6 +43,7 @@ public sealed class EventCollectorWorker : BackgroundService
 	private readonly IOptionsMonitor<RdpAuditOptions> _options;
 	private readonly ChannelHealthPolicy _health;
 	private readonly IDbContextFactory<AuditDbContext>? _factory;
+	private readonly IOperationLogWriter? _opLog;
 
 	private readonly ConcurrentDictionary<string, EventLogWatcher> _watchers = new(StringComparer.OrdinalIgnoreCase);
 	private readonly object _watcherLock = new();
@@ -62,8 +64,9 @@ public sealed class EventCollectorWorker : BackgroundService
 		ServiceMetrics metrics,
 		ILogger<EventCollectorWorker> logger,
 		IOptionsMonitor<RdpAuditOptions> options,
-		IDbContextFactory<AuditDbContext> factory)
-		: this(channel, bookmarks, metrics, logger, options, new ChannelHealthPolicy(), factory)
+		IDbContextFactory<AuditDbContext> factory,
+		IOperationLogWriter opLog)
+		: this(channel, bookmarks, metrics, logger, options, new ChannelHealthPolicy(), factory, opLog)
 	{
 	}
 
@@ -74,7 +77,8 @@ public sealed class EventCollectorWorker : BackgroundService
 		ILogger<EventCollectorWorker> logger,
 		IOptionsMonitor<RdpAuditOptions> options,
 		ChannelHealthPolicy health,
-		IDbContextFactory<AuditDbContext>? factory = null)
+		IDbContextFactory<AuditDbContext>? factory = null,
+		IOperationLogWriter? opLog = null)
 	{
 		_channel = channel;
 		_bookmarks = bookmarks;
@@ -83,6 +87,7 @@ public sealed class EventCollectorWorker : BackgroundService
 		_options = options;
 		_health = health;
 		_factory = factory;
+		_opLog = opLog;
 	}
 
 	protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -115,8 +120,25 @@ public sealed class EventCollectorWorker : BackgroundService
 		}
 		catch (Exception ex)
 		{
-			_logger.LogCritical(ex, "{Worker} unhandled — service will stop", nameof(EventCollectorWorker));
-			throw;
+			// Collector startup / watcher faults must not take the service down: the IPC server and the
+			// rest of the pipeline stay useful even when event collection is degraded. Record the fault
+			// Critical and idle until shutdown instead of rethrowing (the original `throw` here let a
+			// collector fault stop the whole host). The operator sees the fault in the Logs tab.
+			_logger.LogCritical(ex, "{Worker} faulted — collection degraded; service stays up", nameof(EventCollectorWorker));
+			if (_opLog is not null)
+			{
+				await _opLog.ErrorAsync("EventCollector", "WatcherFault",
+					"Event collector faulted; collection degraded but service stays up.", ex,
+					OperationLogSeverity.Critical, _stoppingToken).ConfigureAwait(false);
+			}
+
+			try
+			{
+				await Task.Delay(Timeout.InfiniteTimeSpan, _stoppingToken).ConfigureAwait(false);
+			}
+			catch (OperationCanceledException)
+			{
+			}
 		}
 		finally
 		{

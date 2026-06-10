@@ -91,7 +91,9 @@ public sealed class MaintenanceWorker : BackgroundService
 	/// Exposed for tests; production callers use <see cref="ExecuteAsync"/>.</summary>
 	internal async Task RunOnceAsync(CancellationToken ct)
 	{
-		StorageOptions storage = _options.CurrentValue.Storage;
+		RdpAuditOptions current = _options.CurrentValue;
+		StorageOptions storage = current.Storage;
+		LogsOptions logs = current.Logs;
 		int batch = Math.Max(1000, storage.MaintenanceBatchSize);
 
 		// Resolve retention cutoffs with safe minima — operators can lower these intentionally,
@@ -146,6 +148,15 @@ public sealed class MaintenanceWorker : BackgroundService
 			batch,
 			ct).ConfigureAwait(false);
 
+		// v1.3.3: operation-log retention. Rows older than the configured (clamped) retention depth
+		// are deleted in bounded batches so the operator-facing audit trail stays responsive on the
+		// Logs tab and the table never grows without bound on a long-lived host.
+		DateTime operationLogCutoff = utcNow.AddDays(-logs.ResolveRetentionDays());
+		int operationLogsDeleted = await PruneBatchedAsync(
+			db => db.OperationLogs.Where(o => o.TimeUtc < operationLogCutoff),
+			batch,
+			ct).ConfigureAwait(false);
+
 		await using (AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false))
 		{
 			// Bounded incremental_vacuum: at most 5000 free pages per pass to avoid
@@ -164,14 +175,15 @@ public sealed class MaintenanceWorker : BackgroundService
 		}
 
 		_logger.LogInformation(
-			"Maintenance complete: events={Events} alerts={Alerts} abuseReports={Abuse} activeBlocks={Blocks} attackStats={Stats} correlations={Correlations} connectionFacts={ConnectionFacts}",
+			"Maintenance complete: events={Events} alerts={Alerts} abuseReports={Abuse} activeBlocks={Blocks} attackStats={Stats} correlations={Correlations} connectionFacts={ConnectionFacts} operationLogs={OperationLogs}",
 			eventsDeleted,
 			alertsDeleted,
 			abuseReportsDeleted,
 			activeBlocksDeleted,
 			attackStatsDeleted,
 			correlationsDeleted,
-			connectionFactsDeleted);
+			connectionFactsDeleted,
+			operationLogsDeleted);
 
 		// Stage A: capture a daily DB-size snapshot so the Overview tab can report growth windows
 		// without hot polling. Snapshots older than 45 days are pruned so the DbProps table never

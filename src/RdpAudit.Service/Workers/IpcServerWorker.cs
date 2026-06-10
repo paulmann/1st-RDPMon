@@ -47,38 +47,75 @@ public sealed class IpcServerWorker : BackgroundService
 			List<Task> connectionTasks = new();
 			while (!stoppingToken.IsCancellationRequested)
 			{
-				NamedPipeServerStream pipe = CreatePipe();
 				try
 				{
-					await pipe.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
+					NamedPipeServerStream pipe = CreatePipe();
+					try
+					{
+						await pipe.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
+					}
+					catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+					{
+						await pipe.DisposeAsync().ConfigureAwait(false);
+						break;
+					}
+
+					Task task = HandleConnectionAsync(pipe, stoppingToken);
+					connectionTasks.Add(task);
+					connectionTasks.RemoveAll(t => t.IsCompleted);
+					if (connectionTasks.Count > MaxConcurrent)
+					{
+						_logger.LogWarning("IPC concurrent connection cap exceeded ({Count}); rejecting new ones briefly", connectionTasks.Count);
+						await Task.Delay(50, stoppingToken).ConfigureAwait(false);
+					}
 				}
 				catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
 				{
-					await pipe.DisposeAsync().ConfigureAwait(false);
 					break;
 				}
-
-				Task task = HandleConnectionAsync(pipe, stoppingToken);
-				connectionTasks.Add(task);
-				connectionTasks.RemoveAll(t => t.IsCompleted);
-				if (connectionTasks.Count > MaxConcurrent)
+				catch (Exception ex)
 				{
-					_logger.LogWarning("IPC concurrent connection cap exceeded ({Count}); rejecting new ones briefly", connectionTasks.Count);
-					await Task.Delay(50, stoppingToken).ConfigureAwait(false);
+					// A fault accepting one connection (pipe creation, ACL, transient OS error) must not
+					// take the whole service down — the IPC accept loop is the operator's lifeline to the
+					// service. Record it Critical and keep listening after a short backoff. (The original
+					// `throw` here was a crash root cause.)
+					_logger.LogCritical(ex, "{Worker} accept-loop fault — continuing", nameof(IpcServerWorker));
+					await TryLogOperationCriticalAsync(ex, stoppingToken).ConfigureAwait(false);
+					try
+					{
+						await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken).ConfigureAwait(false);
+					}
+					catch (OperationCanceledException)
+					{
+						break;
+					}
 				}
 			}
 		}
 		catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
 		{
 		}
-		catch (Exception ex)
-		{
-			_logger.LogCritical(ex, "{Worker} unhandled — service will stop", nameof(IpcServerWorker));
-			throw;
-		}
 		finally
 		{
 			_logger.LogInformation("{Worker} stopped", nameof(IpcServerWorker));
+		}
+	}
+
+	/// <summary>Best-effort durable Critical record for an accept-loop fault. Resolves the writer from
+	/// the root provider and never throws (the IPC loop must stay alive).</summary>
+	private async Task TryLogOperationCriticalAsync(Exception ex, CancellationToken ct)
+	{
+		try
+		{
+			RdpAudit.Core.Data.IOperationLogWriter opLog =
+				_services.GetRequiredService<RdpAudit.Core.Data.IOperationLogWriter>();
+			await opLog.ErrorAsync("Ipc", "AcceptLoopFault",
+				"IPC accept-loop fault; server continuing.", ex,
+				RdpAudit.Core.Models.OperationLogSeverity.Critical, ct).ConfigureAwait(false);
+		}
+		catch
+		{
+			// ignored — logger already captured it; the operation log is best-effort
 		}
 	}
 

@@ -336,20 +336,22 @@ public sealed class FirewallPage : TabPage
 		Button blocklistClearAll = MakeButton("Clear all blacklist", async (_, _) => await OnClearAllBlocklistAsync().ConfigureAwait(true));
 		_debugClearFirewallButton = MakeButton("DEBUG: Clear RdpAudit firewall rules", async (_, _) => await OnDebugClearFirewallAsync().ConfigureAwait(true));
 		_debugClearDataButton = MakeButton("DEBUG: Clear all application data", async (_, _) => await OnDebugClearApplicationDataAsync().ConfigureAwait(true));
-		_debugClearFirewallButton.Visible = false;
-		_debugClearDataButton.Visible = false;
+
+		// Discoverability: the destructive DEBUG buttons are always VISIBLE so operators can see they
+		// exist, but stay DISABLED until global DEBUG mode is enabled in Settings. The placeholder label
+		// explains how to unlock them. The gate is the persisted Diagnostics.DebugMode setting (synced in
+		// ReloadPolicyAsync) — not a transient local checkbox — so the same global toggle governs every
+		// destructive maintenance action across tabs.
+		_debugClearFirewallButton.Enabled = false;
+		_debugClearDataButton.Enabled = false;
 		_debugCheck = new CheckBox
 		{
-			Text = "DEBUG",
+			Text = "DEBUG (set in Settings)",
 			AutoSize = true,
 			Checked = false,
+			Enabled = false,
 			Anchor = AnchorStyles.Left,
 			Margin = new Padding(8, 8, 4, 4),
-		};
-		_debugCheck.CheckedChanged += (_, _) =>
-		{
-			_debugClearFirewallButton.Visible = _debugCheck.Checked;
-			_debugClearDataButton.Visible = _debugCheck.Checked;
 		};
 		_innerTabs.TabPages.Add(BuildGridTab("Blocklist", _blocklistGrid, _blocklistFilter, _blocklistInput, blocklistAdd, blocklistRemove, blocklistRepair, blocklistRepairAll, blocklistDedupe, blocklistClearAll, _debugCheck, _debugClearFirewallButton, _debugClearDataButton));
 
@@ -817,12 +819,27 @@ public sealed class FirewallPage : TabPage
 			_refusePrivateAddressCheck.Checked = cfg.RefusePrivateAddressBlock;
 			_thresholdInput.Value = ClampToRange(cfg.AutoBlockThreshold, (int)_thresholdInput.Minimum, (int)_thresholdInput.Maximum);
 			SetDurationFromMinutes(cfg.DefaultBlockDurationMinutes);
+			ApplyGlobalDebugGate(opts.Diagnostics.DebugMode);
 			SetStatus("Policy reloaded from service.");
 		}
 		catch (Exception ex)
 		{
 			SetStatus("Policy reload FAILED: " + ex.GetType().Name + " — " + ex.Message);
 		}
+	}
+
+	/// <summary>Reflects the persisted global <c>Diagnostics.DebugMode</c> setting onto the Firewall
+	/// tab: the destructive DEBUG-gated buttons (and the detail-log behaviour keyed off
+	/// <see cref="_debugCheck"/>) are enabled only when global DEBUG mode is on. The buttons stay
+	/// visible regardless so they are discoverable; only their enabled state tracks the gate.</summary>
+	private void ApplyGlobalDebugGate(bool debugMode)
+	{
+		_debugCheck.Checked = debugMode;
+		_debugClearFirewallButton.Enabled = debugMode;
+		_debugClearDataButton.Enabled = debugMode;
+		_debugCheck.Text = debugMode
+			? "DEBUG MODE ENABLED (Settings)"
+			: "DEBUG off — enable in Settings to unlock the buttons below";
 	}
 
 	private async Task SavePolicyAsync()
