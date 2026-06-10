@@ -42,7 +42,22 @@ public sealed record DiscoveredBlockRule(
 	bool ActionBlock,
 	string? Protocol,
 	IReadOnlyList<int> LocalPorts,
-	IReadOnlyList<string> RemoteIps);
+	IReadOnlyList<string> RemoteIps)
+{
+	/// <summary>The rule's DisplayName when the backend can read it back (PowerShell JSON scan). On the
+	/// affected host a blocked IP can surface as a GUID-named rule whose Name is a "{GUID}" but whose
+	/// DisplayName is the canonical "RdpAudit-Block-&lt;ip&gt;" — carrying DisplayName lets
+	/// <see cref="RdpAuditFirewallRuleMatcher"/> attribute that rule to RdpAudit even though its Name
+	/// carries no prefix and its Group is empty. Null when the backend (netsh text parse) cannot read
+	/// it separately from Name.</summary>
+	public string? DisplayName { get; init; }
+
+	/// <summary>The rule's Group (e.g. "RdpAudit") when the backend can read it back. Null when unknown.</summary>
+	public string? Group { get; init; }
+
+	/// <summary>The rule's DisplayGroup when the backend can read it back. Null when unknown.</summary>
+	public string? DisplayGroup { get; init; }
+}
 
 /// <summary>Why a rule that mentions the requested port was nonetheless rejected by the scanner.</summary>
 public sealed record NetshRulePortMatchExplanation(

@@ -207,6 +207,67 @@ public sealed class DiagnosticsSnapshotDto
 	/// <summary>Most recent durable OperationLog entries (program actions), newest first. Bounded.
 	/// Surfaced so the Diagnostic tab can show recent activity even when other probes fail.</summary>
 	public List<DiagnosticsOperationLogLine> RecentOperationLog { get; set; } = new();
+
+	// --- v1.3.9: section-based, bounded snapshot assembly. ---
+
+	/// <summary>Per-section timing / outcome so the operator can see which section was slow, timed out,
+	/// or failed — and so a slow firewall / DB scan never silently blocks the basics. Each entry carries
+	/// the section name, elapsed milliseconds, a Completed / TimedOut / Failed status and an optional
+	/// error. The snapshot is returned with whatever sections completed (partial results) rather than
+	/// failing wholesale when one section is slow.</summary>
+	public List<DiagnosticsSectionTiming> SectionTimings { get; set; } = new();
+
+	/// <summary>True when at least one section timed out or failed and the snapshot is therefore partial.
+	/// The completed sections are still populated and trustworthy.</summary>
+	public bool IsPartial { get; set; }
+
+	// --- v1.3.9: schema-aware DB diagnostics (Problem 6). ---
+
+	/// <summary>Observed columns of the key tables, read via PRAGMA table_info, so the snapshot reports
+	/// the REAL schema instead of assuming columns (e.g. it must never assume AttackStats.TimeUtc or
+	/// AuthAttemptFacts.UserName exist). Keyed by table name.</summary>
+	public List<DiagnosticsTableSchema> TableSchemas { get; set; } = new();
+
+	/// <summary>Newest RawEvents.TimeUtc, read defensively (null when the table is empty or the column
+	/// is absent). Duplicates <see cref="LatestRawEventUtc"/> via the schema-aware path for triage.</summary>
+	public DateTime? SchemaAwareLatestRawEventUtc { get; set; }
+
+	/// <summary>Newest AuthAttemptFacts.TimeUtc, read defensively.</summary>
+	public DateTime? SchemaAwareLatestAuthAttemptFactUtc { get; set; }
+
+	/// <summary>Newest AttackStats.LastSeenUtc, read defensively — NEVER AttackStats.TimeUtc, which does
+	/// not exist on this schema. The RDP Activity week filter uses LastSeenUtc, so this is the watermark
+	/// the operator must compare against.</summary>
+	public DateTime? SchemaAwareLatestAttackStatLastSeenUtc { get; set; }
+}
+
+/// <summary>v1.3.9 — one section's timing / outcome in the bounded diagnostics assembly.</summary>
+public sealed class DiagnosticsSectionTiming
+{
+	public string Section { get; set; } = string.Empty;
+
+	public long DurationMs { get; set; }
+
+	/// <summary>Completed / TimedOut / Failed.</summary>
+	public string Status { get; set; } = string.Empty;
+
+	public string? Error { get; set; }
+}
+
+/// <summary>v1.3.9 — observed schema of one DB table (columns + index names), read via PRAGMA so the
+/// snapshot reflects the real schema rather than assuming columns exist.</summary>
+public sealed class DiagnosticsTableSchema
+{
+	public string Table { get; set; } = string.Empty;
+
+	/// <summary>True when the table exists at all.</summary>
+	public bool Exists { get; set; }
+
+	/// <summary>Column names in declared order (from PRAGMA table_info).</summary>
+	public List<string> Columns { get; set; } = new();
+
+	/// <summary>Index names (from PRAGMA index_list).</summary>
+	public List<string> Indexes { get; set; } = new();
 }
 
 /// <summary>v1.3.4 — one compact recent OperationLog line for the Diagnostic snapshot tail.</summary>

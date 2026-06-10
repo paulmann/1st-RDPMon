@@ -286,8 +286,16 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 						Note: "Targeted verification scan threw: " + ex.GetType().Name, Backend: FirewallScanBackend.None);
 				}
 
-				bool targetedFound = scan.Rules.Any(r =>
-					string.Equals(r.RuleName, ruleName, StringComparison.OrdinalIgnoreCase));
+				// v1.3.9: verify ownership for the IP through the shared matcher rather than an exact
+				// Name == canonical compare. Windows can persist the rule under a GUID Name whose
+				// DisplayName is the canonical "RdpAudit-Block-<ip>" (empty Group); the old exact-name
+				// check then failed even though the rule exists — the "create PASS / verify FAIL" symptom.
+				FirewallRuleMatchResult verifyMatch = RdpAuditFirewallRuleMatcher.MatchDiscovered(
+					scan.Rules,
+					canonicalIp,
+					NetshCommandBuilder.NormalizeRulePrefix(request.RuleName),
+					NetshCommandBuilder.RdpAuditGroup);
+				bool targetedFound = verifyMatch.VerifiedEnforced;
 
 				if (!targetedFound)
 				{
@@ -332,11 +340,16 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 					BackendAttempt = addAttempt,
 					VerifierReason = string.Format(
 						CultureInfo.InvariantCulture,
-						"targeted verify by name '{0}': found; broad group scan: {1} rule(s) via {2}.",
-						ruleName,
+						"matcher verify for {0}: {1} matching rule(s) (canonicalPresent={2}, duplicates={3}); broad group scan: {4} rule(s) via {5}.",
+						canonicalIp,
+						verifyMatch.Matches.Count,
+						verifyMatch.HasCanonicalRule,
+						verifyMatch.HasDuplicates,
 						scan.Rules.Count,
 						scan.Backend),
-					Message = "Block rule installed and verified.",
+					Message = verifyMatch.HasDuplicates
+						? "Block rule installed and verified; duplicate rule(s) for this IP detected — canonicalization recommended."
+						: "Block rule installed and verified.",
 				};
 			}
 

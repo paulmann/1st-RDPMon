@@ -32,10 +32,16 @@ public class ToolsDiagnosticsServiceTests
 
 		Assert.Equal(IpcResultStatus.Success, dto.Status);
 		Assert.True(dto.CreatedVerifiedAndCleanedUp);
-		Assert.Equal(3, dto.Steps.Count);
+		// v1.3.9 — four explicit stages: create, targeted verify-present, cleanup, cleanup-verify-removed.
+		Assert.Equal(4, dto.Steps.Count);
 		Assert.True(dto.Steps[0].Passed); // create
-		Assert.True(dto.Steps[1].Passed); // verify
+		Assert.True(dto.Steps[1].Passed); // verify present
 		Assert.True(dto.Steps[2].Passed); // cleanup
+		Assert.True(dto.Steps[3].Passed); // cleanup verify (rule removed)
+		Assert.Equal("create temporary block rule", dto.Steps[0].ToolName);
+		Assert.Equal("verify temporary block rule present", dto.Steps[1].ToolName);
+		Assert.Equal("clean up temporary block rule", dto.Steps[2].ToolName);
+		Assert.Equal("verify temporary block rule removed", dto.Steps[3].ToolName);
 		Assert.Equal("NetshText", dto.ScannerBackend);
 		Assert.Contains("203.0.113.10", dto.RuleName, StringComparison.Ordinal);
 		Assert.Contains("203.0.113.10", dto.ReportText, StringComparison.Ordinal);
@@ -103,6 +109,60 @@ public class ToolsDiagnosticsServiceTests
 		Assert.Equal("verify temporary block rule present", verifyStep.ToolName);
 		Assert.False(verifyStep.Passed);
 		Assert.True(provider.UnblockCalled);
+	}
+
+	[Fact]
+	public async Task TemporaryProbe_CleanupLeavesRuleBehind_CleanupVerifyFails()
+	{
+		// ListResult is forced non-empty for EVERY list call, so the rule appears present both at
+		// verify-present (passes) and after cleanup at verify-removed (fails — a stray rule lingers).
+		FakeFirewallProvider provider = new()
+		{
+			ListResult = new[]
+			{
+				new FirewallBlockEntry
+				{
+					RuleId = NetshCommandBuilder.BuildRuleName("RdpAudit-ToolsDiag-TempProbe", "203.0.113.10"),
+					Ip = "203.0.113.10",
+					ProviderId = "Windows",
+				},
+			},
+		};
+		ToolsDiagnosticsService service = Build(provider);
+
+		TemporaryFirewallProbeDto dto = await service.ExecuteTemporaryProbeAsync(
+			"203.0.113.10", DateTime.UtcNow, CancellationToken.None);
+
+		Assert.Equal(4, dto.Steps.Count);
+		ToolProbeResultDto cleanupVerify = dto.Steps[3];
+		Assert.Equal("verify temporary block rule removed", cleanupVerify.ToolName);
+		Assert.False(cleanupVerify.Passed);
+		Assert.Contains("STILL PRESENT", cleanupVerify.StdoutPreview, StringComparison.Ordinal);
+		// Overall verdict must be false because the cleanup-verify stage did not confirm removal.
+		Assert.False(dto.CreatedVerifiedAndCleanedUp);
+	}
+
+	[Fact]
+	public async Task TemporaryProbe_VerificationTimesOut_IsInconclusiveNotProofOfAbsence()
+	{
+		// The list query throws a timeout during verification. This must produce a non-fatal,
+		// TimedOut-aware step ("inconclusive") rather than being treated as proof the rule is absent.
+		FakeFirewallProvider provider = new()
+		{
+			ListThrows = new TimeoutException("provider scan exceeded the budget"),
+		};
+		ToolsDiagnosticsService service = Build(provider);
+
+		TemporaryFirewallProbeDto dto = await service.ExecuteTemporaryProbeAsync(
+			"203.0.113.10", DateTime.UtcNow, CancellationToken.None);
+
+		ToolProbeResultDto verifyStep = dto.Steps[1];
+		Assert.Equal("verify temporary block rule present", verifyStep.ToolName);
+		Assert.False(verifyStep.Passed);
+		Assert.True(verifyStep.TimedOut);
+		Assert.NotNull(verifyStep.Note);
+		Assert.Contains("inconclusive", verifyStep.Note!, StringComparison.OrdinalIgnoreCase);
+		Assert.False(dto.CreatedVerifiedAndCleanedUp);
 	}
 
 	[Fact]
@@ -182,7 +242,16 @@ public class ToolsDiagnosticsServiceTests
 			VerifierReason = "Enabled inbound block rule confirmed in the firewall store.",
 		};
 
+		/// <summary>When set, every <see cref="ListBlocksAsync"/> call returns this fixed result (used to
+		/// force "verification finds nothing" or "rule still present after cleanup" scenarios). When null,
+		/// the fake models a real provider: the temporary rule is reported present until
+		/// <see cref="UnblockAsync"/> runs, then absent — so the create→verify→cleanup→cleanup-verify
+		/// happy path resolves correctly.</summary>
 		public IReadOnlyList<FirewallBlockEntry>? ListResult { get; set; }
+
+		/// <summary>When set, <see cref="ListBlocksAsync"/> throws this exception, simulating a provider /
+		/// scan timeout or transient failure during (cleanup-)verification.</summary>
+		public Exception? ListThrows { get; set; }
 
 		public string ProviderId => "Windows";
 
@@ -212,15 +281,28 @@ public class ToolsDiagnosticsServiceTests
 
 		public Task<IReadOnlyList<FirewallBlockEntry>> ListBlocksAsync(string ruleName, CancellationToken ct)
 		{
-			IReadOnlyList<FirewallBlockEntry> result = ListResult ?? new[]
+			if (ListThrows is { } ex)
 			{
-				new FirewallBlockEntry
+				throw ex;
+			}
+
+			if (ListResult is { } forced)
+			{
+				return Task.FromResult(forced);
+			}
+
+			// Model a real store: the temporary rule is present until cleanup runs, then gone.
+			IReadOnlyList<FirewallBlockEntry> result = UnblockCalled
+				? Array.Empty<FirewallBlockEntry>()
+				: new[]
 				{
-					RuleId = NetshCommandBuilder.BuildRuleName(ruleName, "203.0.113.10"),
-					Ip = "203.0.113.10",
-					ProviderId = ProviderId,
-				},
-			};
+					new FirewallBlockEntry
+					{
+						RuleId = NetshCommandBuilder.BuildRuleName(ruleName, "203.0.113.10"),
+						Ip = "203.0.113.10",
+						ProviderId = ProviderId,
+					},
+				};
 			return Task.FromResult(result);
 		}
 	}

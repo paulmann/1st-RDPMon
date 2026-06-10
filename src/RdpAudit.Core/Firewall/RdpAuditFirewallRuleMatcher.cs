@@ -179,6 +179,44 @@ public static class RdpAuditFirewallRuleMatcher
 		return new FirewallRuleMatchResult(trimmedIp, canonicalName, matches);
 	}
 
+	/// <summary>Projects a live <see cref="DiscoveredBlockRule"/> (the heavier shape the scanners
+	/// produce) into the lightweight <see cref="RawFirewallRule"/> this matcher consumes. The scanners
+	/// fold a GUID-named rule's DisplayName / Group into the discovered rule (v1.3.9) so the matcher can
+	/// attribute it; when the backend could not read DisplayName separately from Name (netsh text
+	/// parse) the rule's <see cref="DiscoveredBlockRule.RuleName"/> stands in for both.</summary>
+	public static RawFirewallRule ToRawRule(DiscoveredBlockRule rule)
+	{
+		ArgumentNullException.ThrowIfNull(rule);
+		return new RawFirewallRule(
+			Name: rule.RuleName,
+			DisplayName: rule.DisplayName ?? rule.RuleName,
+			Group: rule.Group,
+			DisplayGroup: rule.DisplayGroup,
+			Enabled: rule.Enabled,
+			RemoteIps: rule.RemoteIps);
+	}
+
+	/// <summary>Matches the live <paramref name="rules"/> (discovered by a scanner) against the desired
+	/// blocked <paramref name="ip"/> using the same identity logic as
+	/// <see cref="Match(IReadOnlyList{RawFirewallRule}, string, string, string)"/>. Convenience overload
+	/// so the Service reconciler can feed its <see cref="DiscoveredBlockRule"/> list without converting
+	/// at the call site.</summary>
+	public static FirewallRuleMatchResult MatchDiscovered(
+		IReadOnlyList<DiscoveredBlockRule> rules,
+		string ip,
+		string rulePrefix,
+		string groupName)
+	{
+		ArgumentNullException.ThrowIfNull(rules);
+		List<RawFirewallRule> raw = new(rules.Count);
+		foreach (DiscoveredBlockRule rule in rules)
+		{
+			raw.Add(ToRawRule(rule));
+		}
+
+		return Match(raw, ip, rulePrefix, groupName);
+	}
+
 	private static RdpAuditRuleIdentity Classify(
 		RawFirewallRule rule,
 		string ip,

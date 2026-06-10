@@ -97,22 +97,30 @@ public static class PowerShellFirewallRuleParser
 			return;
 		}
 
-		string? name = ReadString(element, "Name") ?? ReadString(element, "DisplayName");
+		string? name = ReadString(element, "Name");
+		string? displayName = ReadString(element, "DisplayName");
 		string? group = ReadString(element, "Group");
 		string? displayGroup = ReadString(element, "DisplayGroup");
 
+		// Ownership is recognised on ANY of the three RdpAudit identity forms (see
+		// RdpAuditFirewallRuleMatcher): canonical Name prefix, canonical DisplayName prefix (the
+		// GUID-named rule whose Name is a "{GUID}" but whose DisplayName is "RdpAudit-Block-<ip>"), or
+		// Group/DisplayGroup == RdpAudit. The earlier parser keyed only on Name-prefix OR Group, so the
+		// GUID-named rule (Name a GUID, Group empty) was dropped here before the matcher could see it.
 		bool nameMatch = name is not null
 			&& name.StartsWith(ruleNamePrefix, StringComparison.OrdinalIgnoreCase);
+		bool displayNameMatch = displayName is not null
+			&& displayName.StartsWith(ruleNamePrefix, StringComparison.OrdinalIgnoreCase);
 		bool groupMatch =
 			(group is not null && string.Equals(group, groupName, StringComparison.OrdinalIgnoreCase))
 			|| (displayGroup is not null && string.Equals(displayGroup, groupName, StringComparison.OrdinalIgnoreCase));
 
-		if (!nameMatch && !groupMatch)
+		if (!nameMatch && !displayNameMatch && !groupMatch)
 		{
 			return;
 		}
 
-		string ruleName = name ?? group ?? displayGroup ?? ruleNamePrefix;
+		string ruleName = name ?? displayName ?? group ?? displayGroup ?? ruleNamePrefix;
 		discovered.Add(new DiscoveredBlockRule(
 			RuleName: ruleName,
 			Enabled: ReadEnabled(element),
@@ -120,7 +128,12 @@ public static class PowerShellFirewallRuleParser
 			ActionBlock: ReadActionBlock(element),
 			Protocol: ReadString(element, "Protocol"),
 			LocalPorts: ReadPorts(element),
-			RemoteIps: ReadRemoteIps(element)));
+			RemoteIps: ReadRemoteIps(element))
+		{
+			DisplayName = displayName,
+			Group = group,
+			DisplayGroup = displayGroup,
+		});
 	}
 
 	private static string? ReadString(JsonElement obj, string property)
