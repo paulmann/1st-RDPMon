@@ -23,8 +23,18 @@ public sealed class IpcServerWorker : BackgroundService
 {
 	private const int MaxConcurrent = 10;
 
+	/// <summary>Minimum gap between durable Critical operation-log records for an identical accept-loop
+	/// fault signature. A genuinely broken accept loop (e.g. ACL failure) re-faults every iteration; without
+	/// this gate it would flood the OperationLog table with thousands of identical Critical rows per minute.
+	/// The structured logger still records every occurrence at the classified level.</summary>
+	private static readonly TimeSpan FaultLogDedupeWindow = TimeSpan.FromMinutes(1);
+
 	private readonly IServiceProvider _services;
 	private readonly ILogger<IpcServerWorker> _logger;
+
+	// Dedupe state for repeated accept-loop faults (single accept loop → no cross-thread contention).
+	private string? _lastFaultSignature;
+	private DateTime _lastFaultDurableLogUtc = DateTime.MinValue;
 
 	public IpcServerWorker(IServiceProvider services, ILogger<IpcServerWorker> logger)
 	{
@@ -77,10 +87,21 @@ public sealed class IpcServerWorker : BackgroundService
 				{
 					// A fault accepting one connection (pipe creation, ACL, transient OS error) must not
 					// take the whole service down — the IPC accept loop is the operator's lifeline to the
-					// service. Record it Critical and keep listening after a short backoff. (The original
-					// `throw` here was a crash root cause.)
-					_logger.LogCritical(ex, "{Worker} accept-loop fault — continuing", nameof(IpcServerWorker));
-					await TryLogOperationCriticalAsync(ex, stoppingToken).ConfigureAwait(false);
+					// service. (The original `throw` here was a crash root cause.) Classify before logging:
+					// an expected disconnect / cancellation / disposed-pipe is the routine end of a client
+					// session, NOT a service fault, so logging it Critical (and durably) was the source of
+					// the OperationLog "AcceptLoopFault" Critical spam. Only a genuine, unexpected fault is
+					// recorded Critical and durably (rate-limited), so the operator's signal is not buried.
+					if (IsExpectedAcceptDisconnect(ex))
+					{
+						_logger.LogDebug(ex, "{Worker} accept-loop saw an expected client disconnect — continuing", nameof(IpcServerWorker));
+					}
+					else
+					{
+						_logger.LogError(ex, "{Worker} accept-loop fault — continuing", nameof(IpcServerWorker));
+						await TryLogOperationFaultAsync(ex, stoppingToken).ConfigureAwait(false);
+					}
+
 					try
 					{
 						await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken).ConfigureAwait(false);
@@ -101,10 +122,39 @@ public sealed class IpcServerWorker : BackgroundService
 		}
 	}
 
-	/// <summary>Best-effort durable Critical record for an accept-loop fault. Resolves the writer from
-	/// the root provider and never throws (the IPC loop must stay alive).</summary>
-	private async Task TryLogOperationCriticalAsync(Exception ex, CancellationToken ct)
+	/// <summary>True when an accept-loop exception represents the routine end of a client session rather
+	/// than a service fault: a client that closed the pipe, a cancellation, or a disposed/broken pipe.
+	/// These are logged at Debug and never written durably, so they do not masquerade as Critical faults
+	/// in the OperationLog. Anything else is treated as a genuine fault worth surfacing.</summary>
+	internal static bool IsExpectedAcceptDisconnect(Exception ex) => ex switch
 	{
+		OperationCanceledException => true,
+		ObjectDisposedException => true,
+		// Broken-pipe / connection-reset surfaces as IOException; on Windows a client closing the handle
+		// also surfaces as an Win32-backed IOException. Both are the expected close of a client session.
+		IOException => true,
+		_ => false,
+	};
+
+	/// <summary>Best-effort durable record for a genuine accept-loop fault. Rate-limits identical fault
+	/// signatures (type + message) to one durable Critical row per <see cref="FaultLogDedupeWindow"/> so a
+	/// loop that re-faults every iteration cannot flood the OperationLog. Resolves the writer from the root
+	/// provider and never throws (the IPC loop must stay alive).</summary>
+	private async Task TryLogOperationFaultAsync(Exception ex, CancellationToken ct)
+	{
+		string signature = ex.GetType().FullName + "|" + ex.Message;
+		DateTime now = DateTime.UtcNow;
+		bool sameAsLast = string.Equals(signature, _lastFaultSignature, StringComparison.Ordinal);
+		if (sameAsLast && (now - _lastFaultDurableLogUtc) < FaultLogDedupeWindow)
+		{
+			// Suppress the durable write for a repeated identical fault inside the dedupe window; the
+			// structured logger already recorded this occurrence at Error level above.
+			return;
+		}
+
+		_lastFaultSignature = signature;
+		_lastFaultDurableLogUtc = now;
+
 		try
 		{
 			RdpAudit.Core.Data.IOperationLogWriter opLog =

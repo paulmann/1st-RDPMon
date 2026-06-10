@@ -30,6 +30,8 @@ public sealed class LogsPage : TabPage
 	private readonly TextBox _searchFilter;
 	private readonly NumericUpDown _depthDays;
 	private readonly NumericUpDown _pageSize;
+	private readonly CheckBox _showNoise;
+	private readonly CheckBox _expandDuplicates;
 	private readonly Button _refresh;
 	private readonly Button _prev;
 	private readonly Button _next;
@@ -73,6 +75,27 @@ public sealed class LogsPage : TabPage
 		_depthDays = new NumericUpDown { Minimum = 1, Maximum = 3650, Value = 60, Width = 70 };
 		_pageSize = new NumericUpDown { Minimum = 1, Maximum = 1000, Value = 500, Width = 80 };
 
+		// Default view hides Debug-classified rows and the high-volume IPC accept-loop / connection
+		// chatter, and collapses consecutive identical rows. The two checkboxes let an operator opt back
+		// into the full, ungrouped stream when investigating.
+		_showNoise = new CheckBox
+		{
+			Text = "Show IPC/debug noise",
+			AutoSize = true,
+			Checked = false,
+			Padding = new Padding(6, 8, 0, 0),
+		};
+		_showNoise.CheckedChanged += async (_, _) => await ReloadAsync(resetPage: true).ConfigureAwait(true);
+
+		_expandDuplicates = new CheckBox
+		{
+			Text = "Expand duplicates",
+			AutoSize = true,
+			Checked = false,
+			Padding = new Padding(6, 8, 0, 0),
+		};
+		_expandDuplicates.CheckedChanged += async (_, _) => await ReloadAsync(resetPage: true).ConfigureAwait(true);
+
 		_refresh = new Button { Text = "Refresh", Width = 90 };
 		_refresh.Click += async (_, _) => await ReloadAsync(resetPage: true).ConfigureAwait(true);
 
@@ -84,6 +107,8 @@ public sealed class LogsPage : TabPage
 		filters.Controls.Add(_depthDays);
 		filters.Controls.Add(new Label { Text = "Page size:", AutoSize = true, Padding = new Padding(6, 8, 0, 0) });
 		filters.Controls.Add(_pageSize);
+		filters.Controls.Add(_showNoise);
+		filters.Controls.Add(_expandDuplicates);
 		filters.Controls.Add(_refresh);
 
 		// --- Paging / actions bar ----------------------------------------------------------------
@@ -135,6 +160,7 @@ public sealed class LogsPage : TabPage
 		_grid.Columns.Add(NewColumn("Severity", "Severity", 50));
 		_grid.Columns.Add(NewColumn("Source", "Source", 60));
 		_grid.Columns.Add(NewColumn("Operation", "Operation", 80));
+		_grid.Columns.Add(NewColumn("Count", "Count", 30));
 		_grid.Columns.Add(NewColumn("Message", "Message", 200));
 		_grid.SelectionChanged += (_, _) => ShowSelectedDetail();
 
@@ -213,6 +239,8 @@ public sealed class LogsPage : TabPage
 				SearchText = string.IsNullOrWhiteSpace(_searchFilter.Text) ? null : _searchFilter.Text.Trim(),
 				Page = _page,
 				PageSize = (int)_pageSize.Value,
+				ExcludeDebugNoise = !_showNoise.Checked,
+				GroupDuplicates = !_expandDuplicates.Checked,
 			};
 
 			IpcCallResult<OperationLogPageDto> call =
@@ -268,12 +296,17 @@ public sealed class LogsPage : TabPage
 		_grid.Rows.Clear();
 		foreach (OperationLogDto row in _rows)
 		{
+			string message = row.OccurrenceCount > 1
+				? string.Format(CultureInfo.InvariantCulture, "{0}  (×{1})", row.Message, row.OccurrenceCount)
+				: row.Message;
+
 			int idx = _grid.Rows.Add(
 				row.TimeUtc.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
 				row.Severity.ToString(),
 				row.Source,
 				row.Operation,
-				row.Message);
+				row.OccurrenceCount > 1 ? row.OccurrenceCount.ToString(CultureInfo.InvariantCulture) : string.Empty,
+				message);
 
 			DataGridViewRow gridRow = _grid.Rows[idx];
 			gridRow.DefaultCellStyle.ForeColor = SeverityColor(row.Severity);

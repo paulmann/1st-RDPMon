@@ -43,6 +43,12 @@ public sealed class ServiceMetrics
 	private long _authAttemptFactSucceeded;
 	private DateTime? _lastAuthAttemptFactCreatedUtc;
 
+	// --- v1.3.4: AttackStatsRefreshWorker observability (RDP Activity freshness diagnostics). ---
+	private DateTime? _statsWorkerLastRunUtc;
+	private long _statsWorkerLastRowsUpserted;
+	private long _statsWorkerRunCount;
+	private string? _statsWorkerLastError;
+
 	public long EventsCaptured => Interlocked.Read(ref _captured);
 
 	public long EventsDropped => Interlocked.Read(ref _dropped);
@@ -155,6 +161,26 @@ public sealed class ServiceMetrics
 	public DateTime? LastAuthAttemptFactCreatedUtc
 	{
 		get { lock (_diagGate) { return _lastAuthAttemptFactCreatedUtc; } }
+	}
+
+	/// <summary>v1.3.4 — UTC of the most recent <see cref="Workers.AttackStatsRefreshWorker"/> pass
+	/// completion (success or failure). Null until the worker has run once. Surfaced in the Diagnostic
+	/// tab so an operator can tell whether stale RDP Activity is caused by a stopped projection job.</summary>
+	public DateTime? StatsWorkerLastRunUtc
+	{
+		get { lock (_diagGate) { return _statsWorkerLastRunUtc; } }
+	}
+
+	/// <summary>v1.3.4 — rows upserted on the most recent successful projection pass.</summary>
+	public long StatsWorkerLastRowsUpserted => Interlocked.Read(ref _statsWorkerLastRowsUpserted);
+
+	/// <summary>v1.3.4 — cumulative count of completed projection passes (success or failure).</summary>
+	public long StatsWorkerRunCount => Interlocked.Read(ref _statsWorkerRunCount);
+
+	/// <summary>v1.3.4 — last error from the projection worker, or null when the last pass succeeded.</summary>
+	public string? StatsWorkerLastError
+	{
+		get { lock (_diagGate) { return _statsWorkerLastError; } }
 	}
 
 	public void IncrementCaptured() => Interlocked.Increment(ref _captured);
@@ -311,6 +337,23 @@ public sealed class ServiceMetrics
 			{
 				_lastAuthAttemptFactCreatedUtc = lastUtc;
 			}
+		}
+	}
+
+	/// <summary>v1.3.4 — record a completed <see cref="Workers.AttackStatsRefreshWorker"/> projection
+	/// pass. <paramref name="error"/> is null on success and clears the previously recorded error.</summary>
+	public void RecordStatsWorkerRun(DateTime utcNow, long rowsUpserted, string? error)
+	{
+		Interlocked.Increment(ref _statsWorkerRunCount);
+		if (error is null)
+		{
+			Interlocked.Exchange(ref _statsWorkerLastRowsUpserted, rowsUpserted);
+		}
+
+		lock (_diagGate)
+		{
+			_statsWorkerLastRunUtc = utcNow;
+			_statsWorkerLastError = error;
 		}
 	}
 

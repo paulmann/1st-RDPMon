@@ -266,7 +266,10 @@ public static class Program
 		services.AddHostedService<FirewallAutoBlockWorker>();
 		services.AddHostedService<FirewallExpirationWorker>();
 		services.AddHostedService<EnforcementReconciliationWorker>();
-		services.AddHostedService<AttackStatsRefreshWorker>();
+		// Singleton + hosted-service-resolving-the-singleton so the IPC RebuildAttackStats action can
+		// invoke the very same worker instance (sharing its re-entrancy gate) the background loop uses.
+		services.AddSingleton<AttackStatsRefreshWorker>();
+		services.AddHostedService(sp => sp.GetRequiredService<AttackStatsRefreshWorker>());
 		services.AddHostedService<AbuseIpDbReportWorker>();
 	}
 

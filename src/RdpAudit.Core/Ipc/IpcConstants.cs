@@ -54,6 +54,7 @@ public static class IpcConstants
 		IpcCommand.ClearAllBlocklist => LongOperationTimeoutMs,
 		IpcCommand.ClearAllFirewallRules => LongOperationTimeoutMs,
 		IpcCommand.ClearAllApplicationData => LongOperationTimeoutMs,
+		IpcCommand.RebuildAttackStats => LongOperationTimeoutMs,
 		_ => OperationTimeoutMs,
 	};
 }

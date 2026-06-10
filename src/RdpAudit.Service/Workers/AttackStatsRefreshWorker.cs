@@ -33,14 +33,17 @@ public sealed class AttackStatsRefreshWorker : BackgroundService
 
 	private readonly IDbContextFactory<AuditDbContext> _factory;
 	private readonly ILogger<AttackStatsRefreshWorker> _logger;
+	private readonly ServiceMetrics? _metrics;
 	private readonly SemaphoreSlim _gate = new(1, 1);
 
 	public AttackStatsRefreshWorker(
 		IDbContextFactory<AuditDbContext> factory,
-		ILogger<AttackStatsRefreshWorker> logger)
+		ILogger<AttackStatsRefreshWorker> logger,
+		ServiceMetrics? metrics = null)
 	{
 		_factory = factory;
 		_logger = logger;
+		_metrics = metrics;
 	}
 
 	protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -71,7 +74,9 @@ public sealed class AttackStatsRefreshWorker : BackgroundService
 		}
 	}
 
-	/// <summary>Public for tests: runs a single deterministic refresh pass.</summary>
+	/// <summary>Public for tests and the IPC RebuildAttackStats action: runs a single deterministic
+	/// refresh pass. Records the run outcome (timestamp, rows upserted, error) into
+	/// <see cref="ServiceMetrics"/> so the Diagnostic tab can prove the projection job is alive.</summary>
 	public async Task<int> RefreshOnceAsync(CancellationToken ct)
 	{
 		if (!await _gate.WaitAsync(0, ct).ConfigureAwait(false))
@@ -82,7 +87,18 @@ public sealed class AttackStatsRefreshWorker : BackgroundService
 
 		try
 		{
-			return await RunRefreshAsync(ct).ConfigureAwait(false);
+			int rows = await RunRefreshAsync(ct).ConfigureAwait(false);
+			_metrics?.RecordStatsWorkerRun(DateTime.UtcNow, rows, null);
+			return rows;
+		}
+		catch (OperationCanceledException) when (ct.IsCancellationRequested)
+		{
+			throw;
+		}
+		catch (Exception ex)
+		{
+			_metrics?.RecordStatsWorkerRun(DateTime.UtcNow, 0, ex.GetType().Name + ": " + ex.Message);
+			throw;
 		}
 		finally
 		{
