@@ -177,15 +177,22 @@ public static class EnforcementReconciler
 	/// was scanned to detect orphans). Keyed implicitly by <see cref="BackendScanResult.Provider"/>.</param>
 	/// <param name="rulePrefix">The RdpAudit rule-name prefix used to attribute discovered rules.</param>
 	/// <param name="nowUtc">Reconciliation instant; expiry is computed against this.</param>
+	/// <summary>Default RdpAudit firewall group name. Kept in Core so the pure reconciler can attribute
+	/// group-owned rules without a Service dependency; the Service passes its own
+	/// <c>NetshCommandBuilder.RdpAuditGroup</c> (the same literal) explicitly.</summary>
+	public const string DefaultGroupName = "RdpAudit";
+
 	public static ReconciliationReport Reconcile(
 		IReadOnlyList<DesiredBlock> desired,
 		IReadOnlyList<BackendScanResult> scans,
 		string rulePrefix,
-		DateTime nowUtc)
+		DateTime nowUtc,
+		string groupName = DefaultGroupName)
 	{
 		ArgumentNullException.ThrowIfNull(desired);
 		ArgumentNullException.ThrowIfNull(scans);
 		ArgumentException.ThrowIfNullOrWhiteSpace(rulePrefix);
+		ArgumentException.ThrowIfNullOrWhiteSpace(groupName);
 
 		Dictionary<FirewallProviderKind, BackendScanResult> scanByProvider = new();
 		foreach (BackendScanResult scan in scans)
@@ -200,7 +207,7 @@ public static class EnforcementReconciler
 
 		foreach (DesiredBlock d in desired)
 		{
-			ReconciledBlock reconciled = ReconcileOne(d, scanByProvider, nowUtc, consumedRuleNames);
+			ReconciledBlock reconciled = ReconcileOne(d, scanByProvider, nowUtc, consumedRuleNames, rulePrefix, groupName);
 			blocks.Add(reconciled);
 		}
 
@@ -225,7 +232,9 @@ public static class EnforcementReconciler
 		DesiredBlock d,
 		Dictionary<FirewallProviderKind, BackendScanResult> scanByProvider,
 		DateTime nowUtc,
-		HashSet<string> consumedRuleNames)
+		HashSet<string> consumedRuleNames,
+		string rulePrefix,
+		string groupName)
 	{
 		bool expired = d.ExpiresUtc is { } exp && exp <= nowUtc;
 
@@ -251,8 +260,19 @@ public static class EnforcementReconciler
 				"Verify enforcement manually; this backend does not support live enumeration here.");
 		}
 
-		// Find a discovered rule whose remote-IP set contains the desired IP.
-		DiscoveredBlockRule? match = FindMatchingRule(scan.DiscoveredRules, d.Ip, consumedRuleNames);
+		// v1.3.9: route ownership/attribution through the pure RdpAuditFirewallRuleMatcher so a desired
+		// IP is matched across ALL identity forms (canonical Name, GUID-named with canonical DisplayName,
+		// and Group-owned) — not only by a RemoteAddress hit. This closes the gap where a GUID-named rule
+		// (Name a GUID, Group empty) was scanned but never attributed, making the tab show MISSING RULE
+		// even though a valid RdpAudit-owned block existed. Provider-only scans (route / IPsec) carry no
+		// Name/Group/DisplayName, so the matcher falls back to RemoteAddress matching there.
+		FirewallRuleMatchResult matchResult =
+			RdpAuditFirewallRuleMatcher.MatchDiscovered(scan.DiscoveredRules, d.Ip, rulePrefix, groupName);
+
+		// Pick the concrete discovered rule to verify parameters against: prefer the canonical-named rule
+		// the matcher would create on repair, otherwise the first matched rule, ignoring ones already
+		// consumed by an earlier desired block so duplicates across IPs are not double-counted.
+		DiscoveredBlockRule? match = SelectDiscoveredRule(scan.DiscoveredRules, matchResult, consumedRuleNames);
 
 		if (match is null)
 		{
@@ -277,6 +297,17 @@ public static class EnforcementReconciler
 
 		consumedRuleNames.Add(match.RuleName);
 
+		// Surface a duplicate / canonicalization recommendation when more than one RdpAudit rule matches
+		// the same IP (e.g. the canonical rule AND a GUID-named rule both block 62.176.5.200).
+		string duplicateNote = matchResult.HasDuplicates
+			? " " + matchResult.Describe() + " Duplicate rule(s) detected; canonicalization recommended."
+			: string.Empty;
+		string duplicateAction = matchResult.HasDuplicates
+			? (matchResult.HasCanonicalRule
+				? " A canonical rule already exists; remove the duplicate GUID-named rule(s)."
+				: " Repair to create the canonical Name + Group rule, then remove the duplicate(s).")
+			: string.Empty;
+
 		// A matching rule exists; verify its parameters.
 		string? mismatch = DescribeMismatch(match, d);
 		if (mismatch is not null)
@@ -284,8 +315,8 @@ public static class EnforcementReconciler
 			return Build(d, EnforcementStatus.ParameterMismatch,
 				scan.ThirdPartyMayBypass ? EnforcementConfidence.ExistsButProviderMayBypass : EnforcementConfidence.Unknown,
 				match.RuleName,
-				mismatch,
-				"Repair to bring the rule parameters back in line with the desired block.");
+				mismatch + duplicateNote,
+				"Repair to bring the rule parameters back in line with the desired block." + duplicateAction);
 		}
 
 		if (expired)
@@ -294,20 +325,62 @@ public static class EnforcementReconciler
 			return Build(d, EnforcementStatus.Expired,
 				scan.ThirdPartyMayBypass ? EnforcementConfidence.ExistsButProviderMayBypass : EnforcementConfidence.Verified,
 				match.RuleName,
-				"Block has expired but the firewall rule still exists.",
-				"Remove enforcement: the rule outlived its expiry.");
+				"Block has expired but the firewall rule still exists." + duplicateNote,
+				"Remove enforcement: the rule outlived its expiry." + duplicateAction);
 		}
 
 		if (scan.ThirdPartyMayBypass)
 		{
 			return Build(d, EnforcementStatus.Active, EnforcementConfidence.ExistsButProviderMayBypass, match.RuleName,
-				scan.Note ?? "Windows Firewall rule verified; a third-party provider may control effective enforcement.",
-				"No action required; confirm the third-party firewall is not bypassing the rule.");
+				(scan.Note ?? "Windows Firewall rule verified; a third-party provider may control effective enforcement.") + duplicateNote,
+				"No action required; confirm the third-party firewall is not bypassing the rule." + duplicateAction);
 		}
 
 		return Build(d, EnforcementStatus.Active, EnforcementConfidence.Verified, match.RuleName,
-			"Firewall rule verified with matching parameters.",
-			"No action required.");
+			"Firewall rule verified with matching parameters." + duplicateNote,
+			(matchResult.HasDuplicates ? "Canonicalization recommended." + duplicateAction : "No action required."));
+	}
+
+	/// <summary>Chooses the concrete <see cref="DiscoveredBlockRule"/> to verify parameters against from
+	/// the matcher's per-IP result: prefer the canonical-named rule (matching the name the matcher would
+	/// create on repair), otherwise the first matched rule, skipping rules already consumed by an earlier
+	/// desired block. Returns null when nothing matched. The matcher matched on identity (Name /
+	/// DisplayName / Group); this maps back to the discovered rule that carries the verifiable parameters
+	/// (direction / action / enabled / remote IP).</summary>
+	private static DiscoveredBlockRule? SelectDiscoveredRule(
+		IReadOnlyList<DiscoveredBlockRule> rules,
+		FirewallRuleMatchResult matchResult,
+		HashSet<string> consumedRuleNames)
+	{
+		if (!matchResult.RuleExists)
+		{
+			return null;
+		}
+
+		HashSet<string> matchedNames = new(StringComparer.OrdinalIgnoreCase);
+		foreach (MatchedFirewallRule m in matchResult.Matches)
+		{
+			matchedNames.Add(m.RuleName);
+		}
+
+		DiscoveredBlockRule? firstUnconsumed = null;
+		foreach (DiscoveredBlockRule rule in rules)
+		{
+			if (!matchedNames.Contains(rule.RuleName) || consumedRuleNames.Contains(rule.RuleName))
+			{
+				continue;
+			}
+
+			// Prefer the canonical-named rule when present.
+			if (string.Equals(rule.RuleName, matchResult.CanonicalRuleName, StringComparison.OrdinalIgnoreCase))
+			{
+				return rule;
+			}
+
+			firstUnconsumed ??= rule;
+		}
+
+		return firstUnconsumed;
 	}
 
 	private static List<ReconciledBlock> CollectOrphans(
@@ -346,30 +419,6 @@ public static class EnforcementReconciler
 		}
 
 		return orphans;
-	}
-
-	private static DiscoveredBlockRule? FindMatchingRule(
-		IReadOnlyList<DiscoveredBlockRule> rules,
-		string desiredIp,
-		HashSet<string> consumedRuleNames)
-	{
-		foreach (DiscoveredBlockRule rule in rules)
-		{
-			if (consumedRuleNames.Contains(rule.RuleName))
-			{
-				continue;
-			}
-
-			foreach (string ip in rule.RemoteIps)
-			{
-				if (string.Equals(ip, desiredIp, StringComparison.OrdinalIgnoreCase))
-				{
-					return rule;
-				}
-			}
-		}
-
-		return null;
 	}
 
 	/// <summary>Returns a human-readable mismatch description, or null when every parameter matches

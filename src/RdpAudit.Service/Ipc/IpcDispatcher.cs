@@ -127,8 +127,57 @@ public sealed class IpcDispatcher
 		});
 	}
 
+	/// <summary>v1.3.9: DEBUG-only structured trace of a block create/update, capturing the exact
+	/// expiry derivation so an operator can see WHY a row shows a finite expiry or "Never". Emitted only
+	/// when <c>Diagnostics.DebugMode</c> is on; best-effort and never blocks the mutation.</summary>
+	private void LogBlockMutationDebug(
+		string operation,
+		string ip,
+		DateTime addedUtc,
+		int requestedDurationMinutes,
+		int defaultDurationMinutes,
+		DateTime? expiresUtc,
+		string source)
+	{
+		if (_opLog is null || !_options.CurrentValue.Diagnostics.DebugMode)
+		{
+			return;
+		}
+
+		int resolvedMinutes = BlockExpiryCalculator.ResolveDurationMinutes(
+			requestedDurationMinutes, defaultDurationMinutes);
+		string message = string.Format(
+			CultureInfo.InvariantCulture,
+			"{0} {1}: AddedUtc={2:o}; RequestedDurationMinutes={3}; DefaultDurationMinutes={4}; "
+				+ "ResolvedDurationMinutes={5}; ExpiresUtc={6}; Source={7}; Actor={8}.",
+			operation,
+			ip,
+			addedUtc,
+			requestedDurationMinutes,
+			defaultDurationMinutes,
+			resolvedMinutes,
+			expiresUtc is { } e ? e.ToString("o", CultureInfo.InvariantCulture) : "Never",
+			source,
+			"Configurator");
+
+		_ = _opLog.WriteAsync(new OperationLogEntry
+		{
+			Severity = OperationLogSeverity.Information,
+			Source = "Ipc",
+			Operation = operation,
+			Message = message,
+			Actor = "Configurator",
+		});
+	}
+
 	public async Task<IpcResponse> DispatchAsync(IpcRequest request, CancellationToken ct)
 	{
+		// v1.3.9: DEBUG-gated per-command IPC diagnostic — records command, success and elapsed time so an
+		// operator can correlate a slow / failing Configurator action with the exact backend command.
+		bool ipcDebug = _options.CurrentValue.Diagnostics.DebugMode;
+		System.Diagnostics.Stopwatch ipcStopwatch = ipcDebug
+			? System.Diagnostics.Stopwatch.StartNew()
+			: new System.Diagnostics.Stopwatch();
 		try
 		{
 			object? payload = request.Command switch
@@ -234,6 +283,14 @@ public sealed class IpcDispatcher
 				_ => throw new IpcException(string.Format(CultureInfo.InvariantCulture, "Unknown command: {0}", request.Command)),
 			};
 
+			if (ipcDebug)
+			{
+				ipcStopwatch.Stop();
+				LogOperation(OperationLogSeverity.Information, "IpcCommand.Completed",
+					string.Format(CultureInfo.InvariantCulture, "{0} succeeded in {1} ms.",
+						request.Command, ipcStopwatch.ElapsedMilliseconds));
+			}
+
 			return new IpcResponse
 			{
 				Success = true,
@@ -244,6 +301,14 @@ public sealed class IpcDispatcher
 		{
 			// IpcException is a controlled error class — its Message is curated and safe to surface.
 			_logger.LogWarning(ex, "IPC dispatch returned controlled error for {Command}", request.Command);
+			if (ipcDebug)
+			{
+				ipcStopwatch.Stop();
+				LogOperation(OperationLogSeverity.Warning, "IpcCommand.Failed",
+					string.Format(CultureInfo.InvariantCulture, "{0} returned controlled error after {1} ms: {2}",
+						request.Command, ipcStopwatch.ElapsedMilliseconds, ex.Message));
+			}
+
 			return new IpcResponse { Success = false, Error = ex.Message };
 		}
 		catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -254,6 +319,14 @@ public sealed class IpcDispatcher
 		{
 			// Log full exception server-side; surface only generic class to the client.
 			_logger.LogError(ex, "IPC dispatch failed for {Command}", request.Command);
+			if (ipcDebug)
+			{
+				ipcStopwatch.Stop();
+				LogOperation(OperationLogSeverity.Error, "IpcCommand.Failed",
+					string.Format(CultureInfo.InvariantCulture, "{0} failed after {1} ms: {2}: {3}",
+						request.Command, ipcStopwatch.ElapsedMilliseconds, ex.GetType().Name, ex.Message));
+			}
+
 			return new IpcResponse
 			{
 				Success = false,
@@ -791,7 +864,60 @@ public sealed class IpcDispatcher
 		}
 
 		string testIp = ParseTestIpPayload(payload);
-		return await _toolsDiagnostics.RunTemporaryFirewallRuleProbeAsync(testIp, ct).ConfigureAwait(false);
+		bool debug = _options.CurrentValue.Diagnostics.DebugMode;
+		if (debug)
+		{
+			LogOperation(OperationLogSeverity.Information, "FirewallRuleProbe.Started",
+				string.Format(CultureInfo.InvariantCulture, "Temporary firewall rule probe started for {0}.", testIp));
+		}
+
+		try
+		{
+			TemporaryFirewallProbeDto result =
+				await _toolsDiagnostics.RunTemporaryFirewallRuleProbeAsync(testIp, ct).ConfigureAwait(false);
+			if (debug)
+			{
+				foreach (ToolProbeResultDto step in result.Steps)
+				{
+					LogOperation(OperationLogSeverity.Information, "FirewallRuleProbe.StageCompleted",
+						string.Format(
+							CultureInfo.InvariantCulture,
+							"{0}: passed={1}; exit={2}; durationMs={3}; timedOut={4}; backend={5}; cmd={6} {7}; note={8}",
+							step.ToolName,
+							step.Passed,
+							step.ExitCode,
+							step.DurationMs,
+							step.TimedOut,
+							step.RunnerMode,
+							step.Executable,
+							step.Arguments,
+							step.Note ?? string.Empty));
+				}
+
+				LogOperation(OperationLogSeverity.Information, "FirewallRuleProbe.Completed",
+					string.Format(
+						CultureInfo.InvariantCulture,
+						"Temporary firewall rule probe for {0} finished: status={1}; overall={2}; rule={3}; backend={4}.",
+						result.TestIp,
+						result.Status,
+						result.CreatedVerifiedAndCleanedUp,
+						result.RuleName,
+						result.ScannerBackend ?? "(none)"));
+			}
+
+			return result;
+		}
+		catch (Exception ex) when (ex is not OperationCanceledException)
+		{
+			if (debug)
+			{
+				LogOperation(OperationLogSeverity.Error, "FirewallRuleProbe.Failed",
+					string.Format(CultureInfo.InvariantCulture,
+						"Temporary firewall rule probe for {0} raised {1}: {2}", testIp, ex.GetType().Name, ex.Message));
+			}
+
+			throw;
+		}
 	}
 
 	/// <summary>Unwraps the temporary-probe test IP from the IPC payload. The client sends the IP as a
@@ -950,11 +1076,18 @@ public sealed class IpcDispatcher
 		}
 
 		DateTime nowUtc = DateTime.UtcNow;
-		DateTime? expiresUtc = req.DurationMinutes > 0 ? nowUtc.AddMinutes(req.DurationMinutes) : null;
+		// v1.3.9: honour DefaultBlockDurationMinutes for manual adds. The explicit per-request duration
+		// wins; otherwise the configured default applies; only when BOTH resolve to non-positive is the
+		// block permanent (ExpiresUtc == null → "Never"). Previously the configured default was ignored,
+		// so manual rows showed "Never" even when the operator had set a positive default.
+		int defaultDurationMinutes = _options.CurrentValue.Firewall.DefaultBlockDurationMinutes;
+		DateTime? expiresUtc = BlockExpiryCalculator.ComputeExpiresUtc(
+			nowUtc, req.DurationMinutes, defaultDurationMinutes);
 
 		BlocklistEntry? existing = await db.BlocklistEntries
 			.FirstOrDefaultAsync(b => b.Ip == ip && b.IsEnabled, ct).ConfigureAwait(false);
 
+		bool created = existing is null;
 		if (existing is null)
 		{
 			db.BlocklistEntries.Add(new BlocklistEntry
@@ -977,6 +1110,14 @@ public sealed class IpcDispatcher
 		}
 
 		await db.SaveChangesAsync(ct).ConfigureAwait(false);
+		LogBlockMutationDebug(
+			operation: created ? "BlocklistAdd" : "BlocklistUpdate",
+			ip: ip,
+			addedUtc: nowUtc,
+			requestedDurationMinutes: req.DurationMinutes,
+			defaultDurationMinutes: defaultDurationMinutes,
+			expiresUtc: expiresUtc,
+			source: BlocklistSource.Manual.ToString());
 		return new { status = IpcResultStatus.Success.ToString(), address = ip };
 	}
 
@@ -1418,7 +1559,50 @@ public sealed class IpcDispatcher
 			throw new IpcException("Enforcement reconciliation service is not available in this build.");
 		}
 
-		return await _reconciliation.ReconcileAsync(ct).ConfigureAwait(false);
+		return await RunWithDebugTraceAsync(
+			"FirewallReconciliation",
+			"reconcile enforcement",
+			() => _reconciliation.ReconcileAsync(ct)).ConfigureAwait(false);
+	}
+
+	/// <summary>v1.3.9: wraps a reconciliation/repair operation with DEBUG-gated Started / Completed /
+	/// Failed structured OperationLogs. The logs are emitted only when <c>Diagnostics.DebugMode</c> is on
+	/// and never alter the operation's result or swallow its exception.</summary>
+	private async Task<TResult> RunWithDebugTraceAsync<TResult>(
+		string operationBase, string description, Func<Task<TResult>> action)
+	{
+		bool debug = _options.CurrentValue.Diagnostics.DebugMode;
+		System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+		if (debug)
+		{
+			LogOperation(OperationLogSeverity.Information, operationBase + ".Started",
+				string.Format(CultureInfo.InvariantCulture, "{0} started.", description));
+		}
+
+		try
+		{
+			TResult result = await action().ConfigureAwait(false);
+			sw.Stop();
+			if (debug)
+			{
+				LogOperation(OperationLogSeverity.Information, operationBase + ".Completed",
+					string.Format(CultureInfo.InvariantCulture, "{0} completed in {1} ms.", description, sw.ElapsedMilliseconds));
+			}
+
+			return result;
+		}
+		catch (Exception ex) when (ex is not OperationCanceledException)
+		{
+			sw.Stop();
+			if (debug)
+			{
+				LogOperation(OperationLogSeverity.Error, operationBase + ".Failed",
+					string.Format(CultureInfo.InvariantCulture, "{0} failed after {1} ms: {2}: {3}",
+						description, sw.ElapsedMilliseconds, ex.GetType().Name, ex.Message));
+			}
+
+			throw;
+		}
 	}
 
 	private async Task<object?> RepairActiveBlockAsync(string? payload, CancellationToken ct)
@@ -1448,7 +1632,10 @@ public sealed class IpcDispatcher
 			throw new IpcException("RepairActiveBlock requires a positive Id.");
 		}
 
-		return await _reconciliation.RepairAsync(id, ct).ConfigureAwait(false);
+		return await RunWithDebugTraceAsync(
+			"FirewallRepairSelected",
+			string.Format(CultureInfo.InvariantCulture, "repair active block id={0}", id),
+			() => _reconciliation.RepairAsync(id, ct)).ConfigureAwait(false);
 	}
 
 	private async Task<object?> RepairBlocklistEnforcementAsync(string? payload, CancellationToken ct)
@@ -1478,7 +1665,10 @@ public sealed class IpcDispatcher
 			throw new IpcException("RepairBlocklistEnforcement requires a positive Id.");
 		}
 
-		return await _reconciliation.RepairBlocklistAsync(id, ct).ConfigureAwait(false);
+		return await RunWithDebugTraceAsync(
+			"FirewallRepairSelected",
+			string.Format(CultureInfo.InvariantCulture, "repair blocklist entry id={0}", id),
+			() => _reconciliation.RepairBlocklistAsync(id, ct)).ConfigureAwait(false);
 	}
 
 	private async Task<object?> RepairAllEnabledBlocklistEnforcementAsync(CancellationToken ct)
@@ -1488,7 +1678,10 @@ public sealed class IpcDispatcher
 			throw new IpcException("Enforcement reconciliation service is not available in this build.");
 		}
 
-		return await _reconciliation.RepairAllEnabledBlocklistAsync(ct).ConfigureAwait(false);
+		return await RunWithDebugTraceAsync(
+			"FirewallRepairSelected",
+			"repair all enabled blocklist entries",
+			() => _reconciliation.RepairAllEnabledBlocklistAsync(ct)).ConfigureAwait(false);
 	}
 
 	private async Task<object?> RemoveAllEnforcementAsync(CancellationToken ct)
@@ -3901,39 +4094,52 @@ public sealed class IpcDispatcher
 			dto.RecentPipelineErrors.Add("Correlation diagnostic: " + _metrics.SecurityCorrelationDiagnostic);
 		}
 
-		try
+		// v1.3.9: assemble the DB-backed diagnostics as discrete, individually-bounded SECTIONS so a slow
+		// or hung section (a large RawEvents GROUP BY, a locked DB) never blocks the cheap basics and the
+		// snapshot is always returned with whatever completed. Each section runs under its own timeout and
+		// records its duration / status; the DEBUG OperationLog mirrors the timings.
+		bool diagDebug = _options.CurrentValue.Diagnostics.DebugMode;
+
+		// Schema-aware section FIRST (cheap PRAGMA reads) so later sections — and the operator — know which
+		// columns actually exist before any assumption is made. Problem 6: never assume AttackStats.TimeUtc
+		// or AuthAttemptFacts.UserName exist; read the real schema and the LastSeenUtc / TimeUtc watermarks
+		// defensively.
+		await RunDiagnosticsSectionAsync(dto, "DbSchema", diagDebug, async (db, sct) =>
 		{
-			await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
+			await PopulateSchemaAwareDiagnosticsAsync(db, dto, sct).ConfigureAwait(false);
+		}, ct).ConfigureAwait(false);
 
-			dto.RawEventsTotal = await db.RawEvents.AsNoTracking().LongCountAsync(ct).ConfigureAwait(false);
-			dto.AuthAttemptFactsTotal = await db.AuthAttemptFacts.AsNoTracking().LongCountAsync(ct).ConfigureAwait(false);
-			dto.AttackStatsTotal = await db.AttackStats.AsNoTracking().LongCountAsync(ct).ConfigureAwait(false);
+		await RunDiagnosticsSectionAsync(dto, "DbCounts", diagDebug, async (db, sct) =>
+		{
+			dto.RawEventsTotal = await db.RawEvents.AsNoTracking().LongCountAsync(sct).ConfigureAwait(false);
+			dto.AuthAttemptFactsTotal = await db.AuthAttemptFacts.AsNoTracking().LongCountAsync(sct).ConfigureAwait(false);
+			dto.AttackStatsTotal = await db.AttackStats.AsNoTracking().LongCountAsync(sct).ConfigureAwait(false);
+		}, ct).ConfigureAwait(false);
 
+		await RunDiagnosticsSectionAsync(dto, "DbFreshness", diagDebug, async (db, sct) =>
+		{
 			// v1.3.4: freshness markers across the three pipeline stages so a stale RDP Activity tab can be
 			// localised — newest RawEvent (ingest), newest AuthAttemptFact (normalisation), newest
 			// AttackStat.LastUpdatedUtc (projection). Diverging timestamps tell the operator which stage stalled.
 			if (dto.RawEventsTotal > 0)
 			{
-				dto.LatestRawEventUtc = await db.RawEvents.AsNoTracking().MaxAsync(e => (DateTime?)e.TimeUtc, ct).ConfigureAwait(false);
+				dto.LatestRawEventUtc = await db.RawEvents.AsNoTracking().MaxAsync(e => (DateTime?)e.TimeUtc, sct).ConfigureAwait(false);
 			}
 			if (dto.AuthAttemptFactsTotal > 0)
 			{
-				dto.LatestAuthAttemptFactUtc = await db.AuthAttemptFacts.AsNoTracking().MaxAsync(f => (DateTime?)f.TimeUtc, ct).ConfigureAwait(false);
-				// v1.3.6: projection INPUT watermark (newest source fact). Mirrors LatestAuthAttemptFactUtc
-				// but named for the stale-projection triage so it pairs with LatestAttackStatLastSeenUtc.
+				dto.LatestAuthAttemptFactUtc = await db.AuthAttemptFacts.AsNoTracking().MaxAsync(f => (DateTime?)f.TimeUtc, sct).ConfigureAwait(false);
 				dto.LatestSourceFactUtc = dto.LatestAuthAttemptFactUtc;
 			}
 			if (dto.AttackStatsTotal > 0)
 			{
-				dto.LatestAttackStatUpdatedUtc = await db.AttackStats.AsNoTracking().MaxAsync(s => (DateTime?)s.LastUpdatedUtc, ct).ConfigureAwait(false);
-				// v1.3.6: projection OUTPUT watermark. When this lags LatestSourceFactUtc the projection
-				// is stale even though ingestion (RawEvents/AuthAttemptFacts) is fresh — the exact symptom
-				// the v1.3.6 worker ordering fix addresses.
-				dto.LatestAttackStatLastSeenUtc = await db.AttackStats.AsNoTracking().MaxAsync(s => (DateTime?)s.LastSeenUtc, ct).ConfigureAwait(false);
+				dto.LatestAttackStatUpdatedUtc = await db.AttackStats.AsNoTracking().MaxAsync(s => (DateTime?)s.LastUpdatedUtc, sct).ConfigureAwait(false);
+				// v1.3.6: projection OUTPUT watermark. The RDP Activity week filter uses LastSeenUtc.
+				dto.LatestAttackStatLastSeenUtc = await db.AttackStats.AsNoTracking().MaxAsync(s => (DateTime?)s.LastSeenUtc, sct).ConfigureAwait(false);
 			}
+		}, ct).ConfigureAwait(false);
 
-			// v1.3.4: tail of the durable OperationLog so the Diagnostic tab always has actionable recent
-			// program-action context (bans, firewall, settings, IPC faults) even when the heavier probes fail.
+		await RunDiagnosticsSectionAsync(dto, "OperationLogTail", diagDebug, async (db, sct) =>
+		{
 			List<DiagnosticsOperationLogLine> opLogTail = await db.OperationLogs.AsNoTracking()
 				.OrderByDescending(o => o.Id)
 				.Take(20)
@@ -3945,17 +4151,23 @@ public sealed class IpcDispatcher
 					Operation = o.Operation,
 					Message = o.Message,
 				})
-				.ToListAsync(ct).ConfigureAwait(false);
+				.ToListAsync(sct).ConfigureAwait(false);
 			dto.RecentOperationLog.AddRange(opLogTail);
+		}, ct).ConfigureAwait(false);
 
+		await RunDiagnosticsSectionAsync(dto, "RawEventsByChannel", diagDebug, async (db, sct) =>
+		{
 			List<DiagnosticsChannelCount> byChannel = await db.RawEvents.AsNoTracking()
 				.GroupBy(e => e.Channel)
 				.Select(g => new DiagnosticsChannelCount { Channel = g.Key, Count = g.LongCount() })
 				.OrderByDescending(x => x.Count)
 				.Take(20)
-				.ToListAsync(ct).ConfigureAwait(false);
+				.ToListAsync(sct).ConfigureAwait(false);
 			dto.RawEventsByChannel.AddRange(byChannel);
+		}, ct).ConfigureAwait(false);
 
+		await RunDiagnosticsSectionAsync(dto, "RawEventsByEventId", diagDebug, async (db, sct) =>
+		{
 			List<DiagnosticsEventIdCount> byEventId = await db.RawEvents.AsNoTracking()
 				.GroupBy(e => new { e.Channel, e.EventId })
 				.Select(g => new DiagnosticsEventIdCount
@@ -3966,9 +4178,12 @@ public sealed class IpcDispatcher
 				})
 				.OrderByDescending(x => x.Count)
 				.Take(30)
-				.ToListAsync(ct).ConfigureAwait(false);
+				.ToListAsync(sct).ConfigureAwait(false);
 			dto.RawEventsByEventId.AddRange(byEventId);
+		}, ct).ConfigureAwait(false);
 
+		await RunDiagnosticsSectionAsync(dto, "AuthFactsByOutcome", diagDebug, async (db, sct) =>
+		{
 			List<DiagnosticsFactOutcomeCount> byOutcome = await db.AuthAttemptFacts.AsNoTracking()
 				.GroupBy(f => new { f.EvidenceEventId, f.Outcome })
 				.Select(g => new DiagnosticsFactOutcomeCount
@@ -3979,25 +4194,194 @@ public sealed class IpcDispatcher
 				})
 				.OrderByDescending(x => x.Count)
 				.Take(30)
-				.ToListAsync(ct).ConfigureAwait(false);
+				.ToListAsync(sct).ConfigureAwait(false);
 			dto.AuthAttemptFactsByOutcome.AddRange(byOutcome);
-		}
-		catch (Exception ex)
+		}, ct).ConfigureAwait(false);
+
+		if (dto.IsPartial && dto.Status == IpcResultStatus.Success)
 		{
 			dto.Status = IpcResultStatus.Unavailable;
-			dto.RecentPipelineErrors.Add("DB diagnostics failed: " + ex.GetType().Name + " — " + ex.Message);
 		}
 
 		dto.Message = string.Format(
 			CultureInfo.InvariantCulture,
-			"Snapshot built at {0:O}. RawEvents={1} AuthAttemptFacts={2} SecurityWatcher={3} RepairChanged={4}",
+			"Snapshot built at {0:O}. RawEvents={1} AuthAttemptFacts={2} SecurityWatcher={3} RepairChanged={4} Partial={5}",
 			dto.GeneratedUtc,
 			dto.RawEventsTotal,
 			dto.AuthAttemptFactsTotal,
 			dto.SecurityWatcherEnabled,
-			dto.MonitoringConfigRepairChanged);
+			dto.MonitoringConfigRepairChanged,
+			dto.IsPartial);
 
 		return dto;
+	}
+
+	/// <summary>Per-section timeout (ms) for the bounded diagnostics assembly. Each DB section gets its
+	/// own budget so one slow section yields a partial snapshot instead of stalling the whole call.</summary>
+	private const int DiagnosticsSectionTimeoutMs = 8000;
+
+	/// <summary>v1.3.9: runs one bounded diagnostics section under its own timeout, recording duration /
+	/// status into <see cref="DiagnosticsSnapshotDto.SectionTimings"/> and flipping
+	/// <see cref="DiagnosticsSnapshotDto.IsPartial"/> on timeout / failure. Each section gets a fresh
+	/// DbContext so a fault in one does not poison the connection for the next. Never throws.</summary>
+	private async Task RunDiagnosticsSectionAsync(
+		DiagnosticsSnapshotDto dto,
+		string section,
+		bool debug,
+		Func<AuditDbContext, CancellationToken, Task> body,
+		CancellationToken ct)
+	{
+		Stopwatch sw = Stopwatch.StartNew();
+		using CancellationTokenSource sectionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+		sectionCts.CancelAfter(DiagnosticsSectionTimeoutMs);
+		string status;
+		string? error = null;
+		try
+		{
+			await using AuditDbContext db = await _factory.CreateDbContextAsync(sectionCts.Token).ConfigureAwait(false);
+			await body(db, sectionCts.Token).ConfigureAwait(false);
+			status = "Completed";
+		}
+		catch (OperationCanceledException) when (ct.IsCancellationRequested)
+		{
+			// The whole request was cancelled by the caller — propagate rather than masking as a timeout.
+			throw;
+		}
+		catch (OperationCanceledException)
+		{
+			status = "TimedOut";
+			error = string.Format(CultureInfo.InvariantCulture,
+				"Section '{0}' exceeded its {1} ms budget.", section, DiagnosticsSectionTimeoutMs);
+			dto.IsPartial = true;
+			dto.RecentPipelineErrors.Add("Diagnostics " + error);
+		}
+		catch (Exception ex)
+		{
+			status = "Failed";
+			error = ex.GetType().Name + " — " + ex.Message;
+			dto.IsPartial = true;
+			dto.RecentPipelineErrors.Add(string.Format(CultureInfo.InvariantCulture,
+				"Diagnostics section '{0}' failed: {1}", section, error));
+		}
+
+		sw.Stop();
+		dto.SectionTimings.Add(new DiagnosticsSectionTiming
+		{
+			Section = section,
+			DurationMs = sw.ElapsedMilliseconds,
+			Status = status,
+			Error = error,
+		});
+
+		if (debug)
+		{
+			LogOperation(
+				status == "Completed" ? OperationLogSeverity.Information : OperationLogSeverity.Warning,
+				"DiagnosticsSnapshot.Section",
+				string.Format(CultureInfo.InvariantCulture, "{0}: {1} in {2} ms.{3}",
+					section, status, sw.ElapsedMilliseconds, error is null ? string.Empty : " " + error));
+		}
+	}
+
+	/// <summary>v1.3.9 (Problem 6): reads the REAL schema of the key tables via PRAGMA table_info /
+	/// index_list and the LastSeenUtc / TimeUtc watermarks defensively, so the snapshot never assumes a
+	/// column that does not exist (notably NOT AttackStats.TimeUtc and NOT AuthAttemptFacts.UserName).
+	/// All reads go through the EF Core connection — no external sqlite3.exe.</summary>
+	private static async Task PopulateSchemaAwareDiagnosticsAsync(
+		AuditDbContext db, DiagnosticsSnapshotDto dto, CancellationToken ct)
+	{
+		System.Data.Common.DbConnection conn = db.Database.GetDbConnection();
+		if (conn.State != System.Data.ConnectionState.Open)
+		{
+			await conn.OpenAsync(ct).ConfigureAwait(false);
+		}
+
+		foreach (string table in new[] { "RawEvents", "AuthAttemptFacts", "AttackStats", "OperationLogs" })
+		{
+			DiagnosticsTableSchema schema = new() { Table = table };
+			schema.Columns.AddRange(await ReadPragmaListAsync(conn, "table_info", table, columnIndex: 1, ct).ConfigureAwait(false));
+			schema.Indexes.AddRange(await ReadPragmaListAsync(conn, "index_list", table, columnIndex: 1, ct).ConfigureAwait(false));
+			schema.Exists = schema.Columns.Count > 0;
+			dto.TableSchemas.Add(schema);
+		}
+
+		dto.SchemaAwareLatestRawEventUtc =
+			await ReadMaxUtcAsync(conn, "RawEvents", "TimeUtc", dto, ct).ConfigureAwait(false);
+		dto.SchemaAwareLatestAuthAttemptFactUtc =
+			await ReadMaxUtcAsync(conn, "AuthAttemptFacts", "TimeUtc", dto, ct).ConfigureAwait(false);
+		// AttackStats has LastSeenUtc, NOT TimeUtc — the week filter keys on LastSeenUtc.
+		dto.SchemaAwareLatestAttackStatLastSeenUtc =
+			await ReadMaxUtcAsync(conn, "AttackStats", "LastSeenUtc", dto, ct).ConfigureAwait(false);
+	}
+
+	/// <summary>Runs a single-column PRAGMA (e.g. <c>PRAGMA table_info(T)</c>) and returns the values of
+	/// the requested result column. Returns an empty list when the table is absent or the PRAGMA fails.</summary>
+	private static async Task<List<string>> ReadPragmaListAsync(
+		System.Data.Common.DbConnection conn, string pragma, string table, int columnIndex, CancellationToken ct)
+	{
+		List<string> values = new();
+		try
+		{
+			await using System.Data.Common.DbCommand cmd = conn.CreateCommand();
+			// PRAGMA does not accept bound parameters for the table name; the table set is a fixed,
+			// code-controlled allow-list (never operator input), so quoting is sufficient and safe.
+			cmd.CommandText = string.Format(CultureInfo.InvariantCulture, "PRAGMA {0}('{1}');", pragma, table.Replace("'", "''"));
+			await using System.Data.Common.DbDataReader reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+			while (await reader.ReadAsync(ct).ConfigureAwait(false))
+			{
+				if (columnIndex < reader.FieldCount && !reader.IsDBNull(columnIndex))
+				{
+					values.Add(reader.GetValue(columnIndex)?.ToString() ?? string.Empty);
+				}
+			}
+		}
+		catch (Exception)
+		{
+			// Absent table / older schema — leave the list empty; the caller marks Exists=false.
+		}
+
+		return values;
+	}
+
+	/// <summary>Reads <c>MAX(column)</c> from <paramref name="table"/> defensively: if the column does
+	/// not exist on this schema the query throws and we return null (recording a note) rather than
+	/// assuming the column is present. Parses the stored value as a UTC DateTime.</summary>
+	private static async Task<DateTime?> ReadMaxUtcAsync(
+		System.Data.Common.DbConnection conn, string table, string column, DiagnosticsSnapshotDto dto, CancellationToken ct)
+	{
+		try
+		{
+			await using System.Data.Common.DbCommand cmd = conn.CreateCommand();
+			cmd.CommandText = string.Format(CultureInfo.InvariantCulture,
+				"SELECT MAX(\"{0}\") FROM \"{1}\";", column.Replace("\"", "\"\""), table.Replace("\"", "\"\""));
+			object? raw = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+			if (raw is null || raw is DBNull)
+			{
+				return null;
+			}
+
+			if (raw is DateTime dt)
+			{
+				return DateTime.SpecifyKind(dt, DateTimeKind.Utc);
+			}
+
+			string? text = raw.ToString();
+			if (!string.IsNullOrWhiteSpace(text)
+				&& DateTime.TryParse(text, CultureInfo.InvariantCulture,
+					System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
+					out DateTime parsed))
+			{
+				return DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+			}
+
+			return null;
+		}
+		catch (Exception ex)
+		{
+			dto.RecentPipelineErrors.Add(string.Format(CultureInfo.InvariantCulture,
+				"Schema-aware MAX({0}) on {1} unavailable: {2}", column, table, ex.GetType().Name));
+			return null;
+		}
 	}
 
 	/// <summary>v1.3.4: fill the resolved-RDP-port diagnostic fields. On Windows the registry resolver

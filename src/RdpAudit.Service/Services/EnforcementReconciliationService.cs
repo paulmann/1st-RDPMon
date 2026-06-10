@@ -1246,7 +1246,7 @@ public sealed class EnforcementReconciliationService
 			scans.Add(BuildUnscannableScan(kind, cfg));
 		}
 
-		return EnforcementReconciler.Reconcile(desired, scans, rulePrefix, nowUtc);
+		return EnforcementReconciler.Reconcile(desired, scans, rulePrefix, nowUtc, NetshCommandBuilder.RdpAuditGroup);
 	}
 
 	private async Task<BackendScanResult> ScanWindowsAsync(FirewallOptions cfg, string rulePrefix, CancellationToken ct)

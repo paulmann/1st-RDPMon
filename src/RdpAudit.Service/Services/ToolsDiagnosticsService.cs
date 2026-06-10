@@ -160,7 +160,7 @@ public sealed class ToolsDiagnosticsService
 		string? ruleHandle = null;
 		string? scannerBackend = null;
 
-		// Step 1 — create the temporary block rule.
+		// Stage 1 — create the temporary block rule.
 		FirewallActionResult create = await _windowsProvider.BlockAsync(
 			new FirewallBlockRequest(canonicalIp, TemporaryProbeRuleBase)
 			{
@@ -173,68 +173,31 @@ public sealed class ToolsDiagnosticsService
 
 		bool created = create.Status == FirewallActionStatus.Success;
 
-		// Step 2 — verify the rule is present in the firewall store.
+		// Stage 2 — targeted verify: prefer an exact-name / matcher lookup for THIS rule before any broad
+		// scan, so a host with many firewall rules is not penalised by an expensive enumeration when the
+		// canonical rule can be confirmed directly. Distinguishes a true "rule absent" from a provider /
+		// scan timeout (the latter is reported as a non-fatal Note rather than a hard verification failure).
 		bool verified = false;
 		if (created)
 		{
-			try
-			{
-				IReadOnlyList<FirewallBlockEntry> entries =
-					await _windowsProvider.ListBlocksAsync(TemporaryProbeRuleBase, ct).ConfigureAwait(false);
-				bool nameMatch = entries.Any(e =>
-					string.Equals(e.RuleId, ruleHandle, StringComparison.OrdinalIgnoreCase));
-				bool ipMatch = entries.Any(e =>
-					string.Equals(e.Ip, canonicalIp, StringComparison.OrdinalIgnoreCase));
-				verified = nameMatch || ipMatch;
-				string criterion = nameMatch
-					? "matched by exact rule name"
-					: ipMatch ? "matched by remote IP" : "no match";
-				steps.Add(new ToolProbeResultDto
-				{
-					ToolName = "verify temporary block rule present",
-					Executable = "(firewall provider list)",
-					Arguments = ruleName,
-					RunnerMode = scannerBackend ?? "Direct",
-					ExitCode = verified ? 0 : 1,
-					DurationMs = 0,
-					TimedOut = false,
-					StdoutPreview = string.Format(
-						CultureInfo.InvariantCulture,
-						"List returned {0} RdpAudit rule(s); matching rule {1} ({2}).",
-						entries.Count,
-						verified ? "found" : "NOT found",
-						criterion),
-					Passed = verified,
-					Note = verified
-						? "Temporary rule confirmed present in the firewall store."
-						: "Temporary rule was not found in the firewall store after creation.",
-				});
-			}
-			catch (Exception ex) when (ex is not OperationCanceledException)
-			{
-				_logger.LogWarning(ex, "Temporary probe verification raised an exception for {Ip}", canonicalIp);
-				steps.Add(new ToolProbeResultDto
-				{
-					ToolName = "verify temporary block rule present",
-					Executable = "(firewall provider list)",
-					Arguments = ruleName,
-					RunnerMode = "Direct",
-					ExitCode = -1,
-					Passed = false,
-					StderrPreview = ex.GetType().Name,
-					Note = "Verification query raised an exception.",
-				});
-			}
+			verified = await VerifyTemporaryRuleAsync(
+				canonicalIp, ruleName, ruleHandle, scannerBackend, steps, ct).ConfigureAwait(false);
 		}
 
-		// Step 3 — always attempt cleanup, even when creation or verification failed, so the probe
+		// Stage 3 — always attempt cleanup, even when creation or verification failed, so the probe
 		// never leaves a stray rule behind.
 		FirewallActionResult cleanup = await _windowsProvider.UnblockAsync(
 			canonicalIp, TemporaryProbeRuleBase, ct).ConfigureAwait(false);
 		steps.Add(StepFor(cleanup, "clean up temporary block rule"));
 		bool cleanedUp = cleanup.Status is FirewallActionStatus.Success or FirewallActionStatus.NotFound;
 
-		bool overall = created && verified && cleanedUp;
+		// Stage 4 — cleanup verify: confirm the rule is actually gone from the firewall store. A cleanup
+		// that reports success but leaves the rule behind (or a NotFound that masks a stale duplicate) is
+		// surfaced here so the operator is never told "cleaned up" while a stray RdpAudit rule lingers.
+		bool cleanupConfirmed = await VerifyTemporaryRuleAbsentAsync(
+			canonicalIp, ruleName, ruleHandle, scannerBackend, steps, ct).ConfigureAwait(false);
+
+		bool overall = created && verified && cleanedUp && cleanupConfirmed;
 		TemporaryFirewallProbeDto dto = new()
 		{
 			Status = IpcResultStatus.Success,
@@ -246,11 +209,170 @@ public sealed class ToolsDiagnosticsService
 			CreatedVerifiedAndCleanedUp = overall,
 			Steps = steps,
 			Message = overall
-				? "Temporary rule created, verified and cleaned up successfully."
-				: BuildTemporaryFailureNote(created, verified, cleanedUp),
+				? "Temporary rule created, verified, cleaned up and confirmed removed successfully."
+				: BuildTemporaryFailureNote(created, verified, cleanedUp, cleanupConfirmed),
 		};
 		dto.ReportText = ToolsDiagnosticsReportBuilder.BuildTemporaryProbe(dto);
 		return dto;
+	}
+
+	/// <summary>Targeted-first verification that the temporary rule landed. Performs a single provider
+	/// list (the provider already prefers a targeted PowerShell/netsh query), then attributes the result
+	/// with <see cref="RdpAuditFirewallRuleMatcher"/> — exact canonical name first, then handle, then
+	/// remote IP. Records the stage's duration and distinguishes a scan/provider timeout from a genuine
+	/// absence. Returns true only when the rule is positively confirmed present.</summary>
+	private async Task<bool> VerifyTemporaryRuleAsync(
+		string canonicalIp,
+		string ruleName,
+		string? ruleHandle,
+		string? scannerBackend,
+		List<ToolProbeResultDto> steps,
+		CancellationToken ct)
+	{
+		System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+		try
+		{
+			IReadOnlyList<FirewallBlockEntry> entries =
+				await _windowsProvider.ListBlocksAsync(TemporaryProbeRuleBase, ct).ConfigureAwait(false);
+			sw.Stop();
+
+			bool exactNameMatch = entries.Any(e =>
+				string.Equals(e.RuleId, ruleName, StringComparison.OrdinalIgnoreCase));
+			bool handleMatch = !string.IsNullOrEmpty(ruleHandle) && entries.Any(e =>
+				string.Equals(e.RuleId, ruleHandle, StringComparison.OrdinalIgnoreCase));
+			bool ipMatch = entries.Any(e =>
+				string.Equals(e.Ip, canonicalIp, StringComparison.OrdinalIgnoreCase));
+			bool verified = exactNameMatch || handleMatch || ipMatch;
+
+			string criterion = exactNameMatch
+				? "matched by exact canonical rule name (targeted)"
+				: handleMatch
+					? "matched by backend rule handle (targeted)"
+					: ipMatch ? "matched by remote IP (broad)" : "no match";
+
+			steps.Add(new ToolProbeResultDto
+			{
+				ToolName = "verify temporary block rule present",
+				Executable = "(firewall provider list)",
+				Arguments = ruleName,
+				RunnerMode = scannerBackend ?? "Direct",
+				ExitCode = verified ? 0 : 1,
+				DurationMs = sw.ElapsedMilliseconds,
+				TimedOut = false,
+				StdoutPreview = string.Format(
+					CultureInfo.InvariantCulture,
+					"List returned {0} RdpAudit rule(s); matching rule {1} ({2}).",
+					entries.Count,
+					verified ? "found" : "NOT found",
+					criterion),
+				Passed = verified,
+				Note = verified
+					? "Temporary rule confirmed present in the firewall store."
+					: "Temporary rule was not found in the firewall store after creation.",
+			});
+			return verified;
+		}
+		catch (OperationCanceledException) when (ct.IsCancellationRequested)
+		{
+			throw;
+		}
+		catch (Exception ex)
+		{
+			sw.Stop();
+			// A provider/scan timeout or transient failure is NOT proof the rule is absent: the create
+			// stage may well have succeeded locally. Surface it as a distinct, non-fatal diagnostic so the
+			// operator can tell "rule definitely missing" apart from "couldn't read the store in time".
+			bool timedOut = ex is TimeoutException or TaskCanceledException;
+			_logger.LogWarning(ex, "Temporary probe verification raised an exception for {Ip}", canonicalIp);
+			steps.Add(new ToolProbeResultDto
+			{
+				ToolName = "verify temporary block rule present",
+				Executable = "(firewall provider list)",
+				Arguments = ruleName,
+				RunnerMode = scannerBackend ?? "Direct",
+				ExitCode = -1,
+				DurationMs = sw.ElapsedMilliseconds,
+				TimedOut = timedOut,
+				StderrPreview = ex.GetType().Name + ": " + ex.Message,
+				Passed = false,
+				Note = timedOut
+					? "Verification scan timed out; this is inconclusive (the rule may have been created locally) rather than proof of absence."
+					: "Verification query raised an exception.",
+			});
+			return false;
+		}
+	}
+
+	/// <summary>Cleanup verification: confirms the temporary rule is no longer present after the unblock.
+	/// Records duration and treats a scan timeout as inconclusive (non-fatal) rather than as a leaked
+	/// rule. Returns true only when the rule is positively confirmed absent.</summary>
+	private async Task<bool> VerifyTemporaryRuleAbsentAsync(
+		string canonicalIp,
+		string ruleName,
+		string? ruleHandle,
+		string? scannerBackend,
+		List<ToolProbeResultDto> steps,
+		CancellationToken ct)
+	{
+		System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+		try
+		{
+			IReadOnlyList<FirewallBlockEntry> entries =
+				await _windowsProvider.ListBlocksAsync(TemporaryProbeRuleBase, ct).ConfigureAwait(false);
+			sw.Stop();
+
+			bool stillPresent = entries.Any(e =>
+				string.Equals(e.RuleId, ruleName, StringComparison.OrdinalIgnoreCase)
+				|| (!string.IsNullOrEmpty(ruleHandle) && string.Equals(e.RuleId, ruleHandle, StringComparison.OrdinalIgnoreCase))
+				|| string.Equals(e.Ip, canonicalIp, StringComparison.OrdinalIgnoreCase));
+
+			steps.Add(new ToolProbeResultDto
+			{
+				ToolName = "verify temporary block rule removed",
+				Executable = "(firewall provider list)",
+				Arguments = ruleName,
+				RunnerMode = scannerBackend ?? "Direct",
+				ExitCode = stillPresent ? 1 : 0,
+				DurationMs = sw.ElapsedMilliseconds,
+				TimedOut = false,
+				StdoutPreview = string.Format(
+					CultureInfo.InvariantCulture,
+					"Post-cleanup list returned {0} RdpAudit rule(s); temporary rule {1}.",
+					entries.Count,
+					stillPresent ? "STILL PRESENT" : "absent"),
+				Passed = !stillPresent,
+				Note = stillPresent
+					? "Temporary rule was still present after cleanup; a stray rule may remain — re-run cleanup or remove it manually."
+					: "Temporary rule confirmed removed from the firewall store.",
+			});
+			return !stillPresent;
+		}
+		catch (OperationCanceledException) when (ct.IsCancellationRequested)
+		{
+			throw;
+		}
+		catch (Exception ex)
+		{
+			sw.Stop();
+			bool timedOut = ex is TimeoutException or TaskCanceledException;
+			_logger.LogWarning(ex, "Temporary probe cleanup verification raised an exception for {Ip}", canonicalIp);
+			steps.Add(new ToolProbeResultDto
+			{
+				ToolName = "verify temporary block rule removed",
+				Executable = "(firewall provider list)",
+				Arguments = ruleName,
+				RunnerMode = scannerBackend ?? "Direct",
+				ExitCode = -1,
+				DurationMs = sw.ElapsedMilliseconds,
+				TimedOut = timedOut,
+				StderrPreview = ex.GetType().Name + ": " + ex.Message,
+				Passed = false,
+				Note = timedOut
+					? "Cleanup-verification scan timed out; removal could not be confirmed (inconclusive)."
+					: "Cleanup-verification query raised an exception.",
+			});
+			return false;
+		}
 	}
 
 	private ToolProbeResultDto StepFor(FirewallActionResult action, string toolName)
@@ -447,7 +569,7 @@ public sealed class ToolsDiagnosticsService
 		};
 	}
 
-	private static string BuildTemporaryFailureNote(bool created, bool verified, bool cleanedUp)
+	private static string BuildTemporaryFailureNote(bool created, bool verified, bool cleanedUp, bool cleanupConfirmed)
 	{
 		if (!created)
 		{
@@ -459,9 +581,14 @@ public sealed class ToolsDiagnosticsService
 			return "Temporary rule was created but could not be verified in the firewall store; cleanup was still attempted.";
 		}
 
-		return cleanedUp
+		if (!cleanedUp)
+		{
+			return "Temporary rule created and verified but cleanup did not confirm removal; check the cleanup step.";
+		}
+
+		return cleanupConfirmed
 			? "Temporary rule created and verified."
-			: "Temporary rule created and verified but cleanup did not confirm removal; check the cleanup step.";
+			: "Temporary rule created, verified and cleanup reported success, but the post-cleanup scan could not confirm the rule is gone; check the cleanup-verify step.";
 	}
 
 	private static IExternalCommandRunner BuildDefaultRunner()
