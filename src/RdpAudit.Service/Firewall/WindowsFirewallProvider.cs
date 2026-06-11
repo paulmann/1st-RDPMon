@@ -340,7 +340,8 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 					BackendAttempt = addAttempt,
 					VerifierReason = string.Format(
 						CultureInfo.InvariantCulture,
-						"matcher verify for {0}: {1} matching rule(s) (canonicalPresent={2}, duplicates={3}); broad group scan: {4} rule(s) via {5}.",
+						"targeted verify by name '{0}': found; matcher verify for {1}: {2} matching rule(s) (canonicalPresent={3}, duplicates={4}); broad group scan: {5} rule(s) via {6}.",
+						ruleName,
 						canonicalIp,
 						verifyMatch.Matches.Count,
 						verifyMatch.HasCanonicalRule,
