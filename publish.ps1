@@ -42,6 +42,37 @@ Set-StrictMode -Version Latest
 
 $publishRoot = Join-Path $PSScriptRoot "publish"
 
+# Force deterministic English .NET/MSBuild/NuGet output and a UTF-8 console. The project
+# intentionally emits English-only diagnostics; without these settings the .NET SDK localizes
+# restore/build messages to the Windows UI language. Localized SDK output can also become
+# mojibake when PowerShell captures external-process output and the host/output encodings differ.
+function Initialize-EnglishConsoleOutput {
+	$env:DOTNET_CLI_UI_LANGUAGE = "en"
+	$env:VSLANG = "1033"
+	$env:NUGET_CLI_LANGUAGE = "en"
+	$env:DOTNET_NOLOGO = "true"
+
+	$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+	[Console]::InputEncoding = $utf8NoBom
+	[Console]::OutputEncoding = $utf8NoBom
+	$global:OutputEncoding = $utf8NoBom
+
+	$script:DotnetLanguageArgs = @("-p:PreferredUILang=en-US")
+}
+
+Initialize-EnglishConsoleOutput
+
+function Invoke-DotnetCli {
+	param([Parameter(Mandatory = $true)][string[]]$Arguments)
+
+	$output = & dotnet @Arguments 2>&1
+	$exitCode = $LASTEXITCODE
+	foreach ($line in $output) {
+		Write-Host ([string]$line)
+	}
+	return $exitCode
+}
+
 # -----------------------------------------------------------------------------
 # Build SHA resolution
 # -----------------------------------------------------------------------------
@@ -449,15 +480,15 @@ function Publish-Project {
 		"-p:EnableCompressionInSingleFile=true",
 		"-p:VersionPrefix=$Version"
 	)
+	$publishArgs += $script:DotnetLanguageArgs
 	if (-not [string]::IsNullOrWhiteSpace($RevisionId)) {
 		$publishArgs += "-p:SourceRevisionId=$RevisionId"
 	}
 	$publishArgs += @("-o", $target)
 
-	dotnet publish @publishArgs
-
-	if ($LASTEXITCODE -ne 0) {
-		throw "publish failed: $Project (exit $LASTEXITCODE)"
+	$exitCode = Invoke-DotnetCli -Arguments (@("publish") + $publishArgs)
+	if ($exitCode -ne 0) {
+		throw "publish failed: $Project (exit $exitCode)"
 	}
 }
 
@@ -503,11 +534,9 @@ function Resolve-SqliteBundleSource {
 	# Ensure packages are restored before we attempt to resolve any dependency file. A missing
 	# or stale NuGet cache is repaired here rather than failing later with an opaque copy error.
 	Write-Host "Restoring $Project for SQLite bundle resolution..." -ForegroundColor DarkCyan
-	# Pipe to Out-Host so the dotnet console output is shown but NEVER leaks into this function's
-	# success stream — otherwise the returned value would be an array of log lines, not the path.
-	dotnet restore $projectFull -r win-x64 | Out-Host
-	if ($LASTEXITCODE -ne 0) {
-		throw ("dotnet restore failed for '{0}' (exit {1}). The SQLite support bundle cannot be assembled without restored NuGet packages. Run:`n    dotnet restore `"{0}`" -r win-x64`nand retry." -f $projectFull, $LASTEXITCODE)
+	$restoreExitCode = Invoke-DotnetCli -Arguments (@("restore", $projectFull, "-r", "win-x64") + $script:DotnetLanguageArgs)
+	if ($restoreExitCode -ne 0) {
+		throw ("dotnet restore failed for '{0}' (exit {1}). The SQLite support bundle cannot be assembled without restored NuGet packages. Run:`n    dotnet restore `"{0}`" -r win-x64`nand retry." -f $projectFull, $restoreExitCode)
 	}
 
 	$bundleObjDir = Join-Path $PSScriptRoot "publish/.sqlite-bundle"
@@ -518,10 +547,18 @@ function Resolve-SqliteBundleSource {
 	Write-Host "Building $Project (framework-dependent, loose files) for SQLite bundle resolution..." -ForegroundColor DarkCyan
 	# Self-contained=false keeps the build fast and small; the SQLite managed + native files are
 	# still emitted into the RID output folder because they are direct/transitive package assets.
-	dotnet build $projectFull -c $Configuration -r win-x64 --self-contained false `
-		-p:PublishSingleFile=false -p:VersionPrefix=$Version -o $bundleObjDir | Out-Host
-	if ($LASTEXITCODE -ne 0) {
-		throw ("dotnet build failed for '{0}' (exit {1}) while assembling the SQLite support bundle. Inspect the build output above; the most common cause is a missing NuGet package, which `dotnet restore` should repair." -f $projectFull, $LASTEXITCODE)
+	$buildArgs = @(
+		"build",
+		$projectFull,
+		"-c", $Configuration,
+		"-r", "win-x64",
+		"--self-contained", "false",
+		"-p:PublishSingleFile=false",
+		"-p:VersionPrefix=$Version"
+	) + $script:DotnetLanguageArgs + @("-o", $bundleObjDir)
+	$buildExitCode = Invoke-DotnetCli -Arguments $buildArgs
+	if ($buildExitCode -ne 0) {
+		throw ("dotnet build failed for '{0}' (exit {1}) while assembling the SQLite support bundle. Inspect the build output above; the most common cause is a missing NuGet package, which `dotnet restore` should repair." -f $projectFull, $buildExitCode)
 	}
 
 	return $bundleObjDir
