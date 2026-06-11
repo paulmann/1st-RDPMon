@@ -3,8 +3,8 @@
 // Purpose: Locks the QwinstaSessionMapper that converts pure parser rows into
 //          RdpSessionDto instances used by both the service-side and Configurator-side
 //          session-listing paths. Guarantees state normalisation, IsActive / IsDisconnected
-//          derivation and IsCurrent propagation are identical regardless of which side
-//          builds the rows.
+//          derivation, IsActiveRdp calculation and raw-query-current propagation remain
+//          stable while the operator-scoped IsCurrent flag is owned by CurrentRdpSessionMatcher.
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
@@ -18,7 +18,7 @@ namespace RdpAudit.Core.Tests;
 public class QwinstaSessionMapperTests
 {
 	[Fact]
-	public void Map_NormalisesActiveState_AndSetsIsActive()
+	public void Map_NormalisesActiveState_AndLeavesOperatorCurrentUnset()
 	{
 		QwinstaSessionRow row = new("rdp-tcp#3", "alice", 3, "Active", false);
 		RdpSessionDto dto = QwinstaSessionMapper.Map(row);
@@ -27,12 +27,11 @@ public class QwinstaSessionMapperTests
 		Assert.Equal("Active", dto.State);
 		Assert.True(dto.IsActive);
 		Assert.False(dto.IsDisconnected);
-		// v1.2.2 — an Active rdp-tcp# row with a non-empty user and a SessionId in the
-		// operator range must classify as the operator-visible active RDP session even
-		// when the raw qwinsta ">" marker is absent (the marker reflects the *query
-		// session* under LocalSystem, not the live remote session).
+		// v1.3.8 — an Active rdp-tcp# row with a non-empty user and a SessionId in the
+		// operator range is an active RDP session, but it is not necessarily the operator's
+		// current session. CurrentRdpSessionMatcher owns the narrower operator-scoped flag.
 		Assert.True(dto.IsActiveRdp);
-		Assert.True(dto.IsCurrent);
+		Assert.False(dto.IsCurrent);
 	}
 
 	[Fact]
@@ -46,14 +45,14 @@ public class QwinstaSessionMapperTests
 	}
 
 	[Fact]
-	public void Map_PropagatesQueryCurrentMarker_OnRawQwinstaMarker()
+	public void Map_PropagatesQueryCurrentMarker_WithoutSettingOperatorCurrent()
 	{
-		// v1.2.2 — the raw qwinsta ">" marker now flows onto IsQueryCurrent (operator-
-		// visible Current? is gated on the validated active-RDP semantics instead).
+		// v1.3.8 — the raw qwinsta ">" marker flows onto IsQueryCurrent only. Operator-
+		// visible Current? is gated on the validated Configurator process identity/session.
 		QwinstaSessionRow row = new("rdp-tcp#7", "admin", 7, "Active", true);
 		RdpSessionDto dto = QwinstaSessionMapper.Map(row);
 		Assert.True(dto.IsQueryCurrent);
-		Assert.True(dto.IsCurrent);
+		Assert.False(dto.IsCurrent);
 		Assert.True(dto.IsActiveRdp);
 	}
 

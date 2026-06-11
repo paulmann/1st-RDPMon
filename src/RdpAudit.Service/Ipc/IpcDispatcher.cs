@@ -4296,93 +4296,193 @@ public sealed class IpcDispatcher
 			await conn.OpenAsync(ct).ConfigureAwait(false);
 		}
 
-		foreach (string table in new[] { "RawEvents", "AuthAttemptFacts", "AttackStats", "OperationLogs" })
-		{
-			DiagnosticsTableSchema schema = new() { Table = table };
-			schema.Columns.AddRange(await ReadPragmaListAsync(conn, "table_info", table, columnIndex: 1, ct).ConfigureAwait(false));
-			schema.Indexes.AddRange(await ReadPragmaListAsync(conn, "index_list", table, columnIndex: 1, ct).ConfigureAwait(false));
-			schema.Exists = schema.Columns.Count > 0;
-			dto.TableSchemas.Add(schema);
+			foreach (DiagnosticSchemaTable table in new[]
+				{
+					DiagnosticSchemaTable.RawEvents,
+					DiagnosticSchemaTable.AuthAttemptFacts,
+					DiagnosticSchemaTable.AttackStats,
+					DiagnosticSchemaTable.OperationLogs,
+				})
+			{
+				DiagnosticsTableSchema schema = new() { Table = GetDiagnosticSchemaTableName(table) };
+				schema.Columns.AddRange(await ReadPragmaListAsync(conn, table, DiagnosticPragmaKind.TableInfo, columnIndex: 1, ct).ConfigureAwait(false));
+				schema.Indexes.AddRange(await ReadPragmaListAsync(conn, table, DiagnosticPragmaKind.IndexList, columnIndex: 1, ct).ConfigureAwait(false));
+				schema.Exists = schema.Columns.Count > 0;
+				dto.TableSchemas.Add(schema);
+			}
+
+			dto.SchemaAwareLatestRawEventUtc =
+				await ReadMaxUtcAsync(conn, DiagnosticWatermark.RawEventsTimeUtc, dto, ct).ConfigureAwait(false);
+			dto.SchemaAwareLatestAuthAttemptFactUtc =
+				await ReadMaxUtcAsync(conn, DiagnosticWatermark.AuthAttemptFactsTimeUtc, dto, ct).ConfigureAwait(false);
+			// AttackStats has LastSeenUtc, NOT TimeUtc — the week filter keys on LastSeenUtc.
+			dto.SchemaAwareLatestAttackStatLastSeenUtc =
+				await ReadMaxUtcAsync(conn, DiagnosticWatermark.AttackStatsLastSeenUtc, dto, ct).ConfigureAwait(false);
 		}
 
-		dto.SchemaAwareLatestRawEventUtc =
-			await ReadMaxUtcAsync(conn, "RawEvents", "TimeUtc", dto, ct).ConfigureAwait(false);
-		dto.SchemaAwareLatestAuthAttemptFactUtc =
-			await ReadMaxUtcAsync(conn, "AuthAttemptFacts", "TimeUtc", dto, ct).ConfigureAwait(false);
-		// AttackStats has LastSeenUtc, NOT TimeUtc — the week filter keys on LastSeenUtc.
-		dto.SchemaAwareLatestAttackStatLastSeenUtc =
-			await ReadMaxUtcAsync(conn, "AttackStats", "LastSeenUtc", dto, ct).ConfigureAwait(false);
-	}
-
-	/// <summary>Runs a single-column PRAGMA (e.g. <c>PRAGMA table_info(T)</c>) and returns the values of
-	/// the requested result column. Returns an empty list when the table is absent or the PRAGMA fails.</summary>
-	private static async Task<List<string>> ReadPragmaListAsync(
-		System.Data.Common.DbConnection conn, string pragma, string table, int columnIndex, CancellationToken ct)
-	{
-		List<string> values = new();
-		try
+		/// <summary>Runs a single-column PRAGMA (e.g. <c>PRAGMA table_info(T)</c>) and returns the values of
+		/// the requested result column. Returns an empty list when the table is absent or the PRAGMA fails.</summary>
+		private static async Task<List<string>> ReadPragmaListAsync(
+			System.Data.Common.DbConnection conn, DiagnosticSchemaTable table, DiagnosticPragmaKind pragma, int columnIndex, CancellationToken ct)
 		{
-			await using System.Data.Common.DbCommand cmd = conn.CreateCommand();
-			// PRAGMA does not accept bound parameters for the table name; the table set is a fixed,
-			// code-controlled allow-list (never operator input), so quoting is sufficient and safe.
-			cmd.CommandText = string.Format(CultureInfo.InvariantCulture, "PRAGMA {0}('{1}');", pragma, table.Replace("'", "''"));
-			await using System.Data.Common.DbDataReader reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
-			while (await reader.ReadAsync(ct).ConfigureAwait(false))
+			List<string> values = new();
+			try
 			{
-				if (columnIndex < reader.FieldCount && !reader.IsDBNull(columnIndex))
+				await using System.Data.Common.DbCommand cmd = conn.CreateCommand();
+				SetDiagnosticPragmaCommandText(cmd, table, pragma);
+				await using System.Data.Common.DbDataReader reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+				while (await reader.ReadAsync(ct).ConfigureAwait(false))
 				{
-					values.Add(reader.GetValue(columnIndex)?.ToString() ?? string.Empty);
+					if (columnIndex < reader.FieldCount && !reader.IsDBNull(columnIndex))
+					{
+						values.Add(reader.GetValue(columnIndex)?.ToString() ?? string.Empty);
+					}
 				}
 			}
-		}
-		catch (Exception)
-		{
-			// Absent table / older schema — leave the list empty; the caller marks Exists=false.
-		}
-
-		return values;
-	}
-
-	/// <summary>Reads <c>MAX(column)</c> from <paramref name="table"/> defensively: if the column does
-	/// not exist on this schema the query throws and we return null (recording a note) rather than
-	/// assuming the column is present. Parses the stored value as a UTC DateTime.</summary>
-	private static async Task<DateTime?> ReadMaxUtcAsync(
-		System.Data.Common.DbConnection conn, string table, string column, DiagnosticsSnapshotDto dto, CancellationToken ct)
-	{
-		try
-		{
-			await using System.Data.Common.DbCommand cmd = conn.CreateCommand();
-			cmd.CommandText = string.Format(CultureInfo.InvariantCulture,
-				"SELECT MAX(\"{0}\") FROM \"{1}\";", column.Replace("\"", "\"\""), table.Replace("\"", "\"\""));
-			object? raw = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
-			if (raw is null || raw is DBNull)
+			catch (Exception)
 			{
+				// Absent table / older schema — leave the list empty; the caller marks Exists=false.
+			}
+
+			return values;
+		}
+
+		/// <summary>Reads a fixed diagnostic watermark defensively: if the column does
+		/// not exist on this schema the query throws and we return null (recording a note) rather than
+		/// assuming the column is present. Parses the stored value as a UTC DateTime.</summary>
+		private static async Task<DateTime?> ReadMaxUtcAsync(
+			System.Data.Common.DbConnection conn, DiagnosticWatermark watermark, DiagnosticsSnapshotDto dto, CancellationToken ct)
+		{
+			try
+			{
+				await using System.Data.Common.DbCommand cmd = conn.CreateCommand();
+				SetDiagnosticWatermarkCommandText(cmd, watermark);
+				object? raw = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
+				if (raw is null || raw is DBNull)
+				{
+					return null;
+				}
+
+				if (raw is DateTime dt)
+				{
+					return DateTime.SpecifyKind(dt, DateTimeKind.Utc);
+				}
+
+				string? text = raw.ToString();
+				if (!string.IsNullOrWhiteSpace(text)
+					&& DateTime.TryParse(text, CultureInfo.InvariantCulture,
+						System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
+						out DateTime parsed))
+				{
+					return DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
+				}
+
 				return null;
 			}
-
-			if (raw is DateTime dt)
+			catch (Exception ex)
 			{
-				return DateTime.SpecifyKind(dt, DateTimeKind.Utc);
+				dto.RecentPipelineErrors.Add(string.Format(CultureInfo.InvariantCulture,
+					"Schema-aware {0} unavailable: {1}", GetDiagnosticWatermarkLabel(watermark), ex.GetType().Name));
+				return null;
 			}
-
-			string? text = raw.ToString();
-			if (!string.IsNullOrWhiteSpace(text)
-				&& DateTime.TryParse(text, CultureInfo.InvariantCulture,
-					System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal,
-					out DateTime parsed))
-			{
-				return DateTime.SpecifyKind(parsed, DateTimeKind.Utc);
-			}
-
-			return null;
 		}
-		catch (Exception ex)
+
+		/// <summary>Returns the display name for a fixed diagnostics table allow-list entry.</summary>
+		private static string GetDiagnosticSchemaTableName(DiagnosticSchemaTable table) =>
+			table switch
+			{
+				DiagnosticSchemaTable.RawEvents => "RawEvents",
+				DiagnosticSchemaTable.AuthAttemptFacts => "AuthAttemptFacts",
+				DiagnosticSchemaTable.AttackStats => "AttackStats",
+				DiagnosticSchemaTable.OperationLogs => "OperationLogs",
+				_ => throw new ArgumentOutOfRangeException(nameof(table), table, "Unknown diagnostics table."),
+			};
+
+		/// <summary>Assigns literal PRAGMA SQL for a fixed diagnostics table/kind allow-list.</summary>
+		private static void SetDiagnosticPragmaCommandText(
+			System.Data.Common.DbCommand cmd, DiagnosticSchemaTable table, DiagnosticPragmaKind pragma)
 		{
-			dto.RecentPipelineErrors.Add(string.Format(CultureInfo.InvariantCulture,
-				"Schema-aware MAX({0}) on {1} unavailable: {2}", column, table, ex.GetType().Name));
-			return null;
+			switch (table, pragma)
+			{
+				case (DiagnosticSchemaTable.RawEvents, DiagnosticPragmaKind.TableInfo):
+					cmd.CommandText = "PRAGMA table_info('RawEvents');";
+					break;
+				case (DiagnosticSchemaTable.RawEvents, DiagnosticPragmaKind.IndexList):
+					cmd.CommandText = "PRAGMA index_list('RawEvents');";
+					break;
+				case (DiagnosticSchemaTable.AuthAttemptFacts, DiagnosticPragmaKind.TableInfo):
+					cmd.CommandText = "PRAGMA table_info('AuthAttemptFacts');";
+					break;
+				case (DiagnosticSchemaTable.AuthAttemptFacts, DiagnosticPragmaKind.IndexList):
+					cmd.CommandText = "PRAGMA index_list('AuthAttemptFacts');";
+					break;
+				case (DiagnosticSchemaTable.AttackStats, DiagnosticPragmaKind.TableInfo):
+					cmd.CommandText = "PRAGMA table_info('AttackStats');";
+					break;
+				case (DiagnosticSchemaTable.AttackStats, DiagnosticPragmaKind.IndexList):
+					cmd.CommandText = "PRAGMA index_list('AttackStats');";
+					break;
+				case (DiagnosticSchemaTable.OperationLogs, DiagnosticPragmaKind.TableInfo):
+					cmd.CommandText = "PRAGMA table_info('OperationLogs');";
+					break;
+				case (DiagnosticSchemaTable.OperationLogs, DiagnosticPragmaKind.IndexList):
+					cmd.CommandText = "PRAGMA index_list('OperationLogs');";
+					break;
+				default:
+					throw new ArgumentOutOfRangeException(nameof(pragma), pragma, "Unknown diagnostics PRAGMA.");
+			}
 		}
-	}
+
+		/// <summary>Assigns literal SQL for a fixed diagnostics watermark allow-list.</summary>
+		private static void SetDiagnosticWatermarkCommandText(
+			System.Data.Common.DbCommand cmd, DiagnosticWatermark watermark)
+		{
+			switch (watermark)
+			{
+				case DiagnosticWatermark.RawEventsTimeUtc:
+					cmd.CommandText = "SELECT MAX(\"TimeUtc\") FROM \"RawEvents\";";
+					break;
+				case DiagnosticWatermark.AuthAttemptFactsTimeUtc:
+					cmd.CommandText = "SELECT MAX(\"TimeUtc\") FROM \"AuthAttemptFacts\";";
+					break;
+				case DiagnosticWatermark.AttackStatsLastSeenUtc:
+					cmd.CommandText = "SELECT MAX(\"LastSeenUtc\") FROM \"AttackStats\";";
+					break;
+				default:
+					throw new ArgumentOutOfRangeException(nameof(watermark), watermark, "Unknown diagnostics watermark.");
+			}
+		}
+
+		/// <summary>Returns a human-readable label for a diagnostics watermark.</summary>
+		private static string GetDiagnosticWatermarkLabel(DiagnosticWatermark watermark) =>
+			watermark switch
+			{
+				DiagnosticWatermark.RawEventsTimeUtc => "MAX(RawEvents.TimeUtc)",
+				DiagnosticWatermark.AuthAttemptFactsTimeUtc => "MAX(AuthAttemptFacts.TimeUtc)",
+				DiagnosticWatermark.AttackStatsLastSeenUtc => "MAX(AttackStats.LastSeenUtc)",
+				_ => "unknown watermark",
+			};
+
+		private enum DiagnosticSchemaTable
+		{
+			RawEvents,
+			AuthAttemptFacts,
+			AttackStats,
+			OperationLogs,
+		}
+
+		private enum DiagnosticPragmaKind
+		{
+			TableInfo,
+			IndexList,
+		}
+
+		private enum DiagnosticWatermark
+		{
+			RawEventsTimeUtc,
+			AuthAttemptFactsTimeUtc,
+			AttackStatsLastSeenUtc,
+		}
 
 	/// <summary>v1.3.4: fill the resolved-RDP-port diagnostic fields. On Windows the registry resolver
 	/// supplies both the port and its source (registry vs documented default); off Windows (CI / tests)
