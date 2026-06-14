@@ -249,6 +249,40 @@ public class IpcDispatcherStageIpDTests
 	}
 
 	[Fact]
+	public async Task ListConnectionFacts_TreatsLikeWildcardsInUserQueryLiterally()
+	{
+		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();
+		try
+		{
+			await SeedConnectionFactsAsync(factory);
+			IpcDispatcher dispatcher = CreateDispatcher(factory);
+
+			// A lone "%" would match every row if wildcards were honoured; with escaping it is a
+			// literal percent sign that matches none of the seeded user names.
+			ConnectionFactsDto wildcard = await CallAsync<ConnectionFactsDto>(dispatcher,
+				IpcCommand.ListConnectionFacts,
+				new ConnectionFactsRequest { UserQuery = "%" });
+			Assert.Equal(0, wildcard.TotalMatching);
+
+			// "_oot" would match "root" under wildcard semantics; literally it matches nothing.
+			ConnectionFactsDto underscore = await CallAsync<ConnectionFactsDto>(dispatcher,
+				IpcCommand.ListConnectionFacts,
+				new ConnectionFactsRequest { UserQuery = "_oot" });
+			Assert.Equal(0, underscore.TotalMatching);
+
+			// A hostile SQL/CRLF login is harmless literal text and simply matches nothing.
+			ConnectionFactsDto hostile = await CallAsync<ConnectionFactsDto>(dispatcher,
+				IpcCommand.ListConnectionFacts,
+				new ConnectionFactsRequest { UserQuery = "root' OR 1=1 --" });
+			Assert.Equal(0, hostile.TotalMatching);
+		}
+		finally
+		{
+			await conn.DisposeAsync();
+		}
+	}
+
+	[Fact]
 	public async Task ListConnectionFacts_ClampsRequestedLimitToMax()
 	{
 		(IDbContextFactory<AuditDbContext> factory, SqliteConnection conn) = await CreateDbAsync();

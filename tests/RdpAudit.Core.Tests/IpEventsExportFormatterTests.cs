@@ -139,6 +139,20 @@ public class IpEventsExportFormatterTests
 		Assert.Contains("evil name  next-line", text, StringComparison.Ordinal);
 	}
 
+	[Fact]
+	public void Txt_NeutralisesNewlines_InAttemptedUserNames()
+	{
+		EventsForIpDto dto = SampleDto();
+		// A malicious login containing CR/LF must not be able to inject a forged summary line.
+		dto.AttemptedUserNames = new List<string> { "administrator", "evil\r\nFailed logons: 0" };
+		string text = IpEventsExportFormatter.Format(dto, IpEventsExportFormat.Txt);
+
+		Assert.DoesNotContain("evil\r\nFailed logons: 0", text, StringComparison.Ordinal);
+		Assert.Contains("Attempted user names: administrator, evil  Failed logons: 0", text, StringComparison.Ordinal);
+		// The genuine summary line still reports the real failed count, not the injected one.
+		Assert.Contains("Failed logons: 40", text, StringComparison.Ordinal);
+	}
+
 	[Theory]
 	[InlineData(IpEventsExportFormat.Json, ".json")]
 	[InlineData(IpEventsExportFormat.Txt, ".txt")]

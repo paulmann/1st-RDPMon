@@ -1875,8 +1875,8 @@ public sealed class IpcDispatcher
 
 		if (!string.IsNullOrWhiteSpace(req.IpQuery))
 		{
-			string needle = req.IpQuery.Trim();
-			q = q.Where(s => EF.Functions.Like(s.Ip, "%" + needle + "%"));
+			string needle = SqlLikeEscaper.Escape(req.IpQuery.Trim());
+			q = q.Where(s => EF.Functions.Like(s.Ip, "%" + needle + "%", SqlLikeEscaper.EscapeString));
 		}
 
 		if (req.MinThreatScore.HasValue)
@@ -3475,11 +3475,11 @@ public sealed class IpcDispatcher
 
 			if (!string.IsNullOrWhiteSpace(req.SearchText))
 			{
-				string term = req.SearchText.Trim();
+				string term = SqlLikeEscaper.Escape(req.SearchText.Trim());
 				q = q.Where(r =>
-					EF.Functions.Like(r.Operation, "%" + term + "%")
-					|| EF.Functions.Like(r.Message, "%" + term + "%")
-					|| EF.Functions.Like(r.Source, "%" + term + "%"));
+					EF.Functions.Like(r.Operation, "%" + term + "%", SqlLikeEscaper.EscapeString)
+					|| EF.Functions.Like(r.Message, "%" + term + "%", SqlLikeEscaper.EscapeString)
+					|| EF.Functions.Like(r.Source, "%" + term + "%", SqlLikeEscaper.EscapeString));
 			}
 
 			// Default-view noise suppression: hide Debug-classified rows and the high-volume IPC
@@ -3733,14 +3733,14 @@ public sealed class IpcDispatcher
 
 		if (!string.IsNullOrWhiteSpace(req.IpQuery))
 		{
-			string needle = req.IpQuery.Trim();
-			q = q.Where(r => EF.Functions.Like(r.Ip, "%" + needle + "%"));
+			string needle = SqlLikeEscaper.Escape(req.IpQuery.Trim());
+			q = q.Where(r => EF.Functions.Like(r.Ip, "%" + needle + "%", SqlLikeEscaper.EscapeString));
 		}
 
 		if (!string.IsNullOrWhiteSpace(req.UserQuery))
 		{
-			string needleU = req.UserQuery.Trim();
-			q = q.Where(r => r.UserName != null && EF.Functions.Like(r.UserName, "%" + needleU + "%"));
+			string needleU = SqlLikeEscaper.Escape(req.UserQuery.Trim());
+			q = q.Where(r => r.UserName != null && EF.Functions.Like(r.UserName, "%" + needleU + "%", SqlLikeEscaper.EscapeString));
 		}
 
 		if (req.SinceUtc.HasValue)
