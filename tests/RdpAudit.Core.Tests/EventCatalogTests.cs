@@ -26,7 +26,7 @@ public class EventCatalogTests
 	[Fact]
 	public void AllChannels_HasNoDuplicates()
 	{
-		IReadOnlyList<string> channels = EventCatalog.AllChannels().ToList();
+		List<string> channels = EventCatalog.AllChannels().ToList();
 		Assert.Equal(channels.Count, channels.Distinct(StringComparer.OrdinalIgnoreCase).Count());
 	}
 

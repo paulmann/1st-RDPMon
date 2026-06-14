@@ -1203,7 +1203,7 @@ public sealed class EnforcementReconciliationService
 	/// <summary>Builds the pure reconciliation report from the supplied DB rows by scanning every
 	/// backend that owns at least one row.</summary>
 	private async Task<ReconciliationReport> BuildReportAsync(
-		IReadOnlyList<ActiveBlock> rows,
+		List<ActiveBlock> rows,
 		FirewallOptions cfg,
 		string rulePrefix,
 		DateTime nowUtc,
