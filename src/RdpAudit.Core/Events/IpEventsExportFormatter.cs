@@ -205,7 +205,7 @@ public static class IpEventsExportFormatter
 		sb.Append(prefix).Append("Attempted user names: ").AppendLine(
 			dto.AttemptedUserNames.Count == 0
 				? "(none recorded)"
-				: string.Join(", ", dto.AttemptedUserNames));
+				: string.Join(", ", dto.AttemptedUserNames.Select(SanitiseInline)));
 		sb.Append(prefix).Append("Exported at (UTC): ").AppendLine(dto.QueriedUtc.ToString(TimeFormat, CultureInfo.InvariantCulture));
 	}
 
