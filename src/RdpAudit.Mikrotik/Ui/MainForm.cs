@@ -11,7 +11,7 @@
  *          to the panel map in BuildSteps and the reachability order in OnStepCompleted.
  *
  * Author : Mikhail Deynekin — https://Deynekin.com
- * Version: 1.0.0
+ * Version: 1.0.1
  */
 
 using System.Net;
@@ -107,11 +107,12 @@ public sealed class MainForm : Form
 	private void WireEvents()
 	{
 		_connectionPanel.ProbeRequested += OnProbeRequested;
-		_stepList.StepSelected += (_, step) => ActivateStep(step);
+		_stepList.StepSelected += (_, e) => ActivateStep(e.Step);
 	}
 
-	private async void OnProbeRequested(object? sender, ConnectionEndpoint endpoint)
+	private async void OnProbeRequested(object? sender, ProbeRequestedEventArgs e)
 	{
+		ConnectionEndpoint endpoint = e.Endpoint;
 		_context.Endpoint = endpoint;
 		_connectionPanel.ShowStatus("Probing " + endpoint.RouterIp + " ...");
 		try

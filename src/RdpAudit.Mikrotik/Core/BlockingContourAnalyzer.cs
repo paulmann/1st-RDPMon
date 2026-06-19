@@ -11,7 +11,7 @@
  *          Analyze and surface it through a new BlockingContourReport flag plus a recommendation line.
  *
  * Author : Mikhail Deynekin — https://Deynekin.com
- * Version: 1.0.0
+ * Version: 1.0.1
  */
 
 namespace RdpAudit.Mikrotik.Core;
@@ -76,7 +76,7 @@ public sealed class BlockingContourAnalyzer
 
 			if (string.Equals(action, "fasttrack-connection", StringComparison.OrdinalIgnoreCase) && fastTrackId is null)
 			{
-				fastTrackId = row.GetValueOrDefault(".id", null);
+				fastTrackId = row.TryGetValue(".id", out string? idValue) ? idValue : null;
 			}
 
 			if (Helpers.RdpAuditTagHelper.IsRdpAuditManaged(comment))

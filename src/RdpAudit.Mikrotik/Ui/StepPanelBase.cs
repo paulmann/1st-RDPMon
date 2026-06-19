@@ -9,7 +9,7 @@
  *          overrides RunActionAsync; to change the shared layout, edit BuildLayout once here.
  *
  * Author : Mikhail Deynekin — https://Deynekin.com
- * Version: 1.0.0
+ * Version: 1.0.1
  */
 
 using System.Drawing;
@@ -44,7 +44,7 @@ public abstract class StepPanelBase : Panel
 	public event EventHandler? StepCompleted;
 
 	/// <summary>Raised when this step fails (host marks the step Failed).</summary>
-	public event EventHandler<string>? StepFailed;
+	public event EventHandler<StepFailedEventArgs>? StepFailed;
 
 	/// <summary>Shared wizard state.</summary>
 	protected WizardContext Context { get; }
@@ -83,7 +83,7 @@ public abstract class StepPanelBase : Panel
 	protected void CompleteStep() => StepCompleted?.Invoke(this, EventArgs.Empty);
 
 	/// <summary>Signals failure of this step with a message.</summary>
-	protected void FailStep(string message) => StepFailed?.Invoke(this, message);
+	protected void FailStep(string message) => StepFailed?.Invoke(this, new StepFailedEventArgs(message));
 
 	/// <summary>Enables/disables the action button (used while an async action runs).</summary>
 	protected void SetBusy(bool busy)
