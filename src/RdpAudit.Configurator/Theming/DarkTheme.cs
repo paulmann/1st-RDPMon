@@ -12,6 +12,11 @@
 //
 //          v2.0.0 — introduced as part of the full-Configurator dark redesign so MikroTik-grade
 //          styling is applied uniformly across all tabs.
+//
+//          v2.1.0 — repalette to Catppuccin Mocha (dark blue) to match the MikroTik setup module
+//          (Base #1E1E2E, Text #CDD6F4, Blue #89B4FA accent, Segoe UI 9pt). Owner-draws every nested
+//          TabControl (fixes the grey strip band and the unstyled Firewall sub-tabs), guarantees
+//          buttons are never dark-on-dark, and gives buttons rounded pill regions.
 // Depends: System.Windows.Forms, System.Drawing
 // Extends: To add a new themed control type, add a branch in ApplyToControl. To tweak the palette,
 //          change the static Color fields here — every tab picks the change up automatically. To add
@@ -19,7 +24,7 @@
 //
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
-// Version: 2.0.0
+// Version: 2.1.0
 
 using System.Runtime.Versioning;
 
@@ -33,53 +38,62 @@ public static class DarkTheme
 	// ── Constants ────────────────────────────────────────────────────────────────
 	// Marker stored in ListView.Tag so owner-draw handlers are wired exactly once.
 	private const string ThemedTag = "DarkTheme.ListView";
+	// Marker stored in Button.Tag so the rounded-region wiring runs exactly once.
+	private const string RoundedTag = "DarkTheme.RoundedButton";
+	// Marker stored in TabControl.Tag so owner-draw wiring runs exactly once.
+	private const string TabbedTag = "DarkTheme.TabControl";
 
-	// ── Palette ──────────────────────────────────────────────────────────────────
-	public static readonly Color PageBack = Color.FromArgb(30, 30, 30);
-	public static readonly Color PanelBack = Color.FromArgb(40, 40, 40);
-	public static readonly Color CardBack = Color.FromArgb(45, 45, 45);
-	public static readonly Color CardBorder = Color.FromArgb(70, 70, 70);
-	public static readonly Color TextPrimary = Color.FromArgb(220, 220, 220);
-	public static readonly Color TextSecondary = Color.FromArgb(150, 150, 150);
-	public static readonly Color InputBack = Color.FromArgb(55, 55, 55);
-	public static readonly Color InputBorder = Color.FromArgb(80, 80, 80);
-	public static readonly Color AccentHeader = Color.FromArgb(180, 200, 255);
-	public static readonly Color ButtonNormal = Color.FromArgb(60, 100, 180);
-	public static readonly Color ButtonHover = Color.FromArgb(80, 120, 200);
-	public static readonly Color DangerButton = Color.FromArgb(160, 50, 50);
-	public static readonly Color DangerHover = Color.FromArgb(190, 70, 70);
-	public static readonly Color SuccessAccent = Color.FromArgb(50, 160, 80);
-	public static readonly Color SuccessHover = Color.FromArgb(70, 180, 100);
-	public static readonly Color StatusBack = Color.FromArgb(35, 35, 35);
-	public static readonly Color StatusFore = Color.FromArgb(180, 180, 180);
-	public static readonly Color ToolbarBack = Color.FromArgb(38, 38, 38);
+	// ── Palette — Catppuccin Mocha (dark blue) ──────────────────────────────────────────────────────────────────
+	public static readonly Color PageBack = Color.FromArgb(30, 30, 46);
+	public static readonly Color PanelBack = Color.FromArgb(40, 40, 60);
+	public static readonly Color CardBack = Color.FromArgb(49, 50, 68);
+	public static readonly Color CardBorder = Color.FromArgb(69, 71, 90);
+	public static readonly Color TextPrimary = Color.FromArgb(205, 214, 244);
+	public static readonly Color TextSecondary = Color.FromArgb(166, 173, 200);
+	public static readonly Color InputBack = Color.FromArgb(49, 50, 68);
+	public static readonly Color InputBorder = Color.FromArgb(88, 91, 112);
+	public static readonly Color AccentHeader = Color.FromArgb(137, 180, 250);
+	public static readonly Color ButtonNormal = Color.FromArgb(137, 180, 250);
+	public static readonly Color ButtonHover = Color.FromArgb(180, 190, 254);
+	public static readonly Color DangerButton = Color.FromArgb(243, 139, 168);
+	public static readonly Color DangerHover = Color.FromArgb(235, 160, 185);
+	public static readonly Color SuccessAccent = Color.FromArgb(166, 227, 161);
+	public static readonly Color SuccessHover = Color.FromArgb(190, 235, 185);
+	public static readonly Color StatusBack = Color.FromArgb(24, 24, 37);
+	public static readonly Color StatusFore = Color.FromArgb(166, 173, 200);
+	public static readonly Color ToolbarBack = Color.FromArgb(24, 24, 37);
+	public static readonly Color ButtonFore = Color.FromArgb(30, 30, 46);
 
 	// Grid colours.
-	public static readonly Color GridBack = Color.FromArgb(30, 30, 30);
-	public static readonly Color GridLines = Color.FromArgb(60, 60, 60);
-	public static readonly Color CellBack = Color.FromArgb(40, 40, 40);
-	public static readonly Color AltRowBack = Color.FromArgb(45, 45, 45);
-	public static readonly Color SelectionBack = Color.FromArgb(60, 100, 180);
-	public static readonly Color SelectionFore = Color.FromArgb(255, 255, 255);
-	public static readonly Color HeaderBack = Color.FromArgb(50, 50, 50);
-	public static readonly Color HeaderFore = Color.FromArgb(180, 200, 255);
+	public static readonly Color GridBack = Color.FromArgb(17, 17, 27);
+	public static readonly Color GridLines = Color.FromArgb(69, 71, 90);
+	public static readonly Color CellBack = Color.FromArgb(30, 30, 46);
+	public static readonly Color AltRowBack = Color.FromArgb(36, 37, 56);
+	public static readonly Color SelectionBack = Color.FromArgb(137, 180, 250);
+	public static readonly Color SelectionFore = Color.FromArgb(30, 30, 46);
+	public static readonly Color HeaderBack = Color.FromArgb(49, 50, 68);
+	public static readonly Color HeaderFore = Color.FromArgb(137, 180, 250);
 
 	// Tab strip colours.
-	public static readonly Color TabBack = Color.FromArgb(32, 32, 32);
-	public static readonly Color TabSelectedBack = Color.FromArgb(50, 50, 50);
-	public static readonly Color TabAccent = Color.FromArgb(90, 140, 230);
+	public static readonly Color TabBack = Color.FromArgb(24, 24, 37);
+	public static readonly Color TabSelectedBack = Color.FromArgb(49, 50, 68);
+	public static readonly Color TabAccent = Color.FromArgb(137, 180, 250);
 
 	// Semantic status colours — bright enough to read on the dark background.
-	public static readonly Color StatusSuccess = Color.FromArgb(90, 210, 120);
-	public static readonly Color StatusWarning = Color.FromArgb(240, 195, 90);
-	public static readonly Color StatusDanger = Color.FromArgb(235, 110, 110);
-	public static readonly Color StatusInfo = Color.FromArgb(120, 180, 255);
+	public static readonly Color StatusSuccess = Color.FromArgb(166, 227, 161);
+	public static readonly Color StatusWarning = Color.FromArgb(249, 226, 175);
+	public static readonly Color StatusDanger = Color.FromArgb(243, 139, 168);
+	public static readonly Color StatusInfo = Color.FromArgb(137, 180, 250);
 
 	// Row tint backgrounds for status-coloured grid rows on the dark surface.
-	public static readonly Color RowSuccessBack = Color.FromArgb(30, 65, 30);
-	public static readonly Color RowWarningBack = Color.FromArgb(70, 45, 25);
-	public static readonly Color RowDangerBack = Color.FromArgb(75, 30, 30);
-	public static readonly Color RowMutedBack = Color.FromArgb(42, 42, 42);
+	public static readonly Color RowSuccessBack = Color.FromArgb(34, 50, 42);
+	public static readonly Color RowWarningBack = Color.FromArgb(56, 50, 36);
+	public static readonly Color RowDangerBack = Color.FromArgb(58, 34, 42);
+	public static readonly Color RowMutedBack = Color.FromArgb(36, 37, 56);
+
+	// Shared UI font for the whole Configurator (Segoe UI 9pt) — applied to every page so the typography
+	// matches the MikroTik setup module.
+	public static readonly Font UiFont = new("Segoe UI", 9f, FontStyle.Regular, GraphicsUnit.Point);
 
 	// ── Public API ───────────────────────────────────────────────────────────────
 
@@ -88,6 +102,14 @@ public static class DarkTheme
 	public static void Apply(Control root)
 	{
 		ArgumentNullException.ThrowIfNull(root);
+		// Apply the shared Segoe UI 9pt font once at the root; child controls inherit it unless they set
+		// their own (e.g. the monospace command box on the MikroTik tab), so we never clobber a deliberate
+		// per-control font choice further down the tree.
+		if (root is Form or TabPage)
+		{
+			root.Font = UiFont;
+		}
+
 		ApplyToControl(root);
 		foreach (Control child in root.Controls)
 		{
@@ -140,9 +162,21 @@ public static class DarkTheme
 		button.FlatAppearance.MouseOverBackColor = hoverColor;
 		button.FlatAppearance.MouseDownBackColor = hoverColor;
 		button.BackColor = baseColor;
-		button.ForeColor = Color.White;
+		// Dark text on the bright accent face reads best; darker faces (Danger/Success tints) keep
+		// light text. Choose automatically from the perceived luminance of the face colour.
+		button.ForeColor = Luminance(baseColor) > 0.6 ? ButtonFore : TextPrimary;
 		button.UseVisualStyleBackColor = false;
 		button.Cursor = Cursors.Hand;
+		button.Font = UiFont;
+
+		// Rounded corners: recompute the region whenever the button is resized so the rounded shape
+		// tracks layout/DPI changes. Wired exactly once via the Tag marker.
+		if (button.Tag as string != RoundedTag)
+		{
+			button.Tag = RoundedTag;
+			button.Resize += (_, _) => ApplyRoundedRegion(button);
+			ApplyRoundedRegion(button);
+		}
 	}
 
 	/// <summary>Creates a ready-to-use dark ToolStrip renderer for ContextMenuStrip / MenuStrip / ToolStrip.</summary>
@@ -159,18 +193,18 @@ public static class DarkTheme
 				break;
 
 			case Button button:
-				// Preserve any colour already chosen by the page (e.g. Danger / Success / bulk buttons);
-				// only theme buttons still wearing the default system face.
+				// Buttons with a default system face get the accent blue; deliberate page colours are kept
+				// but still routed through StyleButton so nothing is dark-on-dark.
 				if (IsDefaultFace(button.BackColor))
 				{
 					StyleButton(button);
 				}
 				else
 				{
-					button.FlatStyle = FlatStyle.Flat;
-					button.FlatAppearance.BorderSize = 0;
-					button.ForeColor = Color.White;
-					button.UseVisualStyleBackColor = false;
+					// Route deliberate page colours (Danger / Success / bulk) through StyleButton too, so the
+					// face stays visible with a matching hover instead of the old path that left a too-dark
+					// BackColor untouched and made some buttons vanish into the background.
+					StyleButton(button, button.BackColor, Lighten(button.BackColor, 0.18));
 				}
 				break;
 
@@ -260,8 +294,8 @@ public static class DarkTheme
 				}
 				break;
 
-			case TabControl:
-				// MainForm owner-draws the tab strip; nothing to recolour on the control itself.
+			case TabControl tabControl:
+				StyleTabControl(tabControl);
 				break;
 
 			case Form form:
@@ -347,6 +381,117 @@ public static class DarkTheme
 		// Item / sub-item rows render with the system defaults against the dark BackColor we set above.
 		listView.DrawItem += (_, e) => e.DrawDefault = true;
 		listView.DrawSubItem += (_, e) => e.DrawDefault = true;
+	}
+
+
+	/// <summary>Owner-draws a TabControl so both the tab headers and the strip band match the dark-blue
+	/// theme. WinForms paints the tab band and the page-area border with the classic light system colour
+	/// regardless of <see cref="Control.BackColor"/>; left alone that produces the grey strip under the
+	/// tabs and around nested tab pages. We therefore set OwnerDrawFixed and paint every tab ourselves,
+	/// and we recolour each contained TabPage. Wired exactly once via the Tag marker so a second Apply is
+	/// idempotent. The MainForm shell wires its own equivalent drawing on the outer tab strip; this method
+	/// themes every nested TabControl the recursive Apply finds (e.g. the Firewall page's Blocklist /
+	/// Whitelist sub-tabs), which previously kept the light system band.</summary>
+	private static void StyleTabControl(TabControl tab)
+	{
+		tab.BackColor = PageBack;
+		tab.ForeColor = TextPrimary;
+
+		foreach (TabPage page in tab.TabPages)
+		{
+			page.BackColor = PageBack;
+			page.ForeColor = TextPrimary;
+			page.UseVisualStyleBackColor = false;
+		}
+
+		if (tab.Tag as string == TabbedTag)
+		{
+			return;
+		}
+
+		tab.Tag = TabbedTag;
+		tab.DrawMode = TabDrawMode.OwnerDrawFixed;
+		// FlatButtons removes the classic raised 3-D page border that WinForms otherwise paints in the
+		// light system colour around the page area and under the tab row (the grey band the user saw).
+		tab.Appearance = TabAppearance.FlatButtons;
+		tab.DrawItem += OnDrawDarkTab;
+	}
+
+	/// <summary>Shared owner-draw handler painting one dark tab header: the active tab sits on a raised
+	/// surface with a bright accent bar; inactive tabs sit on the darker strip band. Used by every nested
+	/// TabControl the recursive Apply discovers.</summary>
+	private static void OnDrawDarkTab(object? sender, DrawItemEventArgs e)
+	{
+		if (sender is not TabControl tab || e.Index < 0 || e.Index >= tab.TabPages.Count)
+		{
+			return;
+		}
+
+		TabPage page = tab.TabPages[e.Index];
+		bool selected = e.Index == tab.SelectedIndex;
+		Rectangle bounds = e.Bounds;
+
+		Color back = selected ? TabSelectedBack : TabBack;
+		Color fore = selected ? AccentHeader : TextPrimary;
+
+		using (SolidBrush backBrush = new(back))
+		{
+			e.Graphics.FillRectangle(backBrush, bounds);
+		}
+
+		if (selected)
+		{
+			using SolidBrush accentBrush = new(TabAccent);
+			e.Graphics.FillRectangle(accentBrush, bounds.Left, bounds.Top, bounds.Width, 3);
+		}
+
+		using Font font = new(tab.Font, selected ? FontStyle.Bold : FontStyle.Regular);
+		TextRenderer.DrawText(
+			e.Graphics,
+			page.Text,
+			font,
+			bounds,
+			fore,
+			TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+	}
+
+	/// <summary>Rebuilds a button's rounded-rectangle region so the flat accent buttons read as rounded
+	/// pills like the MikroTik module. No-op for degenerate sizes (transiently zero during construction).</summary>
+	private static void ApplyRoundedRegion(Button button)
+	{
+		int w = button.Width;
+		int h = button.Height;
+		if (w <= 1 || h <= 1)
+		{
+			return;
+		}
+
+		int radius = Math.Max(2, Math.Min(10, h / 3));
+		int d = radius * 2;
+		using System.Drawing.Drawing2D.GraphicsPath path = new();
+		path.AddArc(0, 0, d, d, 180, 90);
+		path.AddArc(w - d - 1, 0, d, d, 270, 90);
+		path.AddArc(w - d - 1, h - d - 1, d, d, 0, 90);
+		path.AddArc(0, h - d - 1, d, d, 90, 90);
+		path.CloseFigure();
+		button.Region?.Dispose();
+		button.Region = new Region(path);
+	}
+
+	/// <summary>Perceived luminance (0..1) of a colour via the Rec. 601 weighting; used to pick a
+	/// readable foreground over a button face.</summary>
+	private static double Luminance(Color c) =>
+		((0.299 * c.R) + (0.587 * c.G) + (0.114 * c.B)) / 255.0;
+
+	/// <summary>Returns <paramref name="c"/> lightened toward white by <paramref name="amount"/> (0..1).
+	/// Used to synthesize a hover colour for buttons that carry a deliberate page face.</summary>
+	private static Color Lighten(Color c, double amount)
+	{
+		double a = Math.Clamp(amount, 0.0, 1.0);
+		int r = (int)Math.Round(c.R + ((255 - c.R) * a));
+		int g = (int)Math.Round(c.G + ((255 - c.G) * a));
+		int b = (int)Math.Round(c.B + ((255 - c.B) * a));
+		return Color.FromArgb(c.A, r, g, b);
 	}
 
 	// ── Helpers ──────────────────────────────────────────────────────────────────
