@@ -22,6 +22,10 @@
 //          v2.3.0 — nested TabControls use the classic (Normal) appearance and paint their strip band /
 //                   page-area edge dark via OnPaintTabStripBand, so no light system band remains behind or
 //                   under the Blocklist / Whitelist sub-tab row.
+//          v2.4.0 — the managed Paint approach could not reach the tab-strip header band, so strip
+//                   theming now goes through DarkTabStripPainter (a Win32 NativeWindow subclass) which
+//                   fills every non-tab region of the strip dark, finally removing the light tail right of
+//                   the last tab and the band under the Blocklist / Whitelist rows.
 // Depends: System.Windows.Forms, System.Drawing
 // Extends: To add a new themed control type, add a branch in ApplyToControl. To tweak the palette,
 //          change the static Color fields here — every tab picks the change up automatically. To add a
@@ -29,7 +33,7 @@
 //
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
-// Version: 2.3.0
+// Version: 2.4.0
 
 using System.Runtime.Versioning;
 
@@ -617,25 +621,12 @@ public static class DarkTheme
 		tab.SizeMode = TabSizeMode.Normal;
 		tab.Padding = new Point(14, 4);
 		tab.DrawItem += OnDrawDarkTab;
-		// Paint the strip band / page-area edge dark before the tabs are drawn so no light system band
-		// remains behind or under the tab headers.
-		tab.Paint += OnPaintTabStripBand;
-	}
-
-	/// <summary>Fills the tab-strip band and the page-area border of a TabControl with the dark page
-	/// colour so WinForms' light system band never shows behind or under the tab headers. Runs before the
-	/// owner-drawn tab headers (which paint on top).</summary>
-	private static void OnPaintTabStripBand(object? sender, PaintEventArgs e)
-	{
-		if (sender is not TabControl tab)
-		{
-			return;
-		}
-
-		using SolidBrush back = new(PageBack);
-		// The strip band is the area above the page content. Painting the whole client rectangle is safe
-		// because the selected TabPage paints its own (dark) surface on top of this.
-		e.Graphics.FillRectangle(back, tab.ClientRectangle);
+		// The managed Paint event never fires for the tab-strip header band (WinForms draws it itself in
+		// the light system colour), so a Win32 subclass is the only reliable way to repaint the empty strip
+		// area: the grey tail right of the last tab, the gaps between wrapped rows, and the band above /
+		// under the headers. DarkTabStripPainter fills every non-tab region with PageBack while leaving the
+		// owner-drawn tab glyphs intact.
+		DarkTabStripPainter.AttachTo(tab, PageBack);
 	}
 
 	/// <summary>Shared owner-draw handler painting one dark tab header: the active tab sits on a raised

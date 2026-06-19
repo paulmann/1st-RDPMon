@@ -11,6 +11,7 @@
 // Extends: System.Windows.Forms.TabPage
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.1.0
 
 using System.Globalization;
 using System.Runtime.Versioning;
@@ -20,6 +21,7 @@ using RdpAudit.Configurator.Services;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
 
+using RdpAudit.Configurator.Theming;
 using static RdpAudit.Configurator.Theming.DarkTheme;
 
 namespace RdpAudit.Configurator.Forms;
@@ -117,6 +119,7 @@ public sealed class ToolsDiagPage : TabPage
 
 		split.Panel1.Controls.Add(_grid);
 		split.Panel2.Controls.Add(_report);
+		DataGridClipboardMenu.Attach(_grid);
 
 		Controls.Add(split);
 		Controls.Add(_status);

@@ -8,6 +8,7 @@
 // Extends: System.Windows.Forms.TabPage
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.1.0
 
 using System.Globalization;
 using System.Runtime.Versioning;
@@ -17,6 +18,7 @@ using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
 using RdpAudit.Core.Models;
 
+using RdpAudit.Configurator.Theming;
 using static RdpAudit.Configurator.Theming.DarkTheme;
 
 namespace RdpAudit.Configurator.Forms;
@@ -184,6 +186,7 @@ public sealed class LogsPage : TabPage
 		};
 		split.Panel1.Controls.Add(_grid);
 		split.Panel2.Controls.Add(_detail);
+		DataGridClipboardMenu.Attach(_grid);
 
 		Controls.Add(split);
 		Controls.Add(_debugBanner);

@@ -13,6 +13,7 @@
 // Extends: System.Windows.Forms.TabPage
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.1.0
 
 using System.ComponentModel;
 using System.Globalization;
@@ -27,6 +28,7 @@ using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Models;
 using RdpAudit.Core.Util;
 
+using RdpAudit.Configurator.Theming;
 using static RdpAudit.Configurator.Theming.DarkTheme;
 
 namespace RdpAudit.Configurator.Forms;
@@ -163,6 +165,7 @@ public sealed class ServicePage : TabPage
 		_alertsMenu.Opening += OnAlertsMenuOpening;
 		_alertsGrid.ContextMenuStrip = _alertsMenu;
 		_alertsGrid.CellMouseDown += OnAlertsCellMouseDown;
+		DataGridClipboardMenu.AppendTo(_alertsMenu, _alertsGrid);
 
 		Controls.Add(_alertsGrid);
 		Controls.Add(_layoutPanel);
