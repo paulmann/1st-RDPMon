@@ -1,47 +1,50 @@
 // File:    src/RdpAudit.Configurator/Theming/DarkTheme.cs
 // Module:  RdpAudit.Configurator.Theming
-// Purpose: Single source of truth for the Configurator's dark visual language. Holds the shared
-//          colour palette (identical ARGB values previously duplicated inside RdpConfigurationPage
-//          and RemoteRdpClientsPage) and exposes a recursive Apply(Control) that themes any WinForms
-//          control tree — Panels, Labels, LinkLabels, Buttons, TextBoxes, ComboBoxes, CheckBoxes,
-//          RadioButtons, NumericUpDowns, GroupBoxes, DataGridViews, ListViews, TreeViews,
-//          TabControls, StatusStrips, ToolStrips and ContextMenuStrips — so every tab inherits the
-//          same look without per-page rewrites. Also provides StyleGrid / StyleButton helpers, a
-//          dark ToolStrip/menu renderer, and semantic status colours (Success / Warning / Danger /
-//          Info) that stay legible on the dark background.
+// Purpose: Single source of truth for the Configurator's dark-blue visual language. Holds the shared
+//          colour palette (Catppuccin Mocha) and exposes a recursive Apply(Control) that themes any
+//          WinForms control tree — Panels, Labels, LinkLabels, Buttons, TextBoxes, ComboBoxes,
+//          CheckBoxes, RadioButtons, NumericUpDowns, GroupBoxes, DataGridViews, ListViews, TreeViews,
+//          TabControls, StatusStrips, ToolStrips and the ContextMenuStrips attached to controls — so
+//          every tab inherits the same look without per-page rewrites. Also provides StyleGrid /
+//          StyleButton / StyleMenu helpers, owner-draw for check/radio indicators (bright-green so the
+//          checked state is unmistakable on the dark surface), a dark ToolStrip/menu renderer, and
+//          semantic status colours that stay legible on the dark background.
 //
-//          v2.0.0 — introduced as part of the full-Configurator dark redesign so MikroTik-grade
-//          styling is applied uniformly across all tabs.
-//
-//          v2.1.0 — repalette to Catppuccin Mocha (dark blue) to match the MikroTik setup module
-//          (Base #1E1E2E, Text #CDD6F4, Blue #89B4FA accent, Segoe UI 9pt). Owner-draws every nested
-//          TabControl (fixes the grey strip band and the unstyled Firewall sub-tabs), guarantees
-//          buttons are never dark-on-dark, and gives buttons rounded pill regions.
+//          v2.0.0 — introduced as part of the full-Configurator dark redesign.
+//          v2.1.0 — repalette to Catppuccin Mocha (dark blue) matching the MikroTik setup module.
+//          v2.2.0 — square accent buttons (no rounded region); every button that is not a recognised
+//                   Danger/Success face is forced to the single accent blue from one place; check boxes
+//                   and radio buttons are owner-drawn with a bright-green indicator so the selected
+//                   state reads on the dark surface; every control's ContextMenuStrip is themed by the
+//                   recursive Apply (fixes the grey right-click menus on Service / Live Events / Firewall
+//                   / RDP Activity); nested TabControls size tabs to their text (fixes the truncated
+//                   "Whitel.." Firewall sub-tab) and drop the grey strip band.
 // Depends: System.Windows.Forms, System.Drawing
 // Extends: To add a new themed control type, add a branch in ApplyToControl. To tweak the palette,
-//          change the static Color fields here — every tab picks the change up automatically. To add
-//          a new semantic status colour, add a static field and use it from page CellFormatting code.
+//          change the static Color fields here — every tab picks the change up automatically. To add a
+//          new semantic status colour, add a static field and use it from page CellFormatting code.
 //
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
-// Version: 2.1.0
+// Version: 2.2.0
 
 using System.Runtime.Versioning;
 
 namespace RdpAudit.Configurator.Theming;
 
-/// <summary>Centralised dark theme: palette, recursive control theming, grid/button helpers, a dark
-/// ToolStrip renderer, and semantic status colours. All members are static — the theme is stateless.</summary>
+/// <summary>Centralised dark-blue theme: palette, recursive control theming, grid/button/menu helpers,
+/// owner-drawn check/radio indicators, a dark ToolStrip renderer, and semantic status colours. All
+/// members are static — the theme is stateless.</summary>
 [SupportedOSPlatform("windows")]
 public static class DarkTheme
 {
 	// ── Constants ────────────────────────────────────────────────────────────────
-	// Marker stored in ListView.Tag so owner-draw handlers are wired exactly once.
+	// Markers stored in a control's Tag so owner-draw / event wiring runs exactly once per control.
 	private const string ThemedTag = "DarkTheme.ListView";
-	// Marker stored in Button.Tag so the rounded-region wiring runs exactly once.
-	private const string RoundedTag = "DarkTheme.RoundedButton";
-	// Marker stored in TabControl.Tag so owner-draw wiring runs exactly once.
 	private const string TabbedTag = "DarkTheme.TabControl";
+	private const string CheckTag = "DarkTheme.CheckBox";
+	private const string RadioTag = "DarkTheme.RadioButton";
+	private const string MenuTag = "DarkTheme.Menu";
 
 	// ── Palette — Catppuccin Mocha (dark blue) ──────────────────────────────────────────────────────────────────
 	public static readonly Color PageBack = Color.FromArgb(30, 30, 46);
@@ -63,6 +66,12 @@ public static class DarkTheme
 	public static readonly Color StatusFore = Color.FromArgb(166, 173, 200);
 	public static readonly Color ToolbarBack = Color.FromArgb(24, 24, 37);
 	public static readonly Color ButtonFore = Color.FromArgb(30, 30, 46);
+
+	// Bright-green indicator used for the checked state of CheckBoxes and RadioButtons so the selection
+	// is unmistakable on the dark surface (the native glyph rendered light-on-light and was unreadable).
+	public static readonly Color IndicatorOn = Color.FromArgb(166, 227, 161);
+	public static readonly Color IndicatorBox = Color.FromArgb(49, 50, 68);
+	public static readonly Color IndicatorBorder = Color.FromArgb(137, 180, 250);
 
 	// Grid colours.
 	public static readonly Color GridBack = Color.FromArgb(17, 17, 27);
@@ -91,14 +100,16 @@ public static class DarkTheme
 	public static readonly Color RowDangerBack = Color.FromArgb(58, 34, 42);
 	public static readonly Color RowMutedBack = Color.FromArgb(36, 37, 56);
 
-	// Shared UI font for the whole Configurator (Segoe UI 9pt) — applied to every page so the typography
-	// matches the MikroTik setup module.
+	// Shared UI font for the whole Configurator (Segoe UI 9pt) so the typography matches the MikroTik
+	// setup module.
 	public static readonly Font UiFont = new("Segoe UI", 9f, FontStyle.Regular, GraphicsUnit.Point);
 
 	// ── Public API ───────────────────────────────────────────────────────────────
 
 	/// <summary>Recursively themes a control and all of its descendants. Safe to call once on a fully
-	/// constructed page; controls added later can be themed by calling <see cref="Apply"/> on them.</summary>
+	/// constructed page; controls added later can be themed by calling <see cref="Apply"/> on them. The
+	/// ContextMenuStrip attached to any control is themed too, even though it does not live in the
+	/// Controls collection.</summary>
 	public static void Apply(Control root)
 	{
 		ArgumentNullException.ThrowIfNull(root);
@@ -111,6 +122,13 @@ public static class DarkTheme
 		}
 
 		ApplyToControl(root);
+
+		// A control's right-click menu is not part of Controls, so theme it explicitly here.
+		if (root.ContextMenuStrip is { } ctx)
+		{
+			StyleMenu(ctx);
+		}
+
 		foreach (Control child in root.Controls)
 		{
 			Apply(child);
@@ -148,8 +166,10 @@ public static class DarkTheme
 		grid.RowHeadersDefaultCellStyle.ForeColor = HeaderFore;
 	}
 
-	/// <summary>Applies the dark flat styling shared by every command Button. Pass an explicit normal /
-	/// hover colour to colour-code destructive (Danger) or confirming (Success) actions.</summary>
+	/// <summary>Applies the dark flat styling shared by every command Button: a square accent face with a
+	/// matching hover. Pass an explicit normal / hover colour to colour-code destructive (Danger) or
+	/// confirming (Success) actions. Buttons are intentionally SQUARE (no rounded region) to match the
+	/// MikroTik setup module's Probe / Run-diagnostics buttons.</summary>
 	public static void StyleButton(Button button, Color? normal = null, Color? hover = null)
 	{
 		ArgumentNullException.ThrowIfNull(button);
@@ -158,24 +178,45 @@ public static class DarkTheme
 		Color hoverColor = hover ?? ButtonHover;
 
 		button.FlatStyle = FlatStyle.Flat;
-		button.FlatAppearance.BorderSize = 0;
+		button.FlatAppearance.BorderSize = 1;
+		button.FlatAppearance.BorderColor = baseColor;
 		button.FlatAppearance.MouseOverBackColor = hoverColor;
 		button.FlatAppearance.MouseDownBackColor = hoverColor;
 		button.BackColor = baseColor;
-		// Dark text on the bright accent face reads best; darker faces (Danger/Success tints) keep
-		// light text. Choose automatically from the perceived luminance of the face colour.
+		// Dark text on a bright face reads best; on a darker face keep light text. Choose automatically
+		// from the perceived luminance of the face colour.
 		button.ForeColor = Luminance(baseColor) > 0.6 ? ButtonFore : TextPrimary;
 		button.UseVisualStyleBackColor = false;
 		button.Cursor = Cursors.Hand;
 		button.Font = UiFont;
 
-		// Rounded corners: recompute the region whenever the button is resized so the rounded shape
-		// tracks layout/DPI changes. Wired exactly once via the Tag marker.
-		if (button.Tag as string != RoundedTag)
+		// Square corners: drop any rounded region a previous theme version may have installed so the
+		// face paints to the control's full rectangle.
+		if (button.Region is not null)
 		{
-			button.Tag = RoundedTag;
-			button.Resize += (_, _) => ApplyRoundedRegion(button);
-			ApplyRoundedRegion(button);
+			button.Region.Dispose();
+			button.Region = null;
+		}
+	}
+
+	/// <summary>Themes a ToolStripDropDown (ContextMenuStrip / MenuStrip drop-down) with the dark renderer
+	/// and palette. Idempotent via the Tag marker. Recursively themes sub-menus.</summary>
+	public static void StyleMenu(ToolStripDropDown menu)
+	{
+		ArgumentNullException.ThrowIfNull(menu);
+
+		menu.BackColor = CardBack;
+		menu.ForeColor = TextPrimary;
+		menu.Renderer = CreateMenuRenderer();
+
+		if (menu.Tag as string != MenuTag)
+		{
+			menu.Tag = MenuTag;
+		}
+
+		foreach (ToolStripItem item in menu.Items)
+		{
+			ThemeMenuItem(item);
 		}
 	}
 
@@ -193,18 +234,17 @@ public static class DarkTheme
 				break;
 
 			case Button button:
-				// Buttons with a default system face get the accent blue; deliberate page colours are kept
-				// but still routed through StyleButton so nothing is dark-on-dark.
-				if (IsDefaultFace(button.BackColor))
+				// Every button is forced to the single accent blue from here EXCEPT buttons a page has
+				// deliberately coloured with a recognised semantic face (Danger pink / Success green),
+				// which keep their meaning. This guarantees no button is ever dark-on-dark and that the
+				// whole Configurator shares one button style driven from this file.
+				if (IsSemanticFace(button.BackColor, out Color semHover))
 				{
-					StyleButton(button);
+					StyleButton(button, button.BackColor, semHover);
 				}
 				else
 				{
-					// Route deliberate page colours (Danger / Success / bulk) through StyleButton too, so the
-					// face stays visible with a matching hover instead of the old path that left a too-dark
-					// BackColor untouched and made some buttons vanish into the background.
-					StyleButton(button, button.BackColor, Lighten(button.BackColor, 0.18));
+					StyleButton(button);
 				}
 				break;
 
@@ -243,15 +283,11 @@ public static class DarkTheme
 				break;
 
 			case CheckBox check:
-				check.BackColor = Color.Transparent;
-				check.ForeColor = TextPrimary;
-				check.FlatStyle = FlatStyle.Flat;
+				StyleCheckBox(check);
 				break;
 
 			case RadioButton radio:
-				radio.BackColor = Color.Transparent;
-				radio.ForeColor = TextPrimary;
-				radio.FlatStyle = FlatStyle.Flat;
+				StyleRadioButton(radio);
 				break;
 
 			case GroupBox group:
@@ -290,7 +326,7 @@ public static class DarkTheme
 				toolStrip.Renderer = CreateMenuRenderer();
 				foreach (ToolStripItem item in toolStrip.Items)
 				{
-					ThemeToolStripItem(item);
+					ThemeMenuItem(item);
 				}
 				break;
 
@@ -344,6 +380,163 @@ public static class DarkTheme
 		}
 	}
 
+	/// <summary>Themes a single menu item and its drop-down sub-menu, recursively.</summary>
+	private static void ThemeMenuItem(ToolStripItem item)
+	{
+		item.BackColor = CardBack;
+		if (IsDefaultText(item.ForeColor))
+		{
+			item.ForeColor = TextPrimary;
+		}
+
+		if (item is ToolStripDropDownItem { HasDropDownItems: true } dropDownItem)
+		{
+			StyleMenu(dropDownItem.DropDown);
+		}
+	}
+
+	/// <summary>Owner-draws a CheckBox with a bright-green check on a dark box so the checked state reads
+	/// clearly on the dark surface (the native flat glyph rendered light-on-light). Wired once.</summary>
+	private static void StyleCheckBox(CheckBox check)
+	{
+		check.BackColor = Color.Transparent;
+		check.ForeColor = TextPrimary;
+		check.UseVisualStyleBackColor = false;
+
+		if (check.Tag as string == CheckTag)
+		{
+			return;
+		}
+
+		check.Tag = CheckTag;
+		// FlatStyle.Standard lets us suppress the native glyph (CheckAlign drawing is handled by us via
+		// Appearance=Normal + custom paint) while keeping hit-testing and AutoSize intact.
+		check.FlatStyle = FlatStyle.Flat;
+		check.FlatAppearance.BorderSize = 0;
+		check.FlatAppearance.CheckedBackColor = Color.Transparent;
+		check.FlatAppearance.MouseOverBackColor = Color.Transparent;
+		check.FlatAppearance.MouseDownBackColor = Color.Transparent;
+		check.AutoCheck = true;
+		check.Paint += OnPaintCheckBox;
+	}
+
+	/// <summary>Owner-draws a RadioButton with a bright-green filled dot on a dark circle so the selected
+	/// option reads clearly on the dark surface. Wired once.</summary>
+	private static void StyleRadioButton(RadioButton radio)
+	{
+		radio.BackColor = Color.Transparent;
+		radio.ForeColor = TextPrimary;
+		radio.UseVisualStyleBackColor = false;
+
+		if (radio.Tag as string == RadioTag)
+		{
+			return;
+		}
+
+		radio.Tag = RadioTag;
+		radio.FlatStyle = FlatStyle.Flat;
+		radio.FlatAppearance.BorderSize = 0;
+		radio.FlatAppearance.CheckedBackColor = Color.Transparent;
+		radio.FlatAppearance.MouseOverBackColor = Color.Transparent;
+		radio.FlatAppearance.MouseDownBackColor = Color.Transparent;
+		radio.Paint += OnPaintRadioButton;
+	}
+
+	/// <summary>Custom paint for a themed CheckBox: draws a 14&#215;14 box (dark fill, accent border) with a
+	/// bright-green tick when checked, plus the label text, over the whole client area. The control's own
+	/// surface is repainted first so the native light-on-light glyph is fully hidden.</summary>
+	private static void OnPaintCheckBox(object? sender, PaintEventArgs e)
+	{
+		if (sender is not CheckBox check)
+		{
+			return;
+		}
+
+		// Clear the whole control with the parent surface so the native glyph painted underneath is hidden,
+		// then draw our own indicator and text on top.
+		Color surface = ResolveBack(check.Parent);
+		e.Graphics.Clear(surface);
+		e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+
+		const int box = 14;
+		int top = (check.Height - box) / 2;
+		Rectangle rect = new(0, Math.Max(0, top), box, box);
+
+		using (SolidBrush fill = new(IndicatorBox))
+		{
+			e.Graphics.FillRectangle(fill, rect);
+		}
+
+		using (Pen border = new(check.Checked ? IndicatorOn : IndicatorBorder))
+		{
+			e.Graphics.DrawRectangle(border, rect);
+		}
+
+		if (check.Checked)
+		{
+			using Pen tick = new(IndicatorOn, 2f);
+			e.Graphics.DrawLines(tick, new[]
+			{
+				new Point(rect.Left + 3, rect.Top + 7),
+				new Point(rect.Left + 6, rect.Top + 10),
+				new Point(rect.Left + 11, rect.Top + 3),
+			});
+		}
+
+		Rectangle textRect = new(box + 6, 0, check.Width - box - 6, check.Height);
+		TextRenderer.DrawText(
+			e.Graphics,
+			check.Text,
+			check.Font,
+			textRect,
+			check.Enabled ? check.ForeColor : TextSecondary,
+			TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.WordEllipsis);
+	}
+
+	/// <summary>Custom paint for a themed RadioButton: a 14&#215;14 circle (dark fill, accent border) with
+	/// a bright-green inner dot when selected, then the label text in the control's ForeColor.</summary>
+	private static void OnPaintRadioButton(object? sender, PaintEventArgs e)
+	{
+		if (sender is not RadioButton radio)
+		{
+			return;
+		}
+
+		Color surface = ResolveBack(radio.Parent);
+		e.Graphics.Clear(surface);
+		e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+
+		const int box = 14;
+		int top = (radio.Height - box) / 2;
+		Rectangle rect = new(0, Math.Max(0, top), box, box);
+
+		using (SolidBrush fill = new(IndicatorBox))
+		{
+			e.Graphics.FillEllipse(fill, rect);
+		}
+
+		using (Pen border = new(radio.Checked ? IndicatorOn : IndicatorBorder))
+		{
+			e.Graphics.DrawEllipse(border, rect);
+		}
+
+		if (radio.Checked)
+		{
+			Rectangle dot = Rectangle.Inflate(rect, -4, -4);
+			using SolidBrush dotBrush = new(IndicatorOn);
+			e.Graphics.FillEllipse(dotBrush, dot);
+		}
+
+		Rectangle textRect = new(box + 6, 0, radio.Width - box - 6, radio.Height);
+		TextRenderer.DrawText(
+			e.Graphics,
+			radio.Text,
+			radio.Font,
+			textRect,
+			radio.Enabled ? radio.ForeColor : TextSecondary,
+			TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.WordEllipsis);
+	}
+
 	/// <summary>Themes a ListView for the dark surface. Item rows render natively (so per-row
 	/// <see cref="ListViewItem.BackColor"/> status colouring set by a page keeps working); only the
 	/// column header is owner-drawn, because the classic ListView header ignores BackColor entirely and
@@ -383,15 +576,13 @@ public static class DarkTheme
 		listView.DrawSubItem += (_, e) => e.DrawDefault = true;
 	}
 
-
 	/// <summary>Owner-draws a TabControl so both the tab headers and the strip band match the dark-blue
 	/// theme. WinForms paints the tab band and the page-area border with the classic light system colour
 	/// regardless of <see cref="Control.BackColor"/>; left alone that produces the grey strip under the
-	/// tabs and around nested tab pages. We therefore set OwnerDrawFixed and paint every tab ourselves,
-	/// and we recolour each contained TabPage. Wired exactly once via the Tag marker so a second Apply is
-	/// idempotent. The MainForm shell wires its own equivalent drawing on the outer tab strip; this method
-	/// themes every nested TabControl the recursive Apply finds (e.g. the Firewall page's Blocklist /
-	/// Whitelist sub-tabs), which previously kept the light system band.</summary>
+	/// tabs and around nested tab pages. We set OwnerDrawFixed and paint every tab ourselves, recolour
+	/// each contained TabPage, and size tabs to their text so labels like "Whitelist" are never clipped.
+	/// Wired exactly once via the Tag marker. The MainForm shell wires its own equivalent drawing on the
+	/// outer tab strip; this method themes every nested TabControl the recursive Apply finds.</summary>
 	private static void StyleTabControl(TabControl tab)
 	{
 		tab.BackColor = PageBack;
@@ -414,6 +605,11 @@ public static class DarkTheme
 		// FlatButtons removes the classic raised 3-D page border that WinForms otherwise paints in the
 		// light system colour around the page area and under the tab row (the grey band the user saw).
 		tab.Appearance = TabAppearance.FlatButtons;
+		// Size each tab to its own text so labels are never truncated (the reported "Whitel.." clipping
+		// happened because the fixed tab width was narrower than the "Whitelist" caption). A little extra
+		// padding keeps the labels from touching the tab edges.
+		tab.SizeMode = TabSizeMode.Normal;
+		tab.Padding = new Point(14, 4);
 		tab.DrawItem += OnDrawDarkTab;
 	}
 
@@ -455,44 +651,10 @@ public static class DarkTheme
 			TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
 	}
 
-	/// <summary>Rebuilds a button's rounded-rectangle region so the flat accent buttons read as rounded
-	/// pills like the MikroTik module. No-op for degenerate sizes (transiently zero during construction).</summary>
-	private static void ApplyRoundedRegion(Button button)
-	{
-		int w = button.Width;
-		int h = button.Height;
-		if (w <= 1 || h <= 1)
-		{
-			return;
-		}
-
-		int radius = Math.Max(2, Math.Min(10, h / 3));
-		int d = radius * 2;
-		using System.Drawing.Drawing2D.GraphicsPath path = new();
-		path.AddArc(0, 0, d, d, 180, 90);
-		path.AddArc(w - d - 1, 0, d, d, 270, 90);
-		path.AddArc(w - d - 1, h - d - 1, d, d, 0, 90);
-		path.AddArc(0, h - d - 1, d, d, 90, 90);
-		path.CloseFigure();
-		button.Region?.Dispose();
-		button.Region = new Region(path);
-	}
-
 	/// <summary>Perceived luminance (0..1) of a colour via the Rec. 601 weighting; used to pick a
 	/// readable foreground over a button face.</summary>
 	private static double Luminance(Color c) =>
 		((0.299 * c.R) + (0.587 * c.G) + (0.114 * c.B)) / 255.0;
-
-	/// <summary>Returns <paramref name="c"/> lightened toward white by <paramref name="amount"/> (0..1).
-	/// Used to synthesize a hover colour for buttons that carry a deliberate page face.</summary>
-	private static Color Lighten(Color c, double amount)
-	{
-		double a = Math.Clamp(amount, 0.0, 1.0);
-		int r = (int)Math.Round(c.R + ((255 - c.R) * a));
-		int g = (int)Math.Round(c.G + ((255 - c.G) * a));
-		int b = (int)Math.Round(c.B + ((255 - c.B) * a));
-		return Color.FromArgb(c.A, r, g, b);
-	}
 
 	// ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -517,6 +679,28 @@ public static class DarkTheme
 		|| c == Color.Empty
 		|| c == Color.Black;
 
+	/// <summary>True when a button face is one of the recognised semantic colours (Danger pink / Success
+	/// green) a page set deliberately; the matching hover colour is returned via <paramref name="hover"/>.
+	/// Any other face (including page-set dark faces that would otherwise vanish into the background) is
+	/// not semantic, so the caller forces the single accent blue instead.</summary>
+	private static bool IsSemanticFace(Color c, out Color hover)
+	{
+		if (c.ToArgb() == DangerButton.ToArgb())
+		{
+			hover = DangerHover;
+			return true;
+		}
+
+		if (c.ToArgb() == SuccessAccent.ToArgb())
+		{
+			hover = SuccessHover;
+			return true;
+		}
+
+		hover = ButtonHover;
+		return false;
+	}
+
 	// ── Dark Menu Renderer ───────────────────────────────────────────────────────
 
 	/// <summary>ToolStrip / menu renderer painting the dark palette for ContextMenuStrip, MenuStrip and
@@ -536,7 +720,7 @@ public static class DarkTheme
 
 		protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
 		{
-			e.ArrowColor = TextPrimary;
+			e.ArrowColor = e.Item.Selected ? SelectionFore : TextPrimary;
 			base.OnRenderArrow(e);
 		}
 	}
@@ -544,10 +728,10 @@ public static class DarkTheme
 	/// <summary>Colour table feeding <see cref="DarkMenuRenderer"/>.</summary>
 	private sealed class DarkColorTable : ProfessionalColorTable
 	{
-		public override Color ToolStripDropDownBackground => PanelBack;
-		public override Color ImageMarginGradientBegin => PanelBack;
-		public override Color ImageMarginGradientMiddle => PanelBack;
-		public override Color ImageMarginGradientEnd => PanelBack;
+		public override Color ToolStripDropDownBackground => CardBack;
+		public override Color ImageMarginGradientBegin => CardBack;
+		public override Color ImageMarginGradientMiddle => CardBack;
+		public override Color ImageMarginGradientEnd => CardBack;
 		public override Color MenuBorder => CardBorder;
 		public override Color MenuItemBorder => SelectionBack;
 		public override Color MenuItemSelected => SelectionBack;
