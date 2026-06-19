@@ -12,7 +12,7 @@
 
 .NOTES
 	Author : Mikhail Deynekin — https://Deynekin.com — Mikhail@Deynekin.com
-	Version: 1.2.0
+	Version: 1.2.2
 
 .FEATURES
 	Detects and reports any previously installed RdpAudit version (with version number).
@@ -553,9 +553,11 @@ function Get-RunningManagedProcesses {
 		}
 	}
 
-	# Return as a real array with a leading comma so PowerShell does NOT unwrap a
-	# single-element result into a scalar. Callers can always rely on '.Count'.
-	return ,([object[]]$running.ToArray())
+	# Emit the collection elements into the pipeline. Every call-site wraps the
+	# result with @(...) so it always materializes as a real array — that keeps
+	# '.Count' reliable for 0, 1 or N processes without double-wrapping an empty
+	# array into a single Object[] element.
+	return $running.ToArray()
 }
 
 function Stop-RdpAuditService {
@@ -608,7 +610,7 @@ function Stop-RdpAuditProcesses {
 	#   4. Force-terminate only the stragglers, then verify the field is clear.
 	Write-Section 'Stopping Running Components'
 
-	$initial = Get-RunningManagedProcesses
+	$initial = @(Get-RunningManagedProcesses)
 	$serviceExists = $false
 	if ($IsWindows) {
 		$serviceExists = $null -ne (Get-Service -Name $script:WindowsServiceName -ErrorAction SilentlyContinue)
@@ -637,7 +639,7 @@ function Stop-RdpAuditProcesses {
 	# Step 3 — wait out the soft timeout for a fully cooperative shutdown.
 	$deadline = (Get-Date).AddSeconds($GracefulShutdownTimeoutSeconds)
 	while ((Get-Date) -lt $deadline) {
-		$still = Get-RunningManagedProcesses
+		$still = @(Get-RunningManagedProcesses)
 		if ($still.Count -eq 0) {
 			break
 		}
@@ -646,20 +648,20 @@ function Stop-RdpAuditProcesses {
 		Start-Sleep -Seconds 3
 	}
 
-	$gracefullyStopped = @(Get-RunningManagedProcesses)
+	$survivors = @(Get-RunningManagedProcesses)
 	foreach ($name in $script:ManagedProcessNames) {
 		$wasRunning = $initial | Where-Object { $_.ProcessName -eq $name } | Select-Object -First 1
-		$stillRunning = $gracefullyStopped | Where-Object { $_.ProcessName -eq $name } | Select-Object -First 1
+		$stillRunning = $survivors | Where-Object { $_.ProcessName -eq $name } | Select-Object -First 1
 		if ($null -ne $wasRunning -and $null -eq $stillRunning -and -not $script:InstallState.StoppedProcesses.Contains($name)) {
 			$script:InstallState.StoppedProcesses.Add($name)
 		}
 	}
 
 	# Step 4 — force-terminate only the processes that ignored the soft request.
-	if ($gracefullyStopped.Count -gt 0) {
-		Write-WarningMessage ("{0} component(s) did not exit within {1}s. Forcing termination now." -f $gracefullyStopped.Count, $GracefulShutdownTimeoutSeconds)
+	if ($survivors.Count -gt 0) {
+		Write-WarningMessage ("{0} component(s) did not exit within {1}s. Forcing termination now." -f $survivors.Count, $GracefulShutdownTimeoutSeconds)
 
-		foreach ($proc in $gracefullyStopped) {
+		foreach ($proc in $survivors) {
 			try {
 				Write-WarningMessage ("Force-stopping {0} (PID {1}) ..." -f $proc.ProcessName, $proc.Id)
 				Stop-Process -Id $proc.Id -Force -ErrorAction Stop
@@ -673,7 +675,7 @@ function Stop-RdpAuditProcesses {
 
 		Start-Sleep -Seconds 2
 
-		$final = Get-RunningManagedProcesses
+		$final = @(Get-RunningManagedProcesses)
 		if ($final.Count -gt 0) {
 			$names = ($final | ForEach-Object { "$($_.ProcessName) (PID $($_.Id))" }) -join ', '
 			throw "The following RdpAudit component(s) could not be terminated: $names. Close them manually and retry."
