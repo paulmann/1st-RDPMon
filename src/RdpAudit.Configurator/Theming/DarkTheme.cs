@@ -720,7 +720,7 @@ public static class DarkTheme
 
 		protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e)
 		{
-			e.ArrowColor = e.Item.Selected ? SelectionFore : TextPrimary;
+			e.ArrowColor = e.Item is { Selected: true } ? SelectionFore : TextPrimary;
 			base.OnRenderArrow(e);
 		}
 	}
