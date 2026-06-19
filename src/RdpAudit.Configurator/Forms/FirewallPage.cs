@@ -9,6 +9,7 @@
 // Extends: System.Windows.Forms.TabPage
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.4.0
 
 using System.ComponentModel;
 using System.Globalization;
@@ -183,7 +184,13 @@ public sealed class FirewallPage : TabPage
 			AutoSize = false,
 			Text = "Enforcement: unknown",
 			Font = new Font(Font, FontStyle.Bold),
+			// Full-width status band: the colour communicates state at a glance and guarantees the text is
+			// always readable (dark text on a light status colour), unlike a bare ForeColor on the dark panel.
+			TextAlign = ContentAlignment.MiddleLeft,
+			Padding = new Padding(6, 4, 6, 4),
+			Margin = new Padding(0, 2, 0, 2),
 		};
+		ApplyEnforcementBand(EnforcementBand.Neutral, "Enforcement: unknown");
 
 		_refreshStatus = new Button { Text = "Refresh status", AutoSize = true };
 		_refreshStatus.Click += async (_, _) => await RefreshAllAsync().ConfigureAwait(true);
@@ -400,8 +407,9 @@ public sealed class FirewallPage : TabPage
 		_whitelistFilter = MakeFilterBox("Filter IP / note / source…", () => ApplyWhitelistFilter());
 		_whitelistInput = MakeInputBox("IP to add to whitelist (e.g. 198.51.100.5)");
 		Button whitelistAdd = MakeButton("Add IP", async (_, _) => await OnAddWhitelistAsync().ConfigureAwait(true));
+		Button whitelistAddLocal = MakeButton("Add local network IPs", async (_, _) => await OnAddLocalNetworksAsync().ConfigureAwait(true));
 		Button whitelistRemove = MakeButton("Remove selected", async (_, _) => await OnRemoveWhitelistAsync().ConfigureAwait(true));
-		_innerTabs.TabPages.Add(BuildGridTab("Whitelist", _whitelistGrid, _whitelistFilter, _whitelistInput, whitelistAdd, whitelistRemove));
+		_innerTabs.TabPages.Add(BuildGridTab("Whitelist", _whitelistGrid, _whitelistFilter, _whitelistInput, whitelistAdd, whitelistAddLocal, whitelistRemove));
 
 		_loginRulesGrid = MakeLoginRulesGrid();
 		_loginRulesGrid.DataSource = _loginRuleRows;
@@ -742,10 +750,11 @@ public sealed class FirewallPage : TabPage
 				: "Provider status: " + headline;
 			_windowsStatusLabel.Text = "Windows: unknown";
 			_countersLabel.Text = transient ? "Counters: stale (service busy)" : "Counters: unavailable";
-			_enforcementHealthLabel.Text = transient
-				? "Enforcement: stale (service reachable but did not respond in time — retry)"
-				: "Enforcement: unknown (service unreachable)";
-			_enforcementHealthLabel.ForeColor = SystemColors.GrayText;
+			ApplyEnforcementBand(
+				EnforcementBand.Neutral,
+				transient
+					? "Enforcement: stale (service reachable but did not respond in time — retry)"
+					: "Enforcement: unknown (service unreachable)");
 			return;
 		}
 
@@ -797,32 +806,65 @@ public sealed class FirewallPage : TabPage
 		switch (dto.EnforcementHealth)
 		{
 			case FirewallEnforcementHealth.Healthy:
-				_enforcementHealthLabel.Text = "Enforcement: HEALTHY" + detail;
-				_enforcementHealthLabel.ForeColor = StatusSuccess;
+				ApplyEnforcementBand(EnforcementBand.Healthy, "Enforcement: HEALTHY" + detail);
 				break;
 			case FirewallEnforcementHealth.Idle:
-				_enforcementHealthLabel.Text = "Enforcement: idle — no enabled blocklist rows" + detail;
-				_enforcementHealthLabel.ForeColor = SystemColors.ControlText;
+				ApplyEnforcementBand(EnforcementBand.Neutral, "Enforcement: idle — no enabled blocklist rows" + detail);
 				break;
 			case FirewallEnforcementHealth.MissingRule:
-				_enforcementHealthLabel.Text =
+				ApplyEnforcementBand(
+					EnforcementBand.Error,
 					"Enforcement: MISSING RULE — blocks intended but no firewall rule was verified. "
 					+ "Open the Active blocks tab and use 'Repair selected', then 'Verify all'."
-					+ detail;
-				_enforcementHealthLabel.ForeColor = StatusDanger;
+					+ detail);
 				break;
 			case FirewallEnforcementHealth.Failed:
-				_enforcementHealthLabel.Text =
+				ApplyEnforcementBand(
+					EnforcementBand.Error,
 					"Enforcement: INCOMPLETE — some blocks unenforced. "
 					+ "Open the Active blocks tab and use 'Repair selected' on the gaps, then 'Verify all'."
-					+ detail;
-				_enforcementHealthLabel.ForeColor = StatusDanger;
+					+ detail);
 				break;
 			default:
-				_enforcementHealthLabel.Text = "Enforcement: unknown (could not verify)" + detail;
-				_enforcementHealthLabel.ForeColor = SystemColors.GrayText;
+				ApplyEnforcementBand(EnforcementBand.Neutral, "Enforcement: unknown (could not verify)" + detail);
 				break;
 		}
+	}
+
+	/// <summary>
+	/// Visual state for the full-width enforcement status band rendered under the provider panel.
+	/// The band's background colour communicates state at a glance and guarantees the text stays
+	/// readable regardless of the dark theme: a dark foreground is painted on a light status colour.
+	/// </summary>
+	private enum EnforcementBand
+	{
+		/// <summary>Neutral / indeterminate state (idle, unknown, stale) — yellow band.</summary>
+		Neutral,
+
+		/// <summary>All enabled blocklist rows are verifiably enforced — green band.</summary>
+		Healthy,
+
+		/// <summary>Enforcement is broken (missing rule / incomplete) — red band.</summary>
+		Error,
+	}
+
+	/// <summary>
+	/// Paints the enforcement status band: sets the label text plus a full-width coloured background
+	/// (yellow neutral / green healthy / red error) with a dark, high-contrast foreground so the text
+	/// is always legible on the dark panel. The label is docked-fill and column-spans the provider
+	/// layout, so the BackColor fills the row width.
+	/// </summary>
+	private void ApplyEnforcementBand(EnforcementBand band, string text)
+	{
+		_enforcementHealthLabel.Text = text;
+		_enforcementHealthLabel.BackColor = band switch
+		{
+			EnforcementBand.Healthy => StatusSuccess,
+			EnforcementBand.Error => StatusDanger,
+			_ => StatusWarning,
+		};
+		// Dark foreground guarantees contrast against the light status colours of the band.
+		_enforcementHealthLabel.ForeColor = PageBack;
 	}
 
 	// ---------------------------------------------------------------------------------------------
@@ -1627,13 +1669,13 @@ public sealed class FirewallPage : TabPage
 	private async Task OnAddWhitelistAsync()
 	{
 		string raw = _whitelistInput.Text;
-		if (!AddressListFilter.IsValidIp(raw))
+		if (!AddressListFilter.IsValidIpOrCidr(raw))
 		{
-			SetStatus("Add to whitelist aborted: input is not a valid IPv4 / IPv6 address.");
+			SetStatus("Add to whitelist aborted: input is not a valid IPv4 / IPv6 address or CIDR range (e.g. 192.168.0.0/16 or fd00::/8).");
 			return;
 		}
 
-		string ip = AddressListFilter.NormalizeIp(raw);
+		string ip = AddressListFilter.NormalizeIpOrCidr(raw);
 		AddressListMutationRequest payload = new()
 		{
 			Address = ip,
@@ -1672,6 +1714,67 @@ public sealed class FirewallPage : TabPage
 		if (wlOk)
 		{
 			_whitelistInput.Text = string.Empty;
+			await RefreshAllAsync().ConfigureAwait(true);
+		}
+	}
+
+	/// <summary>
+	/// Canonical RFC 1918 (IPv4) and RFC 4193 / RFC 4291 (IPv6) private / local-network CIDR ranges.
+	/// Adding these to the whitelist exempts all LAN and unique-local traffic from auto-blocking.
+	/// The auto-block worker matches these via <see cref="RdpAudit.Core.Util.CidrRange"/>, so both
+	/// IPv4 and IPv6 source addresses falling inside any range are skipped (family-aware prefix match).
+	/// </summary>
+	private static readonly string[] LocalNetworkRanges =
+	[
+		"10.0.0.0/8",       // RFC 1918 private class A
+		"172.16.0.0/12",    // RFC 1918 private class B
+		"192.168.0.0/16",   // RFC 1918 private class C
+		"fc00::/7",         // RFC 4193 unique-local (covers fc00::/8 and fd00::/8)
+		"fd00::/8",         // RFC 4193 locally-assigned unique-local (explicit, common subset)
+	];
+
+	/// <summary>
+	/// Adds the standard local-network CIDR ranges to the whitelist in one pass: every LAN and
+	/// unique-local source address becomes exempt from auto-blocking. Each range is normalised and
+	/// sent through the AddToWhitelist IPC; the grid is refreshed once at the end. Verified IPv6-safe:
+	/// fc00::/7 and fd00::/8 round-trip through CidrRange and match real IPv6 source addresses.
+	/// </summary>
+	private async Task OnAddLocalNetworksAsync()
+	{
+		int added = 0;
+		int failed = 0;
+		foreach (string range in LocalNetworkRanges)
+		{
+			if (!AddressListFilter.IsValidIpOrCidr(range))
+			{
+				failed++;
+				continue;
+			}
+
+			string normalized = AddressListFilter.NormalizeIpOrCidr(range);
+			AddressListMutationRequest payload = new()
+			{
+				Address = normalized,
+				Note = "Configurator local-network range",
+			};
+
+			bool ok = await SendMutationAsync(IpcCommand.AddToWhitelist, payload).ConfigureAwait(true);
+			if (ok)
+			{
+				added++;
+			}
+			else
+			{
+				failed++;
+			}
+		}
+
+		SetStatus(string.Format(CultureInfo.InvariantCulture,
+			"Add local network IPs: {0} added, {1} failed (of {2} ranges).",
+			added, failed, LocalNetworkRanges.Length));
+
+		if (added > 0)
+		{
 			await RefreshAllAsync().ConfigureAwait(true);
 		}
 	}

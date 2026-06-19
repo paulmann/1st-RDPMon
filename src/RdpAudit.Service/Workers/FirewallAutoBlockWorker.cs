@@ -11,6 +11,7 @@
 // Extends: Microsoft.Extensions.Hosting.BackgroundService
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.4.0
 
 using System.Collections.Concurrent;
 using System.Globalization;
@@ -23,6 +24,7 @@ using RdpAudit.Core.Config;
 using RdpAudit.Core.Data;
 using RdpAudit.Core.Firewall;
 using RdpAudit.Core.Models;
+using RdpAudit.Core.Util;
 using RdpAudit.Service.Firewall;
 
 namespace RdpAudit.Service.Workers;
@@ -154,6 +156,11 @@ public sealed class FirewallAutoBlockWorker : BackgroundService
 			.Select(static s => s.Trim())
 			.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+		// Parse every CIDR-shaped whitelist entry (DB + config) once per batch so a whole private range
+		// (e.g. 10.0.0.0/8, fc00::/7) exempts its members from auto-blocking, not just literal hosts.
+		IReadOnlyList<CidrRange> whitelistRanges = AutoBlockPolicy.BuildWhitelistRanges(
+			whitelistDb.Concat(whitelistConfig));
+
 		int processed = 0;
 		foreach (Alert alert in batch)
 		{
@@ -166,7 +173,8 @@ public sealed class FirewallAutoBlockWorker : BackgroundService
 				whitelistDb,
 				whitelistConfig,
 				blacklistLiteral,
-				instantLogins);
+				instantLogins,
+				whitelistRanges);
 
 			if (decision.Action == AutoBlockAction.Skip)
 			{
@@ -483,7 +491,8 @@ internal static class AutoBlockPolicy
 		HashSet<string> whitelistDb,
 		HashSet<string> whitelistConfig,
 		HashSet<string> blacklistLiteral,
-		HashSet<string> instantLogins)
+		HashSet<string> instantLogins,
+		IReadOnlyList<CidrRange>? whitelistRanges = null)
 	{
 		ArgumentNullException.ThrowIfNull(alert);
 		ArgumentNullException.ThrowIfNull(cfg);
@@ -504,7 +513,12 @@ internal static class AutoBlockPolicy
 
 		string normalizedIp = parsed.ToString();
 
-		if (whitelistDb.Contains(normalizedIp) || whitelistConfig.Contains(normalizedIp))
+		// Whitelist precedence: an exact-literal hit (fast path) OR membership in any whitelisted CIDR
+		// range. Range matching is family-aware, so an IPv4 source is tested only against IPv4 networks
+		// and an IPv6 source only against IPv6 networks (e.g. fc00::/7, fd00::/8).
+		if (whitelistDb.Contains(normalizedIp)
+			|| whitelistConfig.Contains(normalizedIp)
+			|| MatchesWhitelistRange(parsed, whitelistRanges))
 		{
 			return new AutoBlockDecision(AutoBlockAction.Skip, normalizedIp, alert.UserName, string.Empty, "whitelist");
 		}
@@ -555,5 +569,44 @@ internal static class AutoBlockPolicy
 		return alert.RuleId.StartsWith("BRUTE_FORCE", StringComparison.OrdinalIgnoreCase)
 			|| alert.RuleId.StartsWith("KERBEROS_SPRAY", StringComparison.OrdinalIgnoreCase)
 			|| alert.RuleId.StartsWith("UNKNOWN_IP_SUCCESS", StringComparison.OrdinalIgnoreCase);
+	}
+
+	/// <summary>Parses the CIDR-shaped entries (those containing '/') from a set of whitelist literals into
+	/// <see cref="CidrRange"/> objects, silently dropping malformed entries. Single-IP literals are left to
+	/// the existing exact-match HashSet path and are not returned here.</summary>
+	public static IReadOnlyList<CidrRange> BuildWhitelistRanges(IEnumerable<string> literals)
+	{
+		ArgumentNullException.ThrowIfNull(literals);
+
+		List<CidrRange> ranges = new();
+		foreach (string literal in literals)
+		{
+			if (CidrRange.LooksLikeCidr(literal) && CidrRange.TryParse(literal, out CidrRange? range) && range is not null)
+			{
+				ranges.Add(range);
+			}
+		}
+
+		return ranges;
+	}
+
+	/// <summary>Returns true when the candidate address falls inside any whitelisted CIDR network. The
+	/// <see cref="CidrRange.Contains(IPAddress?)"/> test is family-aware, so IPv4 and IPv6 never cross-match.</summary>
+	private static bool MatchesWhitelistRange(IPAddress candidate, IReadOnlyList<CidrRange>? ranges)
+	{
+		if (ranges is null || ranges.Count == 0)
+		{
+			return false;
+		}
+
+		foreach (CidrRange range in ranges)
+		{
+			if (range.Contains(candidate))
+			{
+				return true;
+			}
+		}
+
+		return false;
 	}
 }

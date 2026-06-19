@@ -6,9 +6,11 @@
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.4.0
 
 using RdpAudit.Core.Config;
 using RdpAudit.Core.Models;
+using RdpAudit.Core.Util;
 using RdpAudit.Service.Workers;
 using Xunit;
 
@@ -184,5 +186,78 @@ public class AutoBlockPolicyTests
 	{
 		Assert.Equal(AutoBlockPolicy.FallbackBlockDurationMinutes, AutoBlockPolicy.ResolveBlockDurationMinutes(configured));
 		Assert.True(AutoBlockPolicy.ResolveBlockDurationMinutes(configured) > 0, "auto-blocks must always expire");
+	}
+
+	// ── CIDR whitelist (private-network ranges) ──────────────────────────────────────
+
+	[Theory]
+	[InlineData("10.0.0.0/8", "10.5.6.7")]
+	[InlineData("172.16.0.0/12", "172.20.1.1")]
+	[InlineData("192.168.0.0/16", "192.168.1.60")]
+	public void WhitelistCidrRange_Ipv4MemberOfRange_Skips(string cidr, string ip)
+	{
+		FirewallOptions cfg = new() { AutoBlockBruteForce = true };
+		IReadOnlyList<CidrRange> ranges = AutoBlockPolicy.BuildWhitelistRanges(new[] { cidr });
+
+		AutoBlockDecision decision = AutoBlockPolicy.Decide(
+			AlertOf("BRUTE_FORCE_01", ip, "alice"),
+			cfg,
+			Empty(), Empty(), Empty(), Empty(),
+			ranges);
+
+		Assert.Equal(AutoBlockAction.Skip, decision.Action);
+		Assert.Equal("whitelist", decision.SkipReason);
+	}
+
+	[Theory]
+	[InlineData("fc00::/7", "fc00::1")]
+	[InlineData("fc00::/7", "fd12:3456::99")]
+	[InlineData("fd00::/8", "fd00:abcd::1")]
+	public void WhitelistCidrRange_Ipv6MemberOfRange_Skips(string cidr, string ip)
+	{
+		FirewallOptions cfg = new() { AutoBlockBruteForce = true };
+		IReadOnlyList<CidrRange> ranges = AutoBlockPolicy.BuildWhitelistRanges(new[] { cidr });
+
+		AutoBlockDecision decision = AutoBlockPolicy.Decide(
+			AlertOf("BRUTE_FORCE_01", ip, "alice"),
+			cfg,
+			Empty(), Empty(), Empty(), Empty(),
+			ranges);
+
+		Assert.Equal(AutoBlockAction.Skip, decision.Action);
+		Assert.Equal("whitelist", decision.SkipReason);
+	}
+
+	[Fact]
+	public void WhitelistCidrRange_PublicIpOutsideRange_StillBlocks()
+	{
+		// A public attacker IP outside every whitelisted private range must still be blocked.
+		FirewallOptions cfg = new() { AutoBlockBruteForce = true };
+		IReadOnlyList<CidrRange> ranges = AutoBlockPolicy.BuildWhitelistRanges(
+			new[] { "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7", "fd00::/8" });
+
+		AutoBlockDecision decision = AutoBlockPolicy.Decide(
+			AlertOf("BRUTE_FORCE_01", "203.0.113.50", "alice"),
+			cfg,
+			Empty(), Empty(), Empty(), Empty(),
+			ranges);
+
+		Assert.Equal(AutoBlockAction.Block, decision.Action);
+	}
+
+	[Fact]
+	public void WhitelistCidrRange_Ipv4SourceAgainstIpv6Range_DoesNotMatch()
+	{
+		// Family isolation: an IPv4 attacker must not be exempted by an IPv6 private range.
+		FirewallOptions cfg = new() { AutoBlockBruteForce = true };
+		IReadOnlyList<CidrRange> ranges = AutoBlockPolicy.BuildWhitelistRanges(new[] { "fc00::/7" });
+
+		AutoBlockDecision decision = AutoBlockPolicy.Decide(
+			AlertOf("BRUTE_FORCE_01", "203.0.113.7", "alice"),
+			cfg,
+			Empty(), Empty(), Empty(), Empty(),
+			ranges);
+
+		Assert.Equal(AutoBlockAction.Block, decision.Action);
 	}
 }
