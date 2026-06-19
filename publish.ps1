@@ -201,7 +201,7 @@ function Get-ProcessesUsingPath {
 	param([Parameter(Mandatory = $true)][string]$Path)
 
 	$normalized = [System.IO.Path]::GetFullPath($Path).TrimEnd([System.IO.Path]::DirectorySeparatorChar)
-	$candidates = @("RdpAudit.Configurator", "RdpAudit.Service")
+	$candidates = @("RdpAudit.Configurator", "RdpAudit.Service", "RdpAudit.Mikrotik")
 	$found = New-Object 'System.Collections.Generic.List[hashtable]'
 
 	foreach ($name in $candidates) {
@@ -909,6 +909,7 @@ if (-not [string]::IsNullOrWhiteSpace($resolvedRevision)) {
 
 Publish-Project -Project "src/RdpAudit.Service/RdpAudit.Service.csproj"           -Subdir "Service"      -RevisionId $resolvedRevision
 Publish-Project -Project "src/RdpAudit.Configurator/RdpAudit.Configurator.csproj" -Subdir "Configurator" -RevisionId $resolvedRevision
+Publish-Project -Project "src/RdpAudit.Mikrotik/RdpAudit.Mikrotik.csproj"         -Subdir "Mikrotik"     -RevisionId $resolvedRevision
 
 # The single-file Configurator embeds its SQLite dependencies; lay them down as loose files so
 # external PowerShell diagnostics can load the provider. This runs AFTER the publish so it copies

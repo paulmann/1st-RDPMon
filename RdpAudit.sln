@@ -13,6 +13,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RdpAudit.Core.Tests", "test
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RdpAudit.Service.Tests", "tests\RdpAudit.Service.Tests\RdpAudit.Service.Tests.csproj", "{55555555-5555-5555-5555-555555555555}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RdpAudit.Mikrotik", "src\RdpAudit.Mikrotik\RdpAudit.Mikrotik.csproj", "{66666666-6666-6666-6666-666666666666}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RdpAudit.Mikrotik.Tests", "tests\RdpAudit.Mikrotik.Tests\RdpAudit.Mikrotik.Tests.csproj", "{77777777-7777-7777-7777-777777777777}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -39,5 +43,13 @@ Global
 		{55555555-5555-5555-5555-555555555555}.Debug|x64.Build.0 = Debug|x64
 		{55555555-5555-5555-5555-555555555555}.Release|x64.ActiveCfg = Release|x64
 		{55555555-5555-5555-5555-555555555555}.Release|x64.Build.0 = Release|x64
+		{66666666-6666-6666-6666-666666666666}.Debug|x64.ActiveCfg = Debug|x64
+		{66666666-6666-6666-6666-666666666666}.Debug|x64.Build.0 = Debug|x64
+		{66666666-6666-6666-6666-666666666666}.Release|x64.ActiveCfg = Release|x64
+		{66666666-6666-6666-6666-666666666666}.Release|x64.Build.0 = Release|x64
+		{77777777-7777-7777-7777-777777777777}.Debug|x64.ActiveCfg = Debug|x64
+		{77777777-7777-7777-7777-777777777777}.Debug|x64.Build.0 = Debug|x64
+		{77777777-7777-7777-7777-777777777777}.Release|x64.ActiveCfg = Release|x64
+		{77777777-7777-7777-7777-777777777777}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 EndGlobal
