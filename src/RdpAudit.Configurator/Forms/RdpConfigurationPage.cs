@@ -36,6 +36,8 @@ using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
 using RdpAudit.Core.Util;
 
+using static RdpAudit.Configurator.Theming.DarkTheme;
+
 namespace RdpAudit.Configurator.Forms;
 
 // v2.0.0 — dark UI redesign
@@ -47,19 +49,6 @@ namespace RdpAudit.Configurator.Forms;
 public sealed class RdpConfigurationPage : TabPage
 {
 	// ── Dark palette (mirrors MikroTikPage benchmark) ────────────────────────────
-	private static readonly Color PageBack = Color.FromArgb(30, 30, 30);
-	private static readonly Color CardBack = Color.FromArgb(45, 45, 45);
-	private static readonly Color CardBorder = Color.FromArgb(70, 70, 70);
-	private static readonly Color TextPrimary = Color.FromArgb(220, 220, 220);
-	private static readonly Color TextSecondary = Color.FromArgb(150, 150, 150);
-	private static readonly Color InputBack = Color.FromArgb(55, 55, 55);
-	private static readonly Color AccentHeader = Color.FromArgb(180, 200, 255);
-	private static readonly Color ButtonNormal = Color.FromArgb(60, 100, 180);
-	private static readonly Color ButtonHover = Color.FromArgb(80, 120, 200);
-	private static readonly Color SuccessAccent = Color.FromArgb(50, 160, 80);
-	private static readonly Color SuccessHover = Color.FromArgb(70, 180, 100);
-	private static readonly Color StatusBack = Color.FromArgb(35, 35, 35);
-	private static readonly Color StatusFore = Color.FromArgb(180, 180, 180);
 	private static readonly Color BannerBack = Color.FromArgb(60, 50, 20);
 	private static readonly Color BannerFore = Color.FromArgb(255, 200, 60);
 

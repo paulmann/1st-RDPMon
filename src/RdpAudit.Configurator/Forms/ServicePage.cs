@@ -27,6 +27,8 @@ using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Models;
 using RdpAudit.Core.Util;
 
+using static RdpAudit.Configurator.Theming.DarkTheme;
+
 namespace RdpAudit.Configurator.Forms;
 
 /// <summary>Service status panel, lifecycle controls, and recent alerts grid.</summary>
@@ -120,7 +122,7 @@ public sealed class ServicePage : TabPage
 			AutoSize = false,
 			TextAlign = ContentAlignment.MiddleLeft,
 			Padding = new Padding(4, 2, 4, 2),
-			ForeColor = Color.FromArgb(140, 60, 0),
+			ForeColor = StatusWarning,
 		};
 
 		_status = new Label { Dock = DockStyle.Top, Height = 80, Text = "Connecting…", AutoSize = false };
@@ -194,11 +196,11 @@ public sealed class ServicePage : TabPage
 
 		e.CellStyle!.BackColor = alert.Severity switch
 		{
-			AlertSeverity.Critical => Color.FromArgb(255, 180, 180),
-			AlertSeverity.High => Color.FromArgb(255, 220, 160),
-			AlertSeverity.Medium => Color.FromArgb(255, 255, 160),
-			AlertSeverity.Low => Color.FromArgb(180, 220, 255),
-			_ => SystemColors.Window,
+			AlertSeverity.Critical => RowDangerBack,
+			AlertSeverity.High => RowWarningBack,
+			AlertSeverity.Medium => Color.FromArgb(60, 60, 30),
+			AlertSeverity.Low => Color.FromArgb(30, 45, 65),
+			_ => CellBack,
 		};
 	}
 

@@ -17,6 +17,8 @@ using RdpAudit.Configurator.Ipc;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Util;
 
+using static RdpAudit.Configurator.Theming.DarkTheme;
+
 namespace RdpAudit.Configurator.Forms;
 
 /// <summary>Editable view of the appsettings.json RdpAuditOptions block.</summary>
@@ -63,7 +65,7 @@ public sealed class SettingsPage : TabPage
 		{
 			Text = "⚠ " + DebugWarningText,
 			AutoSize = true,
-			ForeColor = Color.DarkGoldenrod,
+			ForeColor = StatusWarning,
 			Location = new Point(8, 30),
 		};
 		debugPanel.Controls.Add(_debugToggle);
@@ -311,7 +313,7 @@ public sealed class SettingsPage : TabPage
 		if (debug)
 		{
 			_debugStatus.Text = "DEBUG MODE ENABLED";
-			_debugStatus.ForeColor = Color.DarkRed;
+			_debugStatus.ForeColor = StatusDanger;
 			_debugWarning.Visible = true;
 		}
 		else

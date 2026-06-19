@@ -17,6 +17,8 @@ using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
 using RdpAudit.Core.Models;
 
+using static RdpAudit.Configurator.Theming.DarkTheme;
+
 namespace RdpAudit.Configurator.Forms;
 
 /// <summary>Operation-log viewer tab (program actions, paged and filtered over IPC).</summary>
@@ -138,7 +140,7 @@ public sealed class LogsPage : TabPage
 			TextAlign = ContentAlignment.MiddleLeft,
 			Padding = new Padding(6, 0, 0, 0),
 			ForeColor = Color.White,
-			BackColor = Color.DarkGoldenrod,
+			BackColor = Color.FromArgb(120, 90, 20),
 			Text = "DEBUG MODE ENABLED — detail fields (DetailsJson, StackTrace) are shown.",
 			Visible = false,
 		};
@@ -317,10 +319,10 @@ public sealed class LogsPage : TabPage
 
 	private static Color SeverityColor(OperationLogSeverity severity) => severity switch
 	{
-		OperationLogSeverity.Critical => Color.DarkRed,
-		OperationLogSeverity.Error => Color.Firebrick,
-		OperationLogSeverity.Warning => Color.DarkGoldenrod,
-		_ => SystemColors.ControlText,
+		OperationLogSeverity.Critical => StatusDanger,
+		OperationLogSeverity.Error => StatusDanger,
+		OperationLogSeverity.Warning => StatusWarning,
+		_ => TextPrimary,
 	};
 
 	private void ShowSelectedDetail()

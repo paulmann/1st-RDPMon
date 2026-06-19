@@ -20,6 +20,8 @@ using RdpAudit.Configurator.Services;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
 
+using static RdpAudit.Configurator.Theming.DarkTheme;
+
 namespace RdpAudit.Configurator.Forms;
 
 /// <summary>Tools Diag tab — runs the read-only probe set and the explicit temporary-firewall probe.</summary>
@@ -268,8 +270,8 @@ public sealed class ToolsDiagPage : TabPage
 				p.DurationMs.ToString(CultureInfo.InvariantCulture),
 				p.LocaleHint);
 			_grid.Rows[idx].DefaultCellStyle.BackColor = p.Passed
-				? Color.FromArgb(235, 255, 235)
-				: Color.FromArgb(255, 235, 235);
+				? RowSuccessBack
+				: RowDangerBack;
 		}
 	}
 
