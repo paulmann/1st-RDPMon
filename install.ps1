@@ -553,7 +553,9 @@ function Get-RunningManagedProcesses {
 		}
 	}
 
-	return $running
+	# Return as a real array with a leading comma so PowerShell does NOT unwrap a
+	# single-element result into a scalar. Callers can always rely on '.Count'.
+	return ,([object[]]$running.ToArray())
 }
 
 function Stop-RdpAuditService {
