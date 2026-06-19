@@ -5,7 +5,7 @@
  *          password and the persisted bootstrap result. Plaintext secrets never touch disk: every
  *          value is wrapped with ProtectedData.Protect under an application entropy salt before it
  *          is written to %APPDATA%\RdpAudit\mikrotik_creds.dat.
- * Depends: System.Security.Cryptography.ProtectedData, RdpAudit.Core.Mikrotik.MikrotikConfig,
+ * Depends: System.Security.Cryptography.ProtectedData, RdpAudit.Core.MikroTik.MikrotikConfig,
  *          RdpAudit.Core.Util.JsonOptions
  * Extends: To persist an additional protected artifact, add a typed Save/Load pair that round-trips
  *          through ProtectBytes/UnprotectBytes; never add a code path that writes a plaintext secret.
@@ -17,7 +17,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using RdpAudit.Core.Mikrotik;
+using RdpAudit.Core.MikroTik;
 using RdpAudit.Core.Util;
 
 namespace RdpAudit.Mikrotik.Helpers;

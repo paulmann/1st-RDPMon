@@ -1,6 +1,6 @@
 /*
  * File   : MikrotikConfig.cs
- * Project: RdpAudit.Core (RdpAudit.Core.Mikrotik)
+ * Project: RdpAudit.Core (RdpAudit.Core.MikroTik)
  * Purpose: Persisted result of a completed MikroTik api-ssl/mTLS bootstrap — the production
  *          mutual-TLS channel description shared between the RdpAudit.Mikrotik wizard and the
  *          running Service. Distinct from RdpAudit.Core.Config.MikroTikOptions (the legacy REST
@@ -11,12 +11,12 @@
  *          in MikrotikConfigPushMessage, and have BootstrapOrchestrator populate it.
  *
  * Author : Mikhail Deynekin — https://Deynekin.com
- * Version: 1.0.0
+ * Version: 1.0.1
  */
 
 using System.Globalization;
 
-namespace RdpAudit.Core.Mikrotik;
+namespace RdpAudit.Core.MikroTik;
 
 /// <summary>
 /// Persisted, credential-light description of a completed MikroTik api-ssl/mutual-TLS bootstrap.
