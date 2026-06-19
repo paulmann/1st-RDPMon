@@ -10,7 +10,7 @@
  *          carry it into the BootstrapRequest assembled by ApplySyncPanel.
  *
  * Author : Mikhail Deynekin — https://Deynekin.com
- * Version: 1.0.0
+ * Version: 1.0.1
  */
 
 using System.Drawing;
@@ -93,7 +93,7 @@ public sealed class FirewallPanel : StepPanelBase
 		Controls.SetChildIndex(options, 0);
 	}
 
-	private static Control MakeRow(string caption, TextBox box)
+	private static FlowLayoutPanel MakeRow(string caption, TextBox box)
 	{
 		DarkTheme.StyleTextBox(box);
 		box.Width = 240;

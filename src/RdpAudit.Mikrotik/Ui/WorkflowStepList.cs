@@ -10,7 +10,7 @@
  *          BuildStepRows; the rendering and selection logic adapt automatically.
  *
  * Author : Mikhail Deynekin — https://Deynekin.com
- * Version: 1.0.0
+ * Version: 1.0.1
  */
 
 using System.Drawing;
@@ -60,7 +60,7 @@ public sealed class WorkflowStepList : Panel
 	// ── Public API ───────────────────────────────────────────────────────────────
 
 	/// <summary>Raised when the operator clicks a step that is reachable (Done or Active).</summary>
-	public event EventHandler<WorkflowStep>? StepSelected;
+	public event EventHandler<StepSelectedEventArgs>? StepSelected;
 
 	/// <summary>Sets the visual state of a step and repaints its row.</summary>
 	public void SetState(WorkflowStep step, WorkflowStepState state)
@@ -133,7 +133,7 @@ public sealed class WorkflowStepList : Panel
 		WorkflowStepState state = GetState(step);
 		if (state is WorkflowStepState.Done or WorkflowStepState.Active)
 		{
-			StepSelected?.Invoke(this, step);
+			StepSelected?.Invoke(this, new StepSelectedEventArgs(step));
 		}
 	}
 

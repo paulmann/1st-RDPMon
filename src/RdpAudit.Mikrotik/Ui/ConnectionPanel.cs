@@ -10,7 +10,7 @@
  *          property; surface it in the ConnectionEndpoint record consumed by the host form.
  *
  * Author : Mikhail Deynekin — https://Deynekin.com
- * Version: 1.0.0
+ * Version: 1.0.1
  */
 
 using System.Drawing;
@@ -58,7 +58,7 @@ public sealed class ConnectionPanel : Panel
 	// ── Public API ───────────────────────────────────────────────────────────────
 
 	/// <summary>Raised when the operator clicks Probe with a valid endpoint.</summary>
-	public event EventHandler<ConnectionEndpoint>? ProbeRequested;
+	public event EventHandler<ProbeRequestedEventArgs>? ProbeRequested;
 
 	/// <summary>Returns the currently entered endpoint, or null when the input is invalid.</summary>
 	public ConnectionEndpoint? CurrentEndpoint => TryReadEndpoint(out ConnectionEndpoint? ep) ? ep : null;
@@ -151,7 +151,7 @@ public sealed class ConnectionPanel : Panel
 	{
 		if (TryReadEndpoint(out ConnectionEndpoint? endpoint) && endpoint is not null)
 		{
-			ProbeRequested?.Invoke(this, endpoint);
+			ProbeRequested?.Invoke(this, new ProbeRequestedEventArgs(endpoint));
 		}
 		else
 		{
