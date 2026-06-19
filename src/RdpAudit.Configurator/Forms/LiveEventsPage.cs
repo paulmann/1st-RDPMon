@@ -6,8 +6,11 @@
 //          UTC timestamp. Writes always flow through IPC mutations on the service; the
 //          Configurator never opens the SQLite file directly. Stage 4 of the RdpAudit roadmap.
 // Extends: System.Windows.Forms.TabPage
+//          v1.1.0 — the manually-shown right-click context menu is now themed explicitly via
+//          DarkTheme.StyleMenu so it no longer renders with the light system colours.
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.1.0
 
 using System.ComponentModel;
 using System.Globalization;
@@ -18,6 +21,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using RdpAudit.Configurator.Ipc;
 using RdpAudit.Configurator.Services;
+using RdpAudit.Configurator.Theming;
 using RdpAudit.Core.Events;
 using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
@@ -200,6 +204,10 @@ public sealed class LiveEventsPage : TabPage
 		_menu.Items.Add(_menuExportEvents);
 		_menu.Items.Add(_menuExportFacts);
 		_menu.Opening += OnMenuOpening;
+		// This context menu is shown manually via _menu.Show(...) and is never assigned to a control's
+		// ContextMenuStrip, so DarkTheme.Apply never reaches it. Theme it explicitly here (recursively,
+		// including the export sub-menus) so its colours match the rest of the dark UI.
+		DarkTheme.StyleMenu(_menu);
 
 		// Layout order (last-added control is at the top when docked) ---------------------------
 		Controls.Add(_grid);

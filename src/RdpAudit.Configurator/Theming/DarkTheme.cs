@@ -19,6 +19,9 @@
 //                   recursive Apply (fixes the grey right-click menus on Service / Live Events / Firewall
 //                   / RDP Activity); nested TabControls size tabs to their text (fixes the truncated
 //                   "Whitel.." Firewall sub-tab) and drop the grey strip band.
+//          v2.3.0 — nested TabControls use the classic (Normal) appearance and paint their strip band /
+//                   page-area edge dark via OnPaintTabStripBand, so no light system band remains behind or
+//                   under the Blocklist / Whitelist sub-tab row.
 // Depends: System.Windows.Forms, System.Drawing
 // Extends: To add a new themed control type, add a branch in ApplyToControl. To tweak the palette,
 //          change the static Color fields here — every tab picks the change up automatically. To add a
@@ -26,7 +29,7 @@
 //
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
-// Version: 2.2.0
+// Version: 2.3.0
 
 using System.Runtime.Versioning;
 
@@ -602,15 +605,37 @@ public static class DarkTheme
 
 		tab.Tag = TabbedTag;
 		tab.DrawMode = TabDrawMode.OwnerDrawFixed;
-		// FlatButtons removes the classic raised 3-D page border that WinForms otherwise paints in the
-		// light system colour around the page area and under the tab row (the grey band the user saw).
-		tab.Appearance = TabAppearance.FlatButtons;
+		// Keep the classic (Normal) appearance rather than FlatButtons: with FlatButtons WinForms fills
+		// the whole tab-strip band with the light system colour (the grey band the user saw under the
+		// Blocklist / Whitelist row). In Normal mode the strip band takes the control BackColor we set to
+		// PageBack, and we owner-draw the page-area edge ourselves in OnDrawTabAreaBackground so no light
+		// border remains around the content.
+		tab.Appearance = TabAppearance.Normal;
 		// Size each tab to its own text so labels are never truncated (the reported "Whitel.." clipping
 		// happened because the fixed tab width was narrower than the "Whitelist" caption). A little extra
 		// padding keeps the labels from touching the tab edges.
 		tab.SizeMode = TabSizeMode.Normal;
 		tab.Padding = new Point(14, 4);
 		tab.DrawItem += OnDrawDarkTab;
+		// Paint the strip band / page-area edge dark before the tabs are drawn so no light system band
+		// remains behind or under the tab headers.
+		tab.Paint += OnPaintTabStripBand;
+	}
+
+	/// <summary>Fills the tab-strip band and the page-area border of a TabControl with the dark page
+	/// colour so WinForms' light system band never shows behind or under the tab headers. Runs before the
+	/// owner-drawn tab headers (which paint on top).</summary>
+	private static void OnPaintTabStripBand(object? sender, PaintEventArgs e)
+	{
+		if (sender is not TabControl tab)
+		{
+			return;
+		}
+
+		using SolidBrush back = new(PageBack);
+		// The strip band is the area above the page content. Painting the whole client rectangle is safe
+		// because the selected TabPage paints its own (dark) surface on top of this.
+		e.Graphics.FillRectangle(back, tab.ClientRectangle);
 	}
 
 	/// <summary>Shared owner-draw handler painting one dark tab header: the active tab sits on a raised
