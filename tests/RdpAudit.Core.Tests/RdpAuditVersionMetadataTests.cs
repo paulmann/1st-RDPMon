@@ -21,12 +21,12 @@ using Xunit;
 
 namespace RdpAudit.Core.Tests;
 
-/// <summary>Locks the released version metadata at exactly 1.4.1 across the Core assembly,
+/// <summary>Locks the released version metadata at exactly 1.4.2 across the Core assembly,
 /// blocking the prior 1.0.0 placeholder default and the 1.2.x stream from regressing.</summary>
 public class RdpAuditVersionMetadataTests
 {
-	private const string ExpectedSemVer = "1.4.1";
-	private const string ExpectedFourPart = "1.4.1.0";
+	private const string ExpectedSemVer = "1.4.2";
+	private const string ExpectedFourPart = "1.4.2.0";
 	private const string ForbiddenLegacy = "1.0.0";
 	private const string ForbiddenPrev = "1.2.";
 

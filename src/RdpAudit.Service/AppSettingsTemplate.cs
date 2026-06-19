@@ -4,6 +4,7 @@
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.4.2
 
 namespace RdpAudit.Service;
 
@@ -57,7 +58,7 @@ public static class AppSettingsTemplate
 			"Blacklist": [],
 			"BlockOnBlacklistedLogin": false,
 			"InstantBlockLogins": [],
-			"DefaultBlockDurationMinutes": 0,
+			"DefaultBlockDurationMinutes": 4320,
 			"MaxActiveBlocks": 10000,
 			"WhitelistIps": [],
 			"RefusePrivateAddressBlock": true,

@@ -5,6 +5,7 @@
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.4.2
 
 namespace RdpAudit.Core.Config;
 
@@ -42,7 +43,8 @@ public sealed class FirewallOptions
 	public List<string> InstantBlockLogins { get; set; } = new();
 
 	/// <summary>Default block duration in minutes; zero or negative means permanent until manually removed.</summary>
-	public int DefaultBlockDurationMinutes { get; set; }
+	/// <remarks>Defaults to 4320 minutes (3 days) so that auto-blocks and manually added blocks expire automatically unless explicitly overridden.</remarks>
+	public int DefaultBlockDurationMinutes { get; set; } = 4320;
 
 	/// <summary>Maximum number of distinct simultaneous block rules the provider is allowed to create.</summary>
 	/// <remarks>Acts as a guardrail against rule-table flooding from a runaway worker or scripted attack.</remarks>

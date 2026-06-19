@@ -1,11 +1,13 @@
 // File:    src/RdpAudit.Configurator/Forms/OverviewPage.cs
 // Module:  RdpAudit.Configurator.Forms
 // Purpose: Primary "home" tab: product info, project links, version, first-run
-//          install button, and a live status panel summarising DB readiness,
-//          service installation state, and detected errors/warnings.
-// Extends: System.Windows.Forms.TabPage
+//          install button, a license-key activation panel, and a live status panel
+//          summarising DB readiness, service installation state, and detected errors/warnings.
+// Extends: System.Windows.Forms.TabPage. To change license behaviour, edit the nested LicensePanel
+//          class below and the LicenseStore service; to add a KPI card, extend the cardsRow block.
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.4.2
 
 using System.Diagnostics;
 using System.Globalization;
@@ -55,6 +57,7 @@ public sealed class OverviewPage : TabPage
 	private readonly SummaryCard _cardDbSize;
 	private readonly ProgressBar _analysisBar;
 	private readonly Label _analysisLabel;
+	private readonly LicensePanel _license;
 	private readonly System.Windows.Forms.Timer _progressTimer;
 
 	public OverviewPage() : this(null)
@@ -164,6 +167,14 @@ public sealed class OverviewPage : TabPage
 		};
 		_restore.Click += async (_, _) => await OnRestoreClickAsync().ConfigureAwait(true);
 
+		// License activation panel: sits between the action buttons and the KPI cards. Controls below
+		// it are positioned LicensePanel.PanelHeight + a small gap lower to make room.
+		_license = new LicensePanel
+		{
+			Width = 1100,
+			Location = new Point(12, 278),
+		};
+
 		_cardAttacksToday = new SummaryCard("Attacks today", "—");
 		_cardBlockedIps = new SummaryCard("Blocked IPs", "—");
 		_cardActiveSessions = new SummaryCard("Active sessions", "—");
@@ -178,7 +189,7 @@ public sealed class OverviewPage : TabPage
 			RowCount = 1,
 			Width = 1100,
 			Height = 96,
-			Location = new Point(12, 278),
+			Location = new Point(12, 362),
 			Padding = new Padding(0),
 			Margin = new Padding(0),
 		};
@@ -203,13 +214,13 @@ public sealed class OverviewPage : TabPage
 			AutoSize = false,
 			Width = 1100,
 			Height = 18,
-			Location = new Point(12, 380),
+			Location = new Point(12, 464),
 		};
 		_analysisBar = new ProgressBar
 		{
 			Width = 1100,
 			Height = 16,
-			Location = new Point(12, 400),
+			Location = new Point(12, 484),
 			Style = ProgressBarStyle.Continuous,
 			Minimum = 0,
 			Maximum = 100,
@@ -222,7 +233,7 @@ public sealed class OverviewPage : TabPage
 			AutoSize = false,
 			Width = 1100,
 			Height = 22,
-			Location = new Point(12, 424),
+			Location = new Point(12, 508),
 		};
 
 		_statusReport = new TextBox
@@ -234,7 +245,7 @@ public sealed class OverviewPage : TabPage
 			Font = new Font(FontFamily.GenericMonospace, 9.5f),
 			Width = 1100,
 			Height = 296,
-			Location = new Point(12, 452),
+			Location = new Point(12, 536),
 		};
 
 		Controls.Add(_title);
@@ -248,6 +259,7 @@ public sealed class OverviewPage : TabPage
 		Controls.Add(_refresh);
 		Controls.Add(_backup);
 		Controls.Add(_restore);
+		Controls.Add(_license);
 		Controls.Add(cardsRow);
 		Controls.Add(_analysisLabel);
 		Controls.Add(_analysisBar);
@@ -674,6 +686,161 @@ public sealed class OverviewPage : TabPage
 		finally
 		{
 			_restore.Enabled = true;
+		}
+	}
+
+	/// <summary>License-key activation panel shown on the Overview tab. In the UNACTIVATED state it shows
+	/// a key input plus an Activate button; once activated it shows the stored key plus a Delete License
+	/// Key button that returns to the input state. Activation is a stub that accepts any non-empty key and
+	/// persists it locally via <see cref="LicenseStore"/>; swap ActivateOffline for ActivateOnlineAsync to
+	/// enforce server-side activation against the production endpoint.</summary>
+	private sealed class LicensePanel : GroupBox
+	{
+		// ── Fields ───────────────────────────────────────────────────────────────────
+		public const int PanelHeight = 76;
+
+		private readonly LicenseStore _store = new();
+		private readonly TextBox _keyInput;
+		private readonly Button _activate;
+		private readonly Label _activeKeyCaption;
+		private readonly TextBox _activeKey;
+		private readonly Button _delete;
+		private readonly Label _statusLabel;
+
+		// ── Construction ─────────────────────────────────────────────────────────────
+		public LicensePanel()
+		{
+			Text = "Product license";
+			Height = PanelHeight;
+			Padding = new Padding(10, 6, 10, 6);
+
+			// Unactivated controls.
+			_keyInput = new TextBox
+			{
+				Location = new Point(14, 30),
+				Width = 420,
+				Font = new Font(FontFamily.GenericMonospace, 10f),
+				PlaceholderText = "Enter your license key",
+			};
+			_keyInput.KeyDown += (_, e) =>
+			{
+				if (e.KeyCode == Keys.Enter)
+				{
+					e.Handled = true;
+					e.SuppressKeyPress = true;
+					OnActivateClick();
+				}
+			};
+
+			_activate = new Button
+			{
+				Text = "Activate",
+				Location = new Point(446, 28),
+				Width = 120,
+				Height = 28,
+			};
+			_activate.Click += (_, _) => OnActivateClick();
+
+			// Activated controls.
+			_activeKeyCaption = new Label
+			{
+				Text = "Activated key:",
+				AutoSize = true,
+				Location = new Point(14, 34),
+			};
+			_activeKey = new TextBox
+			{
+				Location = new Point(110, 30),
+				Width = 420,
+				ReadOnly = true,
+				Font = new Font(FontFamily.GenericMonospace, 10f, FontStyle.Bold),
+			};
+			_delete = new Button
+			{
+				Text = "Delete License Key",
+				Location = new Point(544, 28),
+				Width = 180,
+				Height = 28,
+				// Danger face: DarkTheme recognises this semantic colour and keeps it during theming.
+				BackColor = DarkTheme.DangerButton,
+			};
+			_delete.Click += (_, _) => OnDeleteClick();
+
+			_statusLabel = new Label
+			{
+				AutoSize = true,
+				Location = new Point(736, 34),
+				ForeColor = DarkTheme.StatusSuccess,
+			};
+
+			Controls.Add(_keyInput);
+			Controls.Add(_activate);
+			Controls.Add(_activeKeyCaption);
+			Controls.Add(_activeKey);
+			Controls.Add(_delete);
+			Controls.Add(_statusLabel);
+
+			ApplyState(_store.Load());
+		}
+
+		// ── Core Logic ───────────────────────────────────────────────────────────────
+
+		/// <summary>Validates and (stub-)activates the typed key, then persists it and flips to the
+		/// activated state. Empty input is rejected with an inline message.</summary>
+		private void OnActivateClick()
+		{
+			string key = _keyInput.Text.Trim();
+			if (key.Length == 0)
+			{
+				_statusLabel.ForeColor = DarkTheme.StatusWarning;
+				_statusLabel.Text = "Enter a license key first.";
+				return;
+			}
+
+			// STUB: accepts any non-empty key offline. Production: await _store.ActivateOnlineAsync(key).
+			bool activated = _store.ActivateOffline(key);
+			if (activated)
+			{
+				ApplyState(key);
+			}
+			else
+			{
+				_statusLabel.ForeColor = DarkTheme.StatusDanger;
+				_statusLabel.Text = "Activation failed.";
+			}
+		}
+
+		/// <summary>Clears the stored key and returns the panel to the unactivated input state.</summary>
+		private void OnDeleteClick()
+		{
+			_store.Clear();
+			_keyInput.Text = string.Empty;
+			ApplyState(null);
+		}
+
+		/// <summary>Switches the panel between the unactivated (input + Activate) and activated (key +
+		/// Delete) layouts. A non-null, non-empty <paramref name="activeKey"/> selects the activated state.</summary>
+		private void ApplyState(string? activeKey)
+		{
+			bool isActivated = !string.IsNullOrWhiteSpace(activeKey);
+
+			_keyInput.Visible = !isActivated;
+			_activate.Visible = !isActivated;
+
+			_activeKeyCaption.Visible = isActivated;
+			_activeKey.Visible = isActivated;
+			_delete.Visible = isActivated;
+
+			if (isActivated)
+			{
+				_activeKey.Text = activeKey ?? string.Empty;
+				_statusLabel.ForeColor = DarkTheme.StatusSuccess;
+				_statusLabel.Text = "Activated.";
+			}
+			else
+			{
+				_statusLabel.Text = string.Empty;
+			}
 		}
 	}
 

@@ -4,6 +4,7 @@
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.4.2
 
 using RdpAudit.Core.Config;
 using RdpAudit.Core.Firewall;
@@ -77,7 +78,7 @@ public class FirewallContractTests
 		Assert.Empty(opts.Blacklist);
 		Assert.False(opts.BlockOnBlacklistedLogin);
 		Assert.Empty(opts.InstantBlockLogins);
-		Assert.Equal(0, opts.DefaultBlockDurationMinutes);
+		Assert.Equal(4320, opts.DefaultBlockDurationMinutes);
 		Assert.True(opts.MaxActiveBlocks > 0);
 	}
 }
