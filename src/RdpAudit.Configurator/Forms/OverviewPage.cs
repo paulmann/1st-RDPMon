@@ -13,6 +13,7 @@ using System.Reflection;
 using System.Runtime.Versioning;
 using System.Text;
 using RdpAudit.Configurator.Ipc;
+using RdpAudit.Configurator.Theming;
 using RdpAudit.Configurator.Services;
 using RdpAudit.Core.Backup;
 using RdpAudit.Core.Ipc;

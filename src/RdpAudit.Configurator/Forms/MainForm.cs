@@ -9,7 +9,7 @@
 // Extends: System.Windows.Forms.Form
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
-// Version: 2.0.0
+// Version: 2.1.0
 
 using System.Globalization;
 using System.Reflection;
@@ -50,6 +50,10 @@ public sealed class MainForm : Form
 		{
 			Dock = DockStyle.Fill,
 			DrawMode = TabDrawMode.OwnerDrawFixed,
+			// FlatButtons removes the classic raised 3-D page border WinForms otherwise paints in the light
+			// system colour around the page and under the tab row (the grey band reported by the user); the
+			// empty strip area then takes the dark Form background instead.
+			Appearance = TabAppearance.FlatButtons,
 			SizeMode = TabSizeMode.Fixed,
 			Multiline = true,
 			ItemSize = new Size(160, 30),
