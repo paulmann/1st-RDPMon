@@ -5,14 +5,27 @@
 //          a selected session (every destructive action confirmation-gated), and surfaces
 //          the current Terminal Services shadow policy with apply / backup / restore
 //          controls. All reads / mutations flow through the Service IPC.
-// Extends: System.Windows.Forms.TabPage
+//
+//          v2.0.0 — dark UI redesign. The toolbar, session grid, shadow-policy panel, status
+//          bar and context menu are restyled with the shared dark palette to match MikroTikPage.
+//          Adds two bulk-disconnect actions ("Disconnect all inactive" and "Disconnect all
+//          except current") that issue a soft IpcCommand.DisconnectSession to each target and,
+//          two minutes later, a hard IpcCommand.LogoffSession to any target that is still
+//          present. All existing session / shadow-policy / filter / context-menu logic and the
+//          SortableGrid / BindingList / SessionRow / ShadowValueRow inner classes are preserved.
+// Extends: System.Windows.Forms.TabPage. To add a new toolbar action, add the button in
+//          BuildToolbar; to add a new bulk operation, collect targets from _allSessions and route
+//          them through OnBulkDisconnectAsync; to add a new context-menu command, register it in
+//          the _menu construction block and gate it in OnMenuOpening.
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 2.0.0
 
 using System.ComponentModel;
 using System.Drawing;
 using System.Globalization;
 using System.Runtime.Versioning;
+using System.Text;
 using RdpAudit.Configurator.Ipc;
 using RdpAudit.Configurator.Services;
 using RdpAudit.Core.Events;
@@ -23,19 +36,56 @@ using RdpAudit.Core.Util;
 
 namespace RdpAudit.Configurator.Forms;
 
+// v2.0.0 — dark UI redesign
 /// <summary>
 /// Stage 7 Remote RDP Clients tab. Provides session listing, session control
-/// (disconnect / logoff / shadow) and shadow policy management.
+/// (disconnect / logoff / shadow), bulk-disconnect actions and shadow policy management,
+/// rendered with the shared dark palette.
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class RemoteRdpClientsPage : TabPage
 {
 	private const int AutoRefreshIntervalMs = 5_000;
 
-	private static readonly Color RowColorActive = Color.FromArgb(220, 245, 220);
-	private static readonly Color RowColorDisconnected = Color.FromArgb(255, 235, 220);
-	private static readonly Color RowColorInactive = Color.FromArgb(240, 240, 240);
+	/// <summary>Delay between the soft disconnect phase and the hard-logoff sweep, in ms.</summary>
+	private const int HardLogoffDelayMs = 120_000;
 
+	// ── Dark palette (mirrors MikroTikPage benchmark) ────────────────────────────
+	private static readonly Color PageBack = Color.FromArgb(30, 30, 30);
+	private static readonly Color PanelBack = Color.FromArgb(40, 40, 40);
+	private static readonly Color CardBack = Color.FromArgb(45, 45, 45);
+	private static readonly Color CardBorder = Color.FromArgb(70, 70, 70);
+	private static readonly Color TextPrimary = Color.FromArgb(220, 220, 220);
+	private static readonly Color TextSecondary = Color.FromArgb(150, 150, 150);
+	private static readonly Color InputBack = Color.FromArgb(55, 55, 55);
+	private static readonly Color InputBorder = Color.FromArgb(80, 80, 80);
+	private static readonly Color AccentHeader = Color.FromArgb(180, 200, 255);
+	private static readonly Color ButtonNormal = Color.FromArgb(60, 100, 180);
+	private static readonly Color ButtonHover = Color.FromArgb(80, 120, 200);
+	private static readonly Color DangerButton = Color.FromArgb(160, 50, 50);
+	private static readonly Color DangerHover = Color.FromArgb(190, 70, 70);
+	private static readonly Color BulkInactiveButton = Color.FromArgb(140, 90, 30);
+	private static readonly Color BulkInactiveHover = Color.FromArgb(170, 115, 45);
+	private static readonly Color BulkExceptCurrentButton = Color.FromArgb(140, 50, 50);
+	private static readonly Color BulkExceptCurrentHover = Color.FromArgb(175, 70, 70);
+	private static readonly Color GridBack = Color.FromArgb(30, 30, 30);
+	private static readonly Color GridLines = Color.FromArgb(60, 60, 60);
+	private static readonly Color CellBack = Color.FromArgb(40, 40, 40);
+	private static readonly Color AltRowBack = Color.FromArgb(45, 45, 45);
+	private static readonly Color SelectionBack = Color.FromArgb(60, 100, 180);
+	private static readonly Color HeaderBack = Color.FromArgb(50, 50, 50);
+	private static readonly Color HeaderFore = Color.FromArgb(180, 200, 255);
+	private static readonly Color ToolbarBack = Color.FromArgb(38, 38, 38);
+	private static readonly Color StatusBack = Color.FromArgb(35, 35, 35);
+	private static readonly Color StatusFore = Color.FromArgb(180, 180, 180);
+	private static readonly Color CurrentSessionAccent = Color.FromArgb(60, 100, 180);
+
+	// Row tint colors adapted to the dark palette.
+	private static readonly Color RowColorActive = Color.FromArgb(30, 65, 30);
+	private static readonly Color RowColorDisconnected = Color.FromArgb(70, 45, 25);
+	private static readonly Color RowColorInactive = Color.FromArgb(42, 42, 42);
+
+	// ── Fields & DI ──────────────────────────────────────────────────────────────
 	private readonly IpcClient _ipc;
 	private readonly ShadowLauncher _launcher = new();
 	private readonly LocalRdpSessionProvider _localSessions = new();
@@ -53,6 +103,8 @@ public sealed class RemoteRdpClientsPage : TabPage
 	private readonly CheckBox _autoRefreshCheck;
 	private readonly Button _refreshButton;
 	private readonly Button _clearFiltersButton;
+	private readonly Button _disconnectInactiveButton;
+	private readonly Button _disconnectExceptCurrentButton;
 
 	private readonly StatusStrip _statusStrip;
 	private readonly ToolStripStatusLabel _statusLabel;
@@ -70,6 +122,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 
 	// Shadow policy panel controls.
 	private readonly Label _shadowSummaryLabel;
+	private readonly Label _shadowHeaderLabel;
 	private readonly DataGridView _shadowGrid;
 	private readonly BindingList<ShadowValueRow> _shadowBinding = new();
 	private readonly Button _enableAllButton;
@@ -77,20 +130,30 @@ public sealed class RemoteRdpClientsPage : TabPage
 	private readonly Button _restoreButton;
 	private readonly Button _refreshPolicyButton;
 
+	// Bulk-disconnect two-phase soft+hard logoff state.
+	private readonly HashSet<int> _pendingHardLogoff = new();
+	private System.Windows.Forms.Timer? _bulkDisconnectTimer;
+
 	private SessionRow? _menuRow;
 	private bool _refreshing;
 	private bool _suppressFilterRefresh;
 
+	// ── Construction ─────────────────────────────────────────────────────────────
 	public RemoteRdpClientsPage(IpcClient ipc)
 	{
 		ArgumentNullException.ThrowIfNull(ipc);
 		_ipc = ipc;
 		Text = "Remote RDP Clients";
+		BackColor = PageBack;
+		ForeColor = TextPrimary;
 
 		_searchFilter = new TextBox
 		{
 			Dock = DockStyle.Fill,
 			PlaceholderText = "search user / client / IP…",
+			BorderStyle = BorderStyle.FixedSingle,
+			BackColor = InputBack,
+			ForeColor = TextPrimary,
 		};
 		_searchFilter.TextChanged += (_, _) => OnLocalFilterChanged();
 
@@ -98,6 +161,9 @@ public sealed class RemoteRdpClientsPage : TabPage
 		{
 			Dock = DockStyle.Fill,
 			DropDownStyle = ComboBoxStyle.DropDownList,
+			FlatStyle = FlatStyle.Flat,
+			BackColor = InputBack,
+			ForeColor = TextPrimary,
 		};
 		_stateCombo.Items.Add("All states");
 		_stateCombo.Items.Add("Active");
@@ -114,6 +180,9 @@ public sealed class RemoteRdpClientsPage : TabPage
 			Text = "Auto refresh (5s)",
 			Dock = DockStyle.Fill,
 			AutoSize = false,
+			FlatStyle = FlatStyle.Flat,
+			ForeColor = TextPrimary,
+			BackColor = ToolbarBack,
 			TextAlign = ContentAlignment.MiddleLeft,
 		};
 		_autoRefreshCheck.CheckedChanged += (_, _) =>
@@ -130,13 +199,19 @@ public sealed class RemoteRdpClientsPage : TabPage
 			}
 		};
 
-		_refreshButton = new Button { Text = "Refresh", Dock = DockStyle.Fill, AutoSize = false };
+		_refreshButton = NewButton("Refresh", ButtonNormal, ButtonHover);
 		_refreshButton.Click += async (_, _) => await RefreshAsync().ConfigureAwait(true);
 
-		_clearFiltersButton = new Button { Text = "Clear filters", Dock = DockStyle.Fill, AutoSize = false };
+		_clearFiltersButton = NewButton("Clear filters", ButtonNormal, ButtonHover);
 		_clearFiltersButton.Click += async (_, _) => await OnClearFiltersAsync().ConfigureAwait(true);
 
-		TableLayoutPanel toolbar = BuildToolbar();
+		_disconnectInactiveButton = NewButton("Disconnect all inactive", BulkInactiveButton, BulkInactiveHover);
+		_disconnectInactiveButton.Click += async (_, _) => await OnDisconnectAllInactiveAsync().ConfigureAwait(true);
+
+		_disconnectExceptCurrentButton = NewButton("Disconnect all except current", BulkExceptCurrentButton, BulkExceptCurrentHover);
+		_disconnectExceptCurrentButton.Click += async (_, _) => await OnDisconnectAllExceptCurrentAsync().ConfigureAwait(true);
+
+		Panel toolbar = BuildToolbar();
 
 		_grid = new DataGridView
 		{
@@ -148,6 +223,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 			SelectionMode = DataGridViewSelectionMode.FullRowSelect,
 			MultiSelect = false,
 		};
+		ApplyDarkGridStyle(_grid);
 		ConfigureSessionGrid(_grid);
 		_grid.DataSource = _binding;
 		SortableGrid.Enable(_grid, _binding);
@@ -162,7 +238,12 @@ public sealed class RemoteRdpClientsPage : TabPage
 		_menuExportFacts = BuildExportFactsSubmenu();
 		_menuOpenRipeStat = new ToolStripMenuItem(IpReputationBrowser.RipeStatMenuLabel, null, (_, _) => OnOpenRipeStat());
 		_menuOpenAbuseIpDb = new ToolStripMenuItem(IpReputationBrowser.AbuseIpDbMenuLabel, null, (_, _) => OnOpenAbuseIpDb());
-		_menu = new ContextMenuStrip();
+		_menu = new ContextMenuStrip
+		{
+			Renderer = new DarkMenuRenderer(),
+			BackColor = CardBack,
+			ForeColor = TextPrimary,
+		};
 		_menu.Items.Add(_menuDisconnect);
 		_menu.Items.Add(_menuLogoff);
 		_menu.Items.Add(new ToolStripSeparator());
@@ -177,20 +258,39 @@ public sealed class RemoteRdpClientsPage : TabPage
 		_menu.Opening += OnMenuOpening;
 		_grid.ContextMenuStrip = _menu;
 
-		_statusStrip = new StatusStrip { SizingGrip = false };
+		_statusStrip = new StatusStrip
+		{
+			SizingGrip = false,
+			BackColor = StatusBack,
+			ForeColor = StatusFore,
+		};
 		_statusLabel = new ToolStripStatusLabel("Waiting for first refresh…")
 		{
 			Spring = true,
 			TextAlign = ContentAlignment.MiddleLeft,
+			ForeColor = StatusFore,
 		};
 		_statusStrip.Items.Add(_statusLabel);
 
 		// --- Shadow policy panel ---------------------------------------------------------------
+		_shadowHeaderLabel = new Label
+		{
+			Dock = DockStyle.Top,
+			Height = 22,
+			Text = "Session Shadowing Policy",
+			Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9.5f, FontStyle.Bold),
+			ForeColor = AccentHeader,
+			BackColor = CardBack,
+			TextAlign = ContentAlignment.MiddleLeft,
+		};
+
 		_shadowSummaryLabel = new Label
 		{
 			Dock = DockStyle.Fill,
 			TextAlign = ContentAlignment.MiddleLeft,
 			AutoSize = false,
+			ForeColor = TextSecondary,
+			BackColor = CardBack,
 			Text = "Shadow policy: loading…",
 		};
 
@@ -205,19 +305,20 @@ public sealed class RemoteRdpClientsPage : TabPage
 			MultiSelect = false,
 			Height = 130,
 		};
+		ApplyDarkGridStyle(_shadowGrid);
 		ConfigureShadowGrid(_shadowGrid);
 		_shadowGrid.DataSource = _shadowBinding;
 
-		_enableAllButton = new Button { Text = "Enable all permissions…", Dock = DockStyle.Fill, AutoSize = false };
+		_enableAllButton = NewButton("Enable all permissions…", DangerButton, DangerHover);
 		_enableAllButton.Click += async (_, _) => await OnEnableAllAsync().ConfigureAwait(true);
 
-		_backupButton = new Button { Text = "Backup", Dock = DockStyle.Fill, AutoSize = false };
+		_backupButton = NewButton("Backup", ButtonNormal, ButtonHover);
 		_backupButton.Click += async (_, _) => await OnBackupPolicyAsync().ConfigureAwait(true);
 
-		_restoreButton = new Button { Text = "Restore latest…", Dock = DockStyle.Fill, AutoSize = false };
+		_restoreButton = NewButton("Restore latest…", ButtonNormal, ButtonHover);
 		_restoreButton.Click += async (_, _) => await OnRestorePolicyAsync().ConfigureAwait(true);
 
-		_refreshPolicyButton = new Button { Text = "Refresh policy", Dock = DockStyle.Fill, AutoSize = false };
+		_refreshPolicyButton = NewButton("Refresh policy", ButtonNormal, ButtonHover);
 		_refreshPolicyButton.Click += async (_, _) => await RefreshShadowPolicyAsync().ConfigureAwait(true);
 
 		Panel shadowPanel = BuildShadowPanel();
@@ -229,7 +330,10 @@ public sealed class RemoteRdpClientsPage : TabPage
 			Dock = DockStyle.Fill,
 			Orientation = Orientation.Horizontal,
 			SplitterWidth = 6,
+			BackColor = PageBack,
 		};
+		split.Panel1.BackColor = PageBack;
+		split.Panel2.BackColor = CardBack;
 		split.Panel1.Controls.Add(_grid);
 		split.Panel2.Controls.Add(shadowPanel);
 		split.HandleCreated += (_, _) =>
@@ -255,70 +359,106 @@ public sealed class RemoteRdpClientsPage : TabPage
 		};
 	}
 
-	private TableLayoutPanel BuildToolbar()
+	// ── Layout builders ──────────────────────────────────────────────────────────
+	private Panel BuildToolbar()
 	{
-		TableLayoutPanel toolbar = new()
+		// Two stacked dark rows: filters/refresh on top, bulk-disconnect actions below.
+		Panel host = new()
 		{
 			Dock = DockStyle.Top,
-			Height = 72,
+			Height = 110,
+			BackColor = ToolbarBack,
+			Padding = new Padding(6),
+		};
+
+		TableLayoutPanel filters = new()
+		{
+			Dock = DockStyle.Top,
+			Height = 60,
 			ColumnCount = 6,
 			RowCount = 2,
-			Padding = new Padding(4),
+			BackColor = ToolbarBack,
 		};
 		for (int i = 0; i < 6; i++)
 		{
-			toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 6));
+			filters.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f / 6));
 		}
-		toolbar.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
-		toolbar.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
 
-		toolbar.Controls.Add(MakeCaption("Search"), 0, 0);
-		toolbar.Controls.Add(_searchFilter, 0, 1);
-		toolbar.SetColumnSpan(_searchFilter, 2);
-		toolbar.SetColumnSpan(toolbar.GetControlFromPosition(0, 0)!, 2);
+		filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 18));
+		filters.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
 
-		toolbar.Controls.Add(MakeCaption("State filter"), 2, 0);
-		toolbar.Controls.Add(_stateCombo, 2, 1);
+		Label searchCaption = MakeCaption("Search");
+		filters.Controls.Add(searchCaption, 0, 0);
+		filters.Controls.Add(_searchFilter, 0, 1);
+		filters.SetColumnSpan(searchCaption, 2);
+		filters.SetColumnSpan(_searchFilter, 2);
 
-		toolbar.Controls.Add(MakeCaption(" "), 3, 0);
-		toolbar.Controls.Add(_autoRefreshCheck, 3, 1);
+		filters.Controls.Add(MakeCaption("State filter"), 2, 0);
+		filters.Controls.Add(_stateCombo, 2, 1);
 
-		toolbar.Controls.Add(MakeCaption(" "), 4, 0);
-		toolbar.Controls.Add(_refreshButton, 4, 1);
+		filters.Controls.Add(MakeCaption("Auto refresh"), 3, 0);
+		filters.Controls.Add(_autoRefreshCheck, 3, 1);
 
-		toolbar.Controls.Add(MakeCaption(" "), 5, 0);
-		toolbar.Controls.Add(_clearFiltersButton, 5, 1);
+		filters.Controls.Add(MakeCaption(" "), 4, 0);
+		filters.Controls.Add(_refreshButton, 4, 1);
 
-		return toolbar;
+		filters.Controls.Add(MakeCaption(" "), 5, 0);
+		filters.Controls.Add(_clearFiltersButton, 5, 1);
+
+		FlowLayoutPanel bulkRow = new()
+		{
+			Dock = DockStyle.Bottom,
+			Height = 38,
+			FlowDirection = FlowDirection.LeftToRight,
+			WrapContents = false,
+			BackColor = ToolbarBack,
+			Padding = new Padding(0, 4, 0, 0),
+		};
+		_disconnectInactiveButton.MinimumSize = new Size(190, 30);
+		_disconnectExceptCurrentButton.MinimumSize = new Size(220, 30);
+		bulkRow.Controls.Add(_disconnectInactiveButton);
+		bulkRow.Controls.Add(_disconnectExceptCurrentButton);
+
+		host.Controls.Add(filters);
+		host.Controls.Add(bulkRow);
+		return host;
 	}
 
 	private Panel BuildShadowPanel()
 	{
-		Panel panel = new() { Dock = DockStyle.Fill };
+		Panel panel = new() { Dock = DockStyle.Fill, BackColor = CardBack, Padding = new Padding(10) };
+		panel.Paint += (_, e) =>
+		{
+			using Pen pen = new(CardBorder, 1);
+			e.Graphics.DrawRectangle(pen, 0, 0, panel.Width - 1, panel.Height - 1);
+		};
 
 		TableLayoutPanel buttons = new()
 		{
 			Dock = DockStyle.Bottom,
-			Height = 36,
+			Height = 38,
 			ColumnCount = 4,
 			RowCount = 1,
-			Padding = new Padding(4),
+			BackColor = CardBack,
+			Padding = new Padding(0, 4, 0, 0),
 		};
 		for (int i = 0; i < 4; i++)
 		{
 			buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 25f));
 		}
+
 		buttons.Controls.Add(_enableAllButton, 0, 0);
 		buttons.Controls.Add(_backupButton, 1, 0);
 		buttons.Controls.Add(_restoreButton, 2, 0);
 		buttons.Controls.Add(_refreshPolicyButton, 3, 0);
 
-		Panel summaryPanel = new() { Dock = DockStyle.Top, Height = 28, Padding = new Padding(4, 4, 4, 0) };
+		Panel summaryPanel = new() { Dock = DockStyle.Top, Height = 26, BackColor = CardBack, Padding = new Padding(0, 4, 0, 0) };
 		summaryPanel.Controls.Add(_shadowSummaryLabel);
 
 		panel.Controls.Add(_shadowGrid);
 		panel.Controls.Add(buttons);
 		panel.Controls.Add(summaryPanel);
+		panel.Controls.Add(_shadowHeaderLabel);
 		return panel;
 	}
 
@@ -328,7 +468,53 @@ public sealed class RemoteRdpClientsPage : TabPage
 		Dock = DockStyle.Fill,
 		TextAlign = ContentAlignment.MiddleLeft,
 		AutoSize = false,
+		ForeColor = TextSecondary,
+		BackColor = ToolbarBack,
+		Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 8.5f, FontStyle.Regular),
 	};
+
+	private static Button NewButton(string text, Color normal, Color hover)
+	{
+		Button b = new()
+		{
+			Text = text,
+			Dock = DockStyle.Fill,
+			AutoSize = false,
+			Height = 30,
+			MinimumSize = new Size(150, 30),
+			FlatStyle = FlatStyle.Flat,
+			BackColor = normal,
+			ForeColor = Color.White,
+			Margin = new Padding(4, 0, 4, 0),
+			Padding = new Padding(4, 0, 4, 0),
+			UseVisualStyleBackColor = false,
+		};
+		b.FlatAppearance.BorderColor = hover;
+		b.FlatAppearance.BorderSize = 1;
+		b.FlatAppearance.MouseOverBackColor = hover;
+		return b;
+	}
+
+	private static void ApplyDarkGridStyle(DataGridView grid)
+	{
+		grid.EnableHeadersVisualStyles = false;
+		grid.BackgroundColor = GridBack;
+		grid.GridColor = GridLines;
+		grid.BorderStyle = BorderStyle.None;
+		grid.DefaultCellStyle.BackColor = CellBack;
+		grid.DefaultCellStyle.ForeColor = TextPrimary;
+		grid.DefaultCellStyle.SelectionBackColor = SelectionBack;
+		grid.DefaultCellStyle.SelectionForeColor = Color.White;
+		grid.AlternatingRowsDefaultCellStyle.BackColor = AltRowBack;
+		grid.AlternatingRowsDefaultCellStyle.ForeColor = TextPrimary;
+		grid.AlternatingRowsDefaultCellStyle.SelectionBackColor = SelectionBack;
+		grid.AlternatingRowsDefaultCellStyle.SelectionForeColor = Color.White;
+		grid.ColumnHeadersDefaultCellStyle.BackColor = HeaderBack;
+		grid.ColumnHeadersDefaultCellStyle.ForeColor = HeaderFore;
+		grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = HeaderBack;
+		grid.ColumnHeadersDefaultCellStyle.SelectionForeColor = HeaderFore;
+		grid.ColumnHeadersBorderStyle = DataGridViewHeaderBorderStyle.Single;
+	}
 
 	private static void ConfigureSessionGrid(DataGridView grid)
 	{
@@ -495,6 +681,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 		});
 	}
 
+	// ── Public API ───────────────────────────────────────────────────────────────
 	public async Task RefreshAsync()
 	{
 		if (_refreshing)
@@ -620,6 +807,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 		ApplyShadowStatus(localSnapshot);
 	}
 
+	// ── Core Logic — shadow policy ───────────────────────────────────────────────
 	private void ApplyShadowStatus(ShadowPolicyStatusDto? status)
 	{
 		if (status is null)
@@ -659,6 +847,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 		SetStatus("Shadow policy snapshot loaded: " + (status.Message ?? string.Empty));
 	}
 
+	// ── Core Logic — filtering ───────────────────────────────────────────────────
 	private void OnLocalFilterChanged()
 	{
 		if (_suppressFilterRefresh)
@@ -737,6 +926,14 @@ public sealed class RemoteRdpClientsPage : TabPage
 			: row.IsDisconnected ? RowColorDisconnected
 			: RowColorInactive;
 		_grid.Rows[e.RowIndex].DefaultCellStyle.BackColor = color;
+
+		// v2.0.0 — draw a subtle left-border highlight on the operator's current session row.
+		if (row.IsCurrent)
+		{
+			Rectangle rb = e.RowBounds;
+			using SolidBrush brush = new(CurrentSessionAccent);
+			e.Graphics.FillRectangle(brush, rb.Left, rb.Top, 3, rb.Height);
+		}
 	}
 
 	private void OnCellMouseDown(object? sender, DataGridViewCellMouseEventArgs e)
@@ -789,6 +986,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 		SetStatus(outcome.Format());
 	}
 
+	// ── Core Logic — single-session actions ──────────────────────────────────────
 	private async Task OnDisconnectAsync()
 	{
 		if (_menuRow is null)
@@ -920,6 +1118,184 @@ public sealed class RemoteRdpClientsPage : TabPage
 				_menuRow.SessionId, launch.Error ?? "(unknown error)"));
 	}
 
+	// ── Core Logic — bulk disconnect (two-phase soft + hard logoff) ──────────────
+
+	/// <summary>Disconnects every session that is not Active and has a valid numeric Session ID.
+	/// A soft disconnect is attempted first; sessions still present after two minutes get a hard
+	/// logoff.</summary>
+	private async Task OnDisconnectAllInactiveAsync()
+	{
+		List<RdpSessionDto> targets = _allSessions
+			.Where(s => !s.IsActive && s.SessionId > 0)
+			.ToList();
+
+		if (targets.Count == 0)
+		{
+			SetStatus("No inactive sessions with a session ID to disconnect.");
+			return;
+		}
+
+		string prompt = string.Format(CultureInfo.InvariantCulture,
+			"Disconnect {0} inactive session(s)?\n\nSessions: {1}\n\n"
+			+ "A soft disconnect (DisconnectSession) will be attempted first.\n"
+			+ "If a session is still present after 2 minutes, a hard logoff (LogoffSession) will follow.",
+			targets.Count, DescribeTargets(targets));
+		if (!Confirm(prompt, "Confirm bulk disconnect (inactive)"))
+		{
+			SetStatus("Bulk disconnect (inactive) cancelled.");
+			return;
+		}
+
+		await OnBulkDisconnectAsync(targets, "inactive").ConfigureAwait(true);
+	}
+
+	/// <summary>Disconnects every session with a valid Session ID — including active users —
+	/// except the operator's own current session. Same two-phase soft+hard flow.</summary>
+	private async Task OnDisconnectAllExceptCurrentAsync()
+	{
+		List<RdpSessionDto> targets = _allSessions
+			.Where(s => s.SessionId > 0 && !s.IsCurrent)
+			.ToList();
+
+		if (targets.Count == 0)
+		{
+			SetStatus("No other sessions with a session ID to disconnect.");
+			return;
+		}
+
+		string prompt = string.Format(CultureInfo.InvariantCulture,
+			"Disconnect ALL {0} session(s) except your current session?\n\n"
+			+ "This includes active users. Soft disconnect first, hard logoff after 2 minutes if needed.\n\n"
+			+ "Sessions: {1}\n\n"
+			+ "WARNING: Active users will lose their RDP connection.",
+			targets.Count, DescribeTargets(targets));
+		if (!Confirm(prompt, "Confirm bulk disconnect (all except current)"))
+		{
+			SetStatus("Bulk disconnect (all except current) cancelled.");
+			return;
+		}
+
+		await OnBulkDisconnectAsync(targets, "all except current").ConfigureAwait(true);
+	}
+
+	/// <summary>Shared two-phase soft+hard logoff flow. Sends a soft DisconnectSession to each
+	/// target, schedules a single-shot 2-minute timer, and on tick refreshes the session list and
+	/// hard-logs-off any target still present.</summary>
+	private async Task OnBulkDisconnectAsync(IReadOnlyList<RdpSessionDto> targets, string label)
+	{
+		ArgumentNullException.ThrowIfNull(targets);
+		if (targets.Count == 0)
+		{
+			return;
+		}
+
+		// Cancel any timer already running and merge/replace the pending set so a second click
+		// before the previous timer fires does not double-schedule.
+		CancelBulkTimer();
+
+		_disconnectInactiveButton.Enabled = false;
+		_disconnectExceptCurrentButton.Enabled = false;
+		try
+		{
+			_pendingHardLogoff.Clear();
+			foreach (RdpSessionDto target in targets)
+			{
+				_pendingHardLogoff.Add(target.SessionId);
+				await SendSessionActionAsync(
+					IpcCommand.DisconnectSession,
+					new SessionActionRequest
+					{
+						SessionId = target.SessionId,
+						Reason = "Configurator bulk disconnect (" + label + ")",
+					},
+					"Bulk DisconnectSession").ConfigureAwait(true);
+			}
+
+			SetStatus(string.Format(CultureInfo.InvariantCulture,
+				"Bulk disconnect ({0}): {1} soft sent. Hard logoff scheduled in 2 min for remaining.",
+				label, targets.Count));
+
+			_bulkDisconnectTimer = new System.Windows.Forms.Timer { Interval = HardLogoffDelayMs };
+			_bulkDisconnectTimer.Tick += async (_, _) => await OnBulkHardLogoffTickAsync(label).ConfigureAwait(true);
+			_bulkDisconnectTimer.Start();
+		}
+		finally
+		{
+			_disconnectInactiveButton.Enabled = true;
+			_disconnectExceptCurrentButton.Enabled = true;
+		}
+	}
+
+	/// <summary>Fires once, two minutes after the soft phase: refresh the session list, then hard
+	/// logoff every still-present session whose ID was in the original pending set.</summary>
+	private async Task OnBulkHardLogoffTickAsync(string label)
+	{
+		CancelBulkTimer();
+
+		// Snapshot and clear the pending set so a re-entrant click starts cleanly.
+		int[] pending = _pendingHardLogoff.ToArray();
+		_pendingHardLogoff.Clear();
+		if (pending.Length == 0)
+		{
+			return;
+		}
+
+		await RefreshAsync().ConfigureAwait(true);
+
+		HashSet<int> stillPresent = _allSessions
+			.Where(s => s.SessionId > 0)
+			.Select(s => s.SessionId)
+			.ToHashSet();
+
+		int hardCount = 0;
+		foreach (int sessionId in pending)
+		{
+			if (!stillPresent.Contains(sessionId))
+			{
+				continue;
+			}
+
+			hardCount++;
+			await SendSessionActionAsync(
+				IpcCommand.LogoffSession,
+				new SessionActionRequest
+				{
+					SessionId = sessionId,
+					Reason = "Configurator bulk hard logoff (" + label + ")",
+				},
+				"Bulk LogoffSession").ConfigureAwait(true);
+		}
+
+		SetStatus(string.Format(CultureInfo.InvariantCulture,
+			"Bulk disconnect ({0}): hard logoff phase complete — {1} session(s) still present were logged off.",
+			label, hardCount));
+		await RefreshAsync().ConfigureAwait(true);
+	}
+
+	private void CancelBulkTimer()
+	{
+		if (_bulkDisconnectTimer is not null)
+		{
+			_bulkDisconnectTimer.Stop();
+			_bulkDisconnectTimer.Dispose();
+			_bulkDisconnectTimer = null;
+		}
+	}
+
+	private static string DescribeTargets(IReadOnlyList<RdpSessionDto> targets)
+	{
+		const int maxShown = 10;
+		IEnumerable<string> shown = targets
+			.Take(maxShown)
+			.Select(s => string.Format(CultureInfo.InvariantCulture,
+				"{0}:{1}",
+				s.SessionId,
+				string.IsNullOrEmpty(s.UserName) ? "(no user)" : s.UserName));
+		string joined = string.Join(", ", shown);
+		return targets.Count > maxShown ? joined + ", …" : joined;
+	}
+
+	// ── Core Logic — shadow policy actions ───────────────────────────────────────
 	private async Task OnEnableAllAsync()
 	{
 		string prompt =
@@ -1020,6 +1396,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 		await ConnectionFactsExportRunner.RunAsync(_ipc, _menuRow.ClientAddress, format, SetStatus).ConfigureAwait(true);
 	}
 
+	// ── Error Handling & IPC dispatch ────────────────────────────────────────────
 	private async Task SendSessionActionAsync(IpcCommand command, SessionActionRequest request, string label)
 	{
 		try
@@ -1064,7 +1441,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 	private void SetStatus(string message)
 	{
 		string stamped = string.Format(CultureInfo.InvariantCulture,
-			"[{0:yyyy-MM-dd HH:mm:ss}Z] {1}",
+			"[{0:HH:mm:ss}Z] {1}",
 			DateTime.UtcNow, message);
 		if (_statusStrip.InvokeRequired)
 		{
@@ -1076,16 +1453,55 @@ public sealed class RemoteRdpClientsPage : TabPage
 		}
 	}
 
+	// ── Disposal ─────────────────────────────────────────────────────────────────
 	protected override void Dispose(bool disposing)
 	{
 		if (disposing)
 		{
 			_autoRefreshTimer.Stop();
 			_autoRefreshTimer.Dispose();
+			CancelBulkTimer();
 			_menu.Dispose();
 		}
 
 		base.Dispose(disposing);
+	}
+
+	// ── Dark context-menu renderer ───────────────────────────────────────────────
+
+	/// <summary>ToolStripProfessionalRenderer wired with the dark palette so the sessions context
+	/// menu matches the rest of the page.</summary>
+	private sealed class DarkMenuRenderer : ToolStripProfessionalRenderer
+	{
+		public DarkMenuRenderer()
+			: base(new DarkColorTable())
+		{
+		}
+
+		protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+		{
+			ArgumentNullException.ThrowIfNull(e);
+			e.TextColor = e.Item.Enabled ? TextPrimary : TextSecondary;
+			base.OnRenderItemText(e);
+		}
+	}
+
+	/// <summary>Dark color table for <see cref="DarkMenuRenderer"/>.</summary>
+	private sealed class DarkColorTable : ProfessionalColorTable
+	{
+		public override Color ToolStripDropDownBackground => CardBack;
+		public override Color ImageMarginGradientBegin => CardBack;
+		public override Color ImageMarginGradientMiddle => CardBack;
+		public override Color ImageMarginGradientEnd => CardBack;
+		public override Color MenuBorder => CardBorder;
+		public override Color MenuItemBorder => ButtonHover;
+		public override Color MenuItemSelected => SelectionBack;
+		public override Color MenuItemSelectedGradientBegin => SelectionBack;
+		public override Color MenuItemSelectedGradientEnd => SelectionBack;
+		public override Color MenuItemPressedGradientBegin => CardBack;
+		public override Color MenuItemPressedGradientEnd => CardBack;
+		public override Color SeparatorDark => CardBorder;
+		public override Color SeparatorLight => CardBorder;
 	}
 
 	/// <summary>Grid view-model for one <see cref="RdpSessionDto"/> row.</summary>

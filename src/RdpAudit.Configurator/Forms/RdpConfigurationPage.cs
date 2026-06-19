@@ -2,20 +2,30 @@
 // Module:  RdpAudit.Configurator.Forms
 // Purpose: Editable WinForms tab that surfaces the live Windows Terminal Services configuration
 //          relevant to RDP — listener port, enabled state, NLA / SecurityLayer authentication mode,
-//          Single Session per User, Hide Users on Logon Screen, Session Shadowing mode — plus
-//          TermService status and the termsrv.dll product version. Every control carries a short
-//          description so the operator understands exactly what each setting controls. Values are
-//          requested from RdpAudit.Service over IPC first; when the service is not reachable
-//          (not installed, stopped, or pipe timeout) the page falls back to an in-process direct
-//          registry / service inspection equivalent to the model used by stascorp/rdpwrap's
-//          RDPConf.exe. The UI clearly indicates whether the displayed snapshot came from the
-//          service or the local fallback. Mutating the registry flows through
+//          Single Session per User, Hide Users on Logon Screen, Always-prompt-for-password, and the
+//          Session Shadowing mode — plus TermService status and the termsrv.dll product version.
+//          Every control carries a short description so the operator understands exactly what each
+//          setting controls. Values are requested from RdpAudit.Service over IPC first; when the
+//          service is not reachable (not installed, stopped, or pipe timeout) the page falls back to
+//          an in-process direct registry / service inspection equivalent to the model used by
+//          stascorp/rdpwrap's RDPConf.exe. The UI clearly indicates whether the displayed snapshot
+//          came from the service or the local fallback. Mutating the registry flows through
 //          <see cref="LocalRdpConfigurationWriter"/>, which captures a JSON backup of the affected
-//          values before any write is committed and refuses to mutate the registry when that
-//          backup step fails.
-// Extends: System.Windows.Forms.TabPage
+//          values before any write is committed and refuses to mutate the registry when that backup
+//          step fails.
+//
+//          v2.0.0 — dark UI redesign. Absolute-position layout replaced with a TableLayoutPanel /
+//          FlowLayoutPanel card composition styled to match MikroTikPage's dark palette. Adds a
+//          StatusStrip status bar, an amber IPC-unreachable fallback banner, and a green Apply
+//          accent when there are pending (dirty) edits. All persistence, validation, IPC and
+//          fallback logic is preserved unchanged from v1.x.
+// Extends: System.Windows.Forms.TabPage. To add a new RDP setting, add its control(s) to the
+//          relevant card builder (BuildStatusCard / BuildListenerCard / BuildAuthCard /
+//          BuildSessionPolicyCard / BuildShadowCard), wire the dirty-tracking handler through
+//          OnEditChanged, and extend RdpConfigurationEditModel + RdpConfigurationDto accordingly.
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 2.0.0
 
 using System.Globalization;
 using System.Runtime.Versioning;
@@ -28,16 +38,38 @@ using RdpAudit.Core.Util;
 
 namespace RdpAudit.Configurator.Forms;
 
+// v2.0.0 — dark UI redesign
 /// <summary>Editable view of the live RDP configuration the Service reports over IPC, with an
 /// in-process registry-based fallback when IPC is unavailable. Apply is guarded by a JSON
-/// backup that is captured before any registry mutation lands.</summary>
+/// backup that is captured before any registry mutation lands. The page is rendered with the
+/// shared dark palette so it matches the rest of the Configurator.</summary>
 [SupportedOSPlatform("windows")]
 public sealed class RdpConfigurationPage : TabPage
 {
+	// ── Dark palette (mirrors MikroTikPage benchmark) ────────────────────────────
+	private static readonly Color PageBack = Color.FromArgb(30, 30, 30);
+	private static readonly Color PanelBack = Color.FromArgb(40, 40, 40);
+	private static readonly Color CardBack = Color.FromArgb(45, 45, 45);
+	private static readonly Color CardBorder = Color.FromArgb(70, 70, 70);
+	private static readonly Color TextPrimary = Color.FromArgb(220, 220, 220);
+	private static readonly Color TextSecondary = Color.FromArgb(150, 150, 150);
+	private static readonly Color InputBack = Color.FromArgb(55, 55, 55);
+	private static readonly Color InputBorder = Color.FromArgb(80, 80, 80);
+	private static readonly Color AccentHeader = Color.FromArgb(180, 200, 255);
+	private static readonly Color ButtonNormal = Color.FromArgb(60, 100, 180);
+	private static readonly Color ButtonHover = Color.FromArgb(80, 120, 200);
+	private static readonly Color SuccessAccent = Color.FromArgb(50, 160, 80);
+	private static readonly Color SuccessHover = Color.FromArgb(70, 180, 100);
+	private static readonly Color StatusBack = Color.FromArgb(35, 35, 35);
+	private static readonly Color StatusFore = Color.FromArgb(180, 180, 180);
+	private static readonly Color BannerBack = Color.FromArgb(60, 50, 20);
+	private static readonly Color BannerFore = Color.FromArgb(255, 200, 60);
+
+	// ── Fields & DI ──────────────────────────────────────────────────────────────
 	private readonly RdpConfigurationSnapshotService _snapshots;
 	private readonly LocalRdpConfigurationWriter _writer;
 
-	private readonly Label _header;
+	private readonly Panel _fallbackBanner;
 	private readonly Label _serviceLine;
 	private readonly Label _versionLine;
 	private readonly Label _enabledDescription;
@@ -54,23 +86,25 @@ public sealed class RdpConfigurationPage : TabPage
 	private readonly Label _singleSessionDescription;
 	private readonly CheckBox _hideUsers;
 	private readonly Label _hideUsersDescription;
+	private readonly CheckBox _alwaysPrompt;
+	private readonly Label _alwaysPromptDescription;
 
 	private readonly ComboBox _shadowMode;
 	private readonly Label _shadowDescription;
 
-	private readonly CheckBox _alwaysPrompt;
-	private readonly Label _alwaysPromptDescription;
-
 	private readonly Button _refresh;
 	private readonly Button _apply;
 	private readonly Button _cancel;
-	private readonly Label _status;
+
+	private readonly StatusStrip _statusStrip;
+	private readonly ToolStripStatusLabel _statusLabel;
 
 	private RdpConfigurationDto? _baseline;
 	private RdpConfigurationEditModel _edits = new();
 	private bool _suppressDirtyEvents;
 	private bool _dirty;
 
+	// ── Construction ─────────────────────────────────────────────────────────────
 	public RdpConfigurationPage(IpcClient ipc)
 		: this(BuildSnapshotService(ipc, new LocalRdpConfigurationProvider()), new LocalRdpConfigurationWriter())
 	{
@@ -83,95 +117,64 @@ public sealed class RdpConfigurationPage : TabPage
 		_snapshots = snapshots;
 		_writer = writer;
 		Text = "RDP Configuration";
-		Padding = new Padding(12);
+		BackColor = PageBack;
+		ForeColor = TextPrimary;
+		Padding = new Padding(10);
 		AutoScroll = true;
 
-		_header = new Label
-		{
-			Text = "RDP Listener Configuration",
-			AutoSize = true,
-			Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 14f, FontStyle.Bold),
-			Location = new Point(12, 12),
-		};
+		// --- Service Status card controls -----------------------------------------------------
+		_serviceLine = NewValueLine("TermService: probing...");
+		_versionLine = NewValueLine("termsrv.dll: probing...");
 
-		_serviceLine = new Label { AutoSize = false, Width = 1100, Height = 22, Location = new Point(12, 50), Text = "TermService: probing..." };
-		_versionLine = new Label { AutoSize = false, Width = 1100, Height = 22, Location = new Point(12, 76), Text = "termsrv.dll: probing..." };
-
-		_enabledCheck = new CheckBox
-		{
-			AutoSize = true,
-			Location = new Point(12, 110),
-			Text = "Enable Remote Desktop (fDenyTSConnections = 0)",
-		};
+		// --- Listener card controls -----------------------------------------------------------
+		_enabledCheck = NewCheck("Enable Remote Desktop (fDenyTSConnections = 0)");
 		_enabledCheck.CheckedChanged += (_, _) => OnEditChanged(() => _edits.RdpEnabled = _enabledCheck.Checked);
-		_enabledDescription = NewDescription(134);
-		_enabledDescription.Text = RdpConfigurationModel.DescribeRdpEnabled;
+		_enabledDescription = NewDescription(RdpConfigurationModel.DescribeRdpEnabled);
 
 		_portInput = new NumericUpDown
 		{
 			Minimum = RdpConfigurationModel.MinPort,
 			Maximum = RdpConfigurationModel.MaxPort,
 			Width = 140,
-			Location = new Point(12, 178),
+			BackColor = InputBack,
+			ForeColor = TextPrimary,
+			BorderStyle = BorderStyle.FixedSingle,
 		};
 		_portInput.ValueChanged += (_, _) => OnEditChanged(() => _edits.Port = (int)_portInput.Value);
-		_portDescription = NewDescription(208);
-		_portDescription.Text = RdpConfigurationModel.DescribePortNumber;
+		_portDescription = NewDescription(RdpConfigurationModel.DescribePortNumber);
 
-		Label authHeader = NewSectionHeader("Authentication Mode", 256);
-		_authNla = new RadioButton
-		{
-			AutoSize = true,
-			Location = new Point(12, 282),
-			Text = "Network Level Authentication required (UserAuthentication=1, SecurityLayer=2). Recommended.",
-		};
+		// --- Authentication card controls -----------------------------------------------------
+		_authNla = NewRadio("Network Level Authentication required (UserAuthentication=1, SecurityLayer=2). Recommended.");
 		_authNla.CheckedChanged += (_, _) => OnAuthModeChanged();
-
-		_authNegotiate = new RadioButton
-		{
-			AutoSize = true,
-			Location = new Point(12, 304),
-			Text = "Default RDP authentication — negotiate (UserAuthentication=0, SecurityLayer=1).",
-		};
+		_authNegotiate = NewRadio("Default RDP authentication — negotiate (UserAuthentication=0, SecurityLayer=1).");
 		_authNegotiate.CheckedChanged += (_, _) => OnAuthModeChanged();
-
-		_authRdpSec = new RadioButton
-		{
-			AutoSize = true,
-			Location = new Point(12, 326),
-			Text = "RDP Security Layer — legacy (UserAuthentication=0, SecurityLayer=0). Not recommended.",
-		};
+		_authRdpSec = NewRadio("RDP Security Layer — legacy (UserAuthentication=0, SecurityLayer=0). Not recommended.");
 		_authRdpSec.CheckedChanged += (_, _) => OnAuthModeChanged();
+		_authDescription = NewDescription(
+			RdpConfigurationModel.DescribeAuthenticationMode(RdpUserAuthenticationMode.NlaRequired));
 
-		_authDescription = NewDescription(350);
-		_authDescription.Text = RdpConfigurationModel.DescribeAuthenticationMode(RdpUserAuthenticationMode.NlaRequired);
-
-		_singleSession = new CheckBox
-		{
-			AutoSize = true,
-			Location = new Point(12, 394),
-			Text = "Single session per user",
-		};
+		// --- Session Policy card controls -----------------------------------------------------
+		_singleSession = NewCheck("Single session per user");
 		_singleSession.CheckedChanged += (_, _) => OnEditChanged(() => _edits.SingleSessionPerUser = _singleSession.Checked);
-		_singleSessionDescription = NewDescription(418);
-		_singleSessionDescription.Text = RdpConfigurationModel.DescribeSingleSession;
+		_singleSessionDescription = NewDescription(RdpConfigurationModel.DescribeSingleSession);
 
-		_hideUsers = new CheckBox
-		{
-			AutoSize = true,
-			Location = new Point(12, 462),
-			Text = "Hide users on logon screen",
-		};
+		_hideUsers = NewCheck("Hide users on logon screen");
 		_hideUsers.CheckedChanged += (_, _) => OnEditChanged(() => _edits.HideUsersOnLogon = _hideUsers.Checked);
-		_hideUsersDescription = NewDescription(486);
-		_hideUsersDescription.Text = RdpConfigurationModel.DescribeHideUsersOnLogon;
+		_hideUsersDescription = NewDescription(RdpConfigurationModel.DescribeHideUsersOnLogon);
 
-		Label shadowHeader = NewSectionHeader("Session Shadowing Mode", 530);
+		_alwaysPrompt = NewCheck("Always prompt for password upon connection (fPromptForPassword = 1)");
+		_alwaysPrompt.CheckedChanged += (_, _) =>
+			OnEditChanged(() => _edits.AlwaysPromptForPassword = _alwaysPrompt.Checked);
+		_alwaysPromptDescription = NewDescription(RdpConfigurationModel.DescribePromptForPassword);
+
+		// --- Session Shadowing card controls --------------------------------------------------
 		_shadowMode = new ComboBox
 		{
 			DropDownStyle = ComboBoxStyle.DropDownList,
 			Width = 460,
-			Location = new Point(12, 554),
+			FlatStyle = FlatStyle.Flat,
+			BackColor = InputBack,
+			ForeColor = TextPrimary,
 		};
 		_shadowMode.Items.AddRange(new object[]
 		{
@@ -184,64 +187,75 @@ public sealed class RdpConfigurationPage : TabPage
 		});
 		_shadowMode.SelectedIndex = 0;
 		_shadowMode.SelectedIndexChanged += (_, _) => OnEditChanged(() => _edits.ShadowMode = ShadowFromComboIndex(_shadowMode.SelectedIndex));
-		_shadowDescription = NewDescription(586);
-		_shadowDescription.Text = RdpConfigurationModel.DescribeShadowMode;
+		_shadowDescription = NewDescription(RdpConfigurationModel.DescribeShadowMode);
 
-		_alwaysPrompt = new CheckBox
-		{
-			AutoSize = true,
-			Location = new Point(12, 634),
-			Text = "Always prompt for password upon connection (fPromptForPassword = 1)",
-		};
-		_alwaysPrompt.CheckedChanged += (_, _) =>
-			OnEditChanged(() => _edits.AlwaysPromptForPassword = _alwaysPrompt.Checked);
-		_alwaysPromptDescription = NewDescription(658);
-		_alwaysPromptDescription.Height = 76;
-		_alwaysPromptDescription.Text = RdpConfigurationModel.DescribePromptForPassword;
-
-		_refresh = new Button { Text = "Reload", Width = 100, Height = 28, Location = new Point(12, 746) };
+		// --- Action buttons -------------------------------------------------------------------
+		_refresh = NewButton("Reload", ButtonNormal, ButtonHover);
 		_refresh.Click += async (_, _) => await RefreshAsync().ConfigureAwait(true);
 
-		_apply = new Button { Text = "Apply", Width = 100, Height = 28, Location = new Point(124, 746), Enabled = false };
+		_apply = NewButton("Apply", ButtonNormal, ButtonHover);
+		_apply.Enabled = false;
 		_apply.Click += (_, _) => OnApply();
 
-		_cancel = new Button { Text = "Cancel", Width = 100, Height = 28, Location = new Point(236, 746), Enabled = false };
+		_cancel = NewButton("Cancel", ButtonNormal, ButtonHover);
+		_cancel.Enabled = false;
 		_cancel.Click += (_, _) => OnCancel();
 
-		_status = new Label
+		// --- Fallback banner (hidden unless the snapshot came from the local registry) ---------
+		_fallbackBanner = new Panel
 		{
-			AutoSize = false,
-			Width = 1100,
-			Height = 36,
-			Location = new Point(12, 782),
-			Text = "Ready.",
+			Dock = DockStyle.Top,
+			Height = 30,
+			BackColor = BannerBack,
+			Padding = new Padding(8, 0, 8, 0),
+			Visible = false,
 		};
+		_fallbackBanner.Controls.Add(new Label
+		{
+			Dock = DockStyle.Fill,
+			TextAlign = ContentAlignment.MiddleLeft,
+			ForeColor = BannerFore,
+			BackColor = BannerBack,
+			Text = "\u26A0 IPC unreachable — showing local registry fallback. Changes will be applied locally.",
+		});
 
-		Controls.Add(_header);
-		Controls.Add(_serviceLine);
-		Controls.Add(_versionLine);
-		Controls.Add(_enabledCheck);
-		Controls.Add(_enabledDescription);
-		Controls.Add(_portInput);
-		Controls.Add(_portDescription);
-		Controls.Add(authHeader);
-		Controls.Add(_authNla);
-		Controls.Add(_authNegotiate);
-		Controls.Add(_authRdpSec);
-		Controls.Add(_authDescription);
-		Controls.Add(_singleSession);
-		Controls.Add(_singleSessionDescription);
-		Controls.Add(_hideUsers);
-		Controls.Add(_hideUsersDescription);
-		Controls.Add(shadowHeader);
-		Controls.Add(_shadowMode);
-		Controls.Add(_shadowDescription);
-		Controls.Add(_alwaysPrompt);
-		Controls.Add(_alwaysPromptDescription);
-		Controls.Add(_refresh);
-		Controls.Add(_apply);
-		Controls.Add(_cancel);
-		Controls.Add(_status);
+		// --- Status bar -----------------------------------------------------------------------
+		_statusStrip = new StatusStrip
+		{
+			SizingGrip = false,
+			BackColor = StatusBack,
+			ForeColor = StatusFore,
+		};
+		_statusLabel = new ToolStripStatusLabel("Ready.")
+		{
+			Spring = true,
+			TextAlign = ContentAlignment.MiddleLeft,
+			ForeColor = StatusFore,
+		};
+		_statusStrip.Items.Add(_statusLabel);
+
+		// --- Compose: a single-column scrollable stack of dark cards ---------------------------
+		TableLayoutPanel root = new()
+		{
+			Dock = DockStyle.Fill,
+			ColumnCount = 1,
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
+			BackColor = PageBack,
+		};
+		root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+
+		root.Controls.Add(BuildStatusCard());
+		root.Controls.Add(BuildListenerCard());
+		root.Controls.Add(BuildAuthCard());
+		root.Controls.Add(BuildSessionPolicyCard());
+		root.Controls.Add(BuildShadowCard());
+		root.Controls.Add(BuildButtonsRow());
+
+		// Order matters: docked controls added later sit closer to the top edge.
+		Controls.Add(root);
+		Controls.Add(_statusStrip);
+		Controls.Add(_fallbackBanner);
 
 		SetEditControlsEnabled(false);
 		HandleCreated += async (_, _) => await RefreshAsync().ConfigureAwait(true);
@@ -258,60 +272,249 @@ public sealed class RdpConfigurationPage : TabPage
 			localFetch: local.Read);
 	}
 
-	private static Label NewSectionHeader(string text, int y)
+	// ── Card builders ────────────────────────────────────────────────────────────
+	private Panel BuildStatusCard()
 	{
-		return new Label
+		TableLayoutPanel body = NewCardBody(2);
+		body.Controls.Add(_serviceLine, 0, 0);
+		body.Controls.Add(_versionLine, 0, 1);
+		return WrapCard("Service Status", body);
+	}
+
+	private Panel BuildListenerCard()
+	{
+		TableLayoutPanel body = NewCardBody(4);
+		body.Controls.Add(_enabledCheck, 0, 0);
+		body.Controls.Add(_enabledDescription, 0, 1);
+
+		FlowLayoutPanel portRow = new()
+		{
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
+			FlowDirection = FlowDirection.LeftToRight,
+			WrapContents = false,
+			BackColor = CardBack,
+			Margin = new Padding(0, 6, 0, 0),
+		};
+		portRow.Controls.Add(new Label
+		{
+			Text = "Listener port:",
+			AutoSize = true,
+			ForeColor = TextPrimary,
+			BackColor = CardBack,
+			TextAlign = ContentAlignment.MiddleLeft,
+			Margin = new Padding(0, 6, 8, 0),
+		});
+		portRow.Controls.Add(_portInput);
+		body.Controls.Add(portRow, 0, 2);
+		body.Controls.Add(_portDescription, 0, 3);
+		return WrapCard("Listener", body);
+	}
+
+	private Panel BuildAuthCard()
+	{
+		TableLayoutPanel body = NewCardBody(4);
+		body.Controls.Add(_authNla, 0, 0);
+		body.Controls.Add(_authNegotiate, 0, 1);
+		body.Controls.Add(_authRdpSec, 0, 2);
+		body.Controls.Add(_authDescription, 0, 3);
+		return WrapCard("Authentication", body);
+	}
+
+	private Panel BuildSessionPolicyCard()
+	{
+		TableLayoutPanel body = NewCardBody(6);
+		body.Controls.Add(_singleSession, 0, 0);
+		body.Controls.Add(_singleSessionDescription, 0, 1);
+		body.Controls.Add(_hideUsers, 0, 2);
+		body.Controls.Add(_hideUsersDescription, 0, 3);
+		body.Controls.Add(_alwaysPrompt, 0, 4);
+		body.Controls.Add(_alwaysPromptDescription, 0, 5);
+		return WrapCard("Session Policy", body);
+	}
+
+	private Panel BuildShadowCard()
+	{
+		TableLayoutPanel body = NewCardBody(2);
+		body.Controls.Add(_shadowMode, 0, 0);
+		body.Controls.Add(_shadowDescription, 0, 1);
+		return WrapCard("Session Shadowing", body);
+	}
+
+	private Panel BuildButtonsRow()
+	{
+		FlowLayoutPanel buttons = new()
+		{
+			Dock = DockStyle.Top,
+			FlowDirection = FlowDirection.RightToLeft,
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
+			Padding = new Padding(0, 6, 0, 6),
+			BackColor = PageBack,
+			WrapContents = false,
+		};
+		// RightToLeft flow: first added sits rightmost.
+		buttons.Controls.Add(_apply);
+		buttons.Controls.Add(_cancel);
+		buttons.Controls.Add(_refresh);
+		return buttons;
+	}
+
+	// ── Dark control factories ───────────────────────────────────────────────────
+	private static Label NewValueLine(string text) => new()
+	{
+		Text = text,
+		AutoSize = false,
+		Dock = DockStyle.Fill,
+		Height = 22,
+		ForeColor = TextPrimary,
+		BackColor = CardBack,
+		TextAlign = ContentAlignment.MiddleLeft,
+		Margin = new Padding(0, 1, 0, 1),
+	};
+
+	private static Label NewDescription(string text) => new()
+	{
+		Text = text,
+		AutoSize = false,
+		Dock = DockStyle.Fill,
+		Height = 40,
+		Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 8f, FontStyle.Regular),
+		ForeColor = TextSecondary,
+		BackColor = CardBack,
+		Margin = new Padding(0, 0, 0, 4),
+	};
+
+	private static CheckBox NewCheck(string text) => new()
+	{
+		Text = text,
+		AutoSize = true,
+		FlatStyle = FlatStyle.Flat,
+		ForeColor = TextPrimary,
+		BackColor = CardBack,
+		Margin = new Padding(0, 2, 0, 0),
+	};
+
+	private static RadioButton NewRadio(string text) => new()
+	{
+		Text = text,
+		AutoSize = true,
+		FlatStyle = FlatStyle.Flat,
+		ForeColor = TextPrimary,
+		BackColor = CardBack,
+		Margin = new Padding(0, 2, 0, 0),
+	};
+
+	private static Button NewButton(string text, Color normal, Color hover)
+	{
+		Button b = new()
 		{
 			Text = text,
-			AutoSize = true,
-			Location = new Point(12, y),
-			Font = new Font(SystemFonts.MessageBoxFont!, FontStyle.Bold),
-		};
-	}
-
-	private static Label NewDescription(int y)
-	{
-		return new Label
-		{
+			Height = 30,
+			MinimumSize = new Size(150, 30),
 			AutoSize = false,
-			Width = 1100,
-			Height = 38,
-			Location = new Point(12, y),
-			ForeColor = SystemColors.GrayText,
+			FlatStyle = FlatStyle.Flat,
+			BackColor = normal,
+			ForeColor = Color.White,
+			Margin = new Padding(4, 0, 4, 0),
+			Padding = new Padding(4, 0, 4, 0),
+			UseVisualStyleBackColor = false,
 		};
+		b.FlatAppearance.BorderColor = hover;
+		b.FlatAppearance.BorderSize = 1;
+		b.FlatAppearance.MouseOverBackColor = hover;
+		return b;
 	}
 
+	private static TableLayoutPanel NewCardBody(int rows)
+	{
+		TableLayoutPanel body = new()
+		{
+			Dock = DockStyle.Fill,
+			ColumnCount = 1,
+			RowCount = rows,
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
+			BackColor = CardBack,
+			Padding = new Padding(2),
+		};
+		body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+		for (int i = 0; i < rows; i++)
+		{
+			body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+		}
+
+		return body;
+	}
+
+	/// <summary>Wraps a card body in a bordered dark panel with a bold accent-color section
+	/// header, simulating a GroupBox in the dark palette.</summary>
+	private static Panel WrapCard(string title, Control body)
+	{
+		Panel card = new()
+		{
+			Dock = DockStyle.Top,
+			AutoSize = true,
+			AutoSizeMode = AutoSizeMode.GrowAndShrink,
+			BackColor = CardBack,
+			Padding = new Padding(10, 30, 10, 10),
+			Margin = new Padding(0, 0, 0, 8),
+		};
+		card.Paint += (_, e) =>
+		{
+			using Pen pen = new(CardBorder, 1);
+			e.Graphics.DrawRectangle(pen, 0, 0, card.Width - 1, card.Height - 1);
+		};
+
+		Label header = new()
+		{
+			Text = title,
+			AutoSize = true,
+			Location = new Point(10, 8),
+			Font = new Font(SystemFonts.MessageBoxFont!.FontFamily, 9.5f, FontStyle.Bold),
+			ForeColor = AccentHeader,
+			BackColor = CardBack,
+		};
+
+		body.Dock = DockStyle.Top;
+		card.Controls.Add(body);
+		card.Controls.Add(header);
+		return card;
+	}
+
+	// ── Core Logic ───────────────────────────────────────────────────────────────
 	private async Task RefreshAsync()
 	{
 		_refresh.Enabled = false;
 		_apply.Enabled = false;
 		_cancel.Enabled = false;
-		_status.Text = "Reading live configuration...";
+		SetStatus("Reading live configuration...");
 		try
 		{
 			RdpConfigurationSnapshotResult result = await _snapshots.CaptureAsync().ConfigureAwait(true);
 			if (!result.HasSnapshot || result.Snapshot is null)
 			{
 				ApplyUnreadableSnapshot();
-				_status.Text = result.Error is null
+				SetStatus(result.Error is null
 					? "Could not read RDP configuration from the service or the local registry."
-					: "Reload failed: " + result.Error;
+					: "Reload failed: " + result.Error);
 				return;
 			}
 
 			_baseline = result.Snapshot;
+			SetFallbackBannerVisible(result.Source == RdpConfigurationSnapshotSource.LocalFallback);
 			LoadEditsFromSnapshot(_baseline);
 			SetEditControlsEnabled(true);
 			SetDirty(false);
-			_status.Text = string.Format(CultureInfo.InvariantCulture,
+			SetStatus(string.Format(CultureInfo.InvariantCulture,
 				"Source: {0}. Snapshot captured {1:yyyy-MM-dd HH:mm:ss} UTC.",
 				DescribeSource(result.Source),
-				_baseline.CapturedUtc);
+				_baseline.CapturedUtc));
 		}
 		catch (Exception ex)
 		{
 			ApplyUnreadableSnapshot();
-			_status.Text = "Reload failed: " + ex.GetType().Name + ": " + ex.Message;
+			SetStatus("Reload failed: " + ex.GetType().Name + ": " + ex.Message);
 		}
 		finally
 		{
@@ -325,6 +528,14 @@ public sealed class RdpConfigurationPage : TabPage
 		RdpConfigurationSnapshotSource.LocalFallback => "local machine fallback",
 		_ => "unknown",
 	};
+
+	private void SetFallbackBannerVisible(bool visible)
+	{
+		if (_fallbackBanner.Visible != visible)
+		{
+			_fallbackBanner.Visible = visible;
+		}
+	}
 
 	private void ApplyUnreadableSnapshot()
 	{
@@ -456,7 +667,22 @@ public sealed class RdpConfigurationPage : TabPage
 	{
 		_dirty = dirty;
 		_cancel.Enabled = dirty && _baseline is not null;
-		_apply.Enabled = dirty && _baseline is not null && _edits.Validate().IsValid;
+		bool applyEnabled = dirty && _baseline is not null && _edits.Validate().IsValid;
+		_apply.Enabled = applyEnabled;
+
+		// v2.0.0 — signal pending changes visually by switching Apply to the success accent.
+		if (_dirty && applyEnabled)
+		{
+			_apply.BackColor = SuccessAccent;
+			_apply.FlatAppearance.BorderColor = SuccessHover;
+			_apply.FlatAppearance.MouseOverBackColor = SuccessHover;
+		}
+		else
+		{
+			_apply.BackColor = ButtonNormal;
+			_apply.FlatAppearance.BorderColor = ButtonHover;
+			_apply.FlatAppearance.MouseOverBackColor = ButtonHover;
+		}
 	}
 
 	private void SetEditControlsEnabled(bool enabled)
@@ -481,28 +707,28 @@ public sealed class RdpConfigurationPage : TabPage
 
 		LoadEditsFromSnapshot(_baseline);
 		SetDirty(false);
-		_status.Text = "Reverted edits to last loaded snapshot.";
+		SetStatus("Reverted edits to last loaded snapshot.");
 	}
 
 	private void OnApply()
 	{
 		if (_baseline is null)
 		{
-			_status.Text = "Apply blocked: no baseline snapshot loaded.";
+			SetStatus("Apply blocked: no baseline snapshot loaded.");
 			return;
 		}
 
 		RdpConfigurationValidationResult validation = _edits.Validate();
 		if (!validation.IsValid)
 		{
-			_status.Text = "Apply blocked: " + string.Join("  |  ", validation.Errors);
+			SetStatus("Apply blocked: " + string.Join("  |  ", validation.Errors));
 			return;
 		}
 
 		RdpConfigurationChangeSet changes = _edits.ComputeChanges(_baseline);
 		if (!changes.HasChanges)
 		{
-			_status.Text = "Nothing to apply — no fields diverged from the loaded snapshot.";
+			SetStatus("Nothing to apply — no fields diverged from the loaded snapshot.");
 			SetDirty(false);
 			return;
 		}
@@ -514,13 +740,13 @@ public sealed class RdpConfigurationPage : TabPage
 		if (MessageBox.Show(confirmation, "Confirm Apply", MessageBoxButtons.YesNo,
 			MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
 		{
-			_status.Text = "Apply cancelled by operator.";
+			SetStatus("Apply cancelled by operator.");
 			return;
 		}
 
 		_apply.Enabled = false;
 		_cancel.Enabled = false;
-		_status.Text = "Applying configuration...";
+		SetStatus("Applying configuration...");
 		LocalRdpConfigurationApplyResult result;
 		try
 		{
@@ -528,13 +754,13 @@ public sealed class RdpConfigurationPage : TabPage
 		}
 		catch (Exception ex)
 		{
-			_status.Text = "Apply failed: " + ex.GetType().Name + " — " + ex.Message;
+			SetStatus("Apply failed: " + ex.GetType().Name + " — " + ex.Message);
 			return;
 		}
 
 		if (!result.Success)
 		{
-			_status.Text = "Apply failed: " + (result.Error ?? "(unknown)");
+			SetStatus("Apply failed: " + (result.Error ?? "(unknown)"));
 			return;
 		}
 
@@ -548,7 +774,7 @@ public sealed class RdpConfigurationPage : TabPage
 			summary.Append(" Listener port change requires TermService restart or reboot to take effect.");
 		}
 
-		_status.Text = summary.ToString();
+		SetStatus(summary.ToString());
 		_ = RefreshAsync();
 	}
 
@@ -585,4 +811,20 @@ public sealed class RdpConfigurationPage : TabPage
 		5 => ShadowPolicyMode.ViewNoConsent,
 		_ => ShadowPolicyMode.NotConfigured,
 	};
+
+	// ── Status bar ───────────────────────────────────────────────────────────────
+	private void SetStatus(string message)
+	{
+		string stamped = string.Format(CultureInfo.InvariantCulture,
+			"[{0:HH:mm:ss}Z] {1}",
+			DateTime.UtcNow, message);
+		if (_statusStrip.InvokeRequired)
+		{
+			_statusStrip.BeginInvoke(new Action(() => _statusLabel.Text = stamped));
+		}
+		else
+		{
+			_statusLabel.Text = stamped;
+		}
+	}
 }
