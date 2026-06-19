@@ -2,12 +2,15 @@
 // Module:  RdpAudit.Configurator.Forms
 // Purpose: Editable view of the appsettings.json RdpAuditOptions block. Surfaces the global DEBUG
 //          mode as a first-class persisted toggle (with a destructive-actions warning and a status
-//          indicator), a category TreeView that navigates the configuration sections, and an advanced
-//          raw-JSON editor for full-document edits. Uses IPC SaveSettings to persist; the service-side
-//          handler validates the document and writes atomically, then hot-reloads it.
-// Extends: System.Windows.Forms.TabPage
+//          indicator), a category TreeView that navigates AND inline-edits the configuration sections,
+//          and an advanced raw-JSON editor for full-document edits. Uses IPC SaveSettings to persist;
+//          the service-side handler validates the document and writes atomically, then hot-reloads it.
+// Extends: System.Windows.Forms.TabPage. To make a new scalar editable, no change is needed — every
+//          JsonValue leaf is editable automatically. To support editing a new node KIND (e.g. inline
+//          array editing), extend LeafRef / BeginInlineEdit / CommitInlineEdit and ParseScalar below.
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.4.2
 
 using System.Globalization;
 using System.Runtime.Versioning;
@@ -39,8 +42,18 @@ public sealed class SettingsPage : TabPage
 	private readonly Label _debugWarning;
 	private readonly Label _status;
 
+	// Inline value editor: a borderless TextBox floated over the selected leaf node while editing.
+	private readonly TextBox _inlineEditor;
+	private TreeNode? _editingNode;
+
 	private bool _dirty;
 	private bool _suppressEditorEvents;
+	private bool _committingInlineEdit;
+
+	/// <summary>Identifies a scalar leaf within the configuration tree so an inline edit can be written
+	/// back to the correct JSON node. <see cref="Category"/> is the section name (e.g. "Firewall"),
+	/// <see cref="Key"/> is the scalar property name within that section.</summary>
+	private sealed record LeafRef(string Category, string Key);
 
 	public SettingsPage(IpcClient ipc)
 	{
@@ -87,6 +100,27 @@ public sealed class SettingsPage : TabPage
 		// --- Category tree + raw JSON editor (split) ---------------------------------------------
 		_tree = new TreeView { Dock = DockStyle.Fill, HideSelection = false };
 		_tree.AfterSelect += (_, e) => OnTreeSelect(e?.Node);
+		_tree.NodeMouseDoubleClick += (_, e) => BeginInlineEdit(e?.Node);
+		_tree.KeyDown += OnTreeKeyDown;
+		_tree.BeforeCollapse += (_, e) =>
+		{
+			// Collapsing while editing would orphan the floating editor over a hidden node.
+			if (_editingNode is not null)
+			{
+				e.Cancel = true;
+			}
+		};
+
+		// Borderless overlay used for in-place editing of scalar leaf values.
+		_inlineEditor = new TextBox
+		{
+			Visible = false,
+			BorderStyle = BorderStyle.FixedSingle,
+			Font = new Font(FontFamily.GenericMonospace, 9),
+		};
+		_inlineEditor.KeyDown += OnInlineEditorKeyDown;
+		_inlineEditor.LostFocus += (_, _) => CommitInlineEdit(apply: true);
+		_tree.Controls.Add(_inlineEditor);
 
 		_editor = new TextBox
 		{
@@ -118,7 +152,7 @@ public sealed class SettingsPage : TabPage
 		{
 			Dock = DockStyle.Top,
 			Height = 22,
-			Text = "Categories (advanced raw JSON on the right)",
+			Text = "Categories — double-click a value to edit (raw JSON on the right)",
 			Font = new Font(FontFamily.GenericSansSerif, 8, FontStyle.Italic),
 		});
 		split.Panel2.Controls.Add(_editor);
@@ -259,7 +293,15 @@ public sealed class SettingsPage : TabPage
 							null => "null",
 							_ => leaf.Value.ToJsonString(),
 						};
-						catNode.Nodes.Add(string.Format(CultureInfo.InvariantCulture, "{0} = {1}", leaf.Key, value));
+						TreeNode leafNode = catNode.Nodes.Add(
+							string.Format(CultureInfo.InvariantCulture, "{0} = {1}", leaf.Key, value));
+
+						// Only scalar values (JsonValue) are inline-editable; objects / arrays / null are left
+						// without a Tag so BeginInlineEdit refuses to open the overlay over them.
+						if (leaf.Value is JsonValue)
+						{
+							leafNode.Tag = new LeafRef(category.Key, leaf.Key);
+						}
 					}
 				}
 
@@ -291,6 +333,168 @@ public sealed class SettingsPage : TabPage
 			_editor.Select(idx, token.Length + 2);
 			_editor.ScrollToCaret();
 		}
+	}
+
+	private void OnTreeKeyDown(object? sender, KeyEventArgs e)
+	{
+		// F2 / Enter on a scalar leaf opens the inline editor, matching common tree-edit conventions.
+		if (e.KeyCode is Keys.F2 or Keys.Enter && _editingNode is null)
+		{
+			BeginInlineEdit(_tree.SelectedNode);
+			e.Handled = true;
+			e.SuppressKeyPress = true;
+		}
+	}
+
+	private void OnInlineEditorKeyDown(object? sender, KeyEventArgs e)
+	{
+		if (e.KeyCode == Keys.Enter)
+		{
+			CommitInlineEdit(apply: true);
+			e.Handled = true;
+			e.SuppressKeyPress = true;
+		}
+		else if (e.KeyCode == Keys.Escape)
+		{
+			CommitInlineEdit(apply: false);
+			e.Handled = true;
+			e.SuppressKeyPress = true;
+		}
+	}
+
+	/// <summary>Opens the borderless overlay editor over a scalar leaf node, pre-filled with the current
+	/// JSON value. No-op for category nodes, object/array/null leaves, or while another edit is active.</summary>
+	private void BeginInlineEdit(TreeNode? node)
+	{
+		if (node?.Tag is not LeafRef leaf || _editingNode is not null)
+		{
+			return;
+		}
+
+		JsonObject? section = TryParseRoot();
+		if (section is null)
+		{
+			UpdateStatus("Cannot edit: fix the raw JSON first.");
+			return;
+		}
+
+		if (section[leaf.Category] is not JsonObject categoryObj || categoryObj[leaf.Key] is not JsonValue current)
+		{
+			UpdateStatus("Value is no longer a simple scalar — edit it in the raw JSON pane.");
+			return;
+		}
+
+		_editingNode = node;
+
+		// Position the overlay over the node's text bounds; raw JSON literal as the editable seed.
+		Rectangle bounds = node.Bounds;
+		_inlineEditor.Bounds = new Rectangle(
+			bounds.X,
+			bounds.Y,
+			Math.Max(bounds.Width + 80, 140),
+			_inlineEditor.PreferredHeight);
+		_inlineEditor.Text = current.ToJsonString().Trim('"');
+		_inlineEditor.Visible = true;
+		_inlineEditor.BringToFront();
+		_inlineEditor.Focus();
+		_inlineEditor.SelectAll();
+		UpdateStatus(string.Format(CultureInfo.InvariantCulture,
+			"Editing {0}.{1} — Enter to commit, Esc to cancel.", leaf.Category, leaf.Key));
+	}
+
+	/// <summary>Closes the inline overlay. When <paramref name="apply"/> is true the typed text is parsed
+	/// (bool / integer / floating-point / string, preserving the original JSON kind where possible) and
+	/// written back into the configuration section, the raw editor is regenerated, and the tree rebuilt.</summary>
+	private void CommitInlineEdit(bool apply)
+	{
+		if (_editingNode is null || _committingInlineEdit)
+		{
+			return;
+		}
+
+		_committingInlineEdit = true;
+		try
+		{
+			TreeNode node = _editingNode;
+			string typed = _inlineEditor.Text;
+
+			_inlineEditor.Visible = false;
+			_editingNode = null;
+
+			if (!apply || node.Tag is not LeafRef leaf)
+			{
+				if (!apply)
+				{
+					UpdateStatus("Edit cancelled.");
+				}
+
+				return;
+			}
+
+			JsonObject? section = TryParseRoot();
+			if (section is null || section[leaf.Category] is not JsonObject categoryObj
+				|| categoryObj[leaf.Key] is not JsonValue currentValue)
+			{
+				UpdateStatus("Cannot apply edit: the underlying JSON changed. Use the raw pane.");
+				return;
+			}
+
+			JsonNode parsed = ParseScalar(typed, currentValue);
+			categoryObj[leaf.Key] = parsed;
+
+			JsonObject wrapped = new()
+			{
+				[Core.Config.RdpAuditOptions.SectionName] = section.DeepClone(),
+			};
+			SetEditorText(wrapped.ToJsonString(JsonOptions.Indented));
+			_dirty = true;
+			UpdateStatus(string.Format(CultureInfo.InvariantCulture,
+				"{0}.{1} updated — Save to apply.", leaf.Category, leaf.Key));
+		}
+		finally
+		{
+			_committingInlineEdit = false;
+		}
+	}
+
+	/// <summary>Parses inline-editor text into a JSON scalar, preferring the kind of the original value:
+	/// a boolean stays boolean, an integer stays integral, a number stays numeric; anything else (or a
+	/// failed numeric parse for a previously numeric field) falls back to a JSON string.</summary>
+	private static JsonNode ParseScalar(string text, JsonValue original)
+	{
+		string trimmed = text.Trim();
+
+		// Preserve boolean fields.
+		if (original.TryGetValue(out bool _))
+		{
+			if (bool.TryParse(trimmed, out bool b))
+			{
+				return JsonValue.Create(b);
+			}
+		}
+
+		// Preserve numeric fields (integral first, then floating-point).
+		bool originalIsNumber =
+			original.TryGetValue(out long _) ||
+			original.TryGetValue(out double _) ||
+			original.TryGetValue(out int _);
+
+		if (originalIsNumber)
+		{
+			if (long.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out long l))
+			{
+				return JsonValue.Create(l);
+			}
+
+			if (double.TryParse(trimmed, NumberStyles.Float, CultureInfo.InvariantCulture, out double d))
+			{
+				return JsonValue.Create(d);
+			}
+		}
+
+		// Default: store as a JSON string (matches the original kind for string fields, and is a safe
+		// fallback when a numeric field was given non-numeric text).
+		return JsonValue.Create(trimmed)!;
 	}
 
 	private void RefreshDebugIndicator(JsonObject? section)
