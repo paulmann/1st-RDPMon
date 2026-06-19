@@ -4,12 +4,15 @@
 // Extends: System.Windows.Forms.TabPage
 //          v1.1.0 — the Detail column now stretches to fill the remaining list width so GridLines no
 //          longer paint an empty trailing area that looked like a spurious 5th column.
+//          v1.2.0 — column stretch moved to the shared ListViewColumnSizer; added a themed right-click
+//          clipboard menu (Copy Cell / Copy Row / Copy All) and a Copy Report button.
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
-// Version: 1.1.0
+// Version: 1.2.0
 
 using System.Runtime.Versioning;
 using RdpAudit.Configurator.Services;
+using RdpAudit.Configurator.Theming;
 
 using static RdpAudit.Configurator.Theming.DarkTheme;
 
@@ -23,6 +26,7 @@ public sealed class PrerequisitesPage : TabPage
 	private readonly Button _refresh;
 	private readonly Button _fixSelected;
 	private readonly Button _fixAll;
+	private readonly Button _copyReport;
 	private readonly Label _info;
 	private readonly PrerequisiteChecker _checker = new();
 	private List<PrerequisiteResult> _current = new();
@@ -43,17 +47,21 @@ public sealed class PrerequisitesPage : TabPage
 		// Stretch the last (Detail) column to consume any leftover client width. Without this the
 		// fixed 600px column leaves an empty gap on the right which, with GridLines enabled, reads as a
 		// spurious extra (5th) column.
-		_list.Resize += (_, _) => StretchDetailColumn();
+		ListViewColumnSizer.EnableLastColumnFill(_list);
+		// Themed right-click menu: Copy Cell / Copy Row / Copy All (report).
+		ListViewClipboardMenu.Attach(_list);
 		_list.MouseDoubleClick += async (_, _) => await ApplyFixForSelectedAsync().ConfigureAwait(true);
 
 		FlowLayoutPanel buttons = new() { Dock = DockStyle.Top, Height = 36, FlowDirection = FlowDirection.LeftToRight };
 		_refresh = new Button { Text = "Refresh", Width = 110 };
 		_fixSelected = new Button { Text = "Fix selected", Width = 130 };
 		_fixAll = new Button { Text = "Fix all failures", Width = 150 };
+		_copyReport = new Button { Text = "Copy Report", Width = 120 };
 		_refresh.Click += async (_, _) => await ReloadAsync().ConfigureAwait(true);
 		_fixSelected.Click += async (_, _) => await ApplyFixForSelectedAsync().ConfigureAwait(true);
 		_fixAll.Click += async (_, _) => await ApplyAllFixesAsync().ConfigureAwait(true);
-		buttons.Controls.AddRange(new Control[] { _refresh, _fixSelected, _fixAll });
+		_copyReport.Click += (_, _) => ListViewClipboardMenu.CopyAll(_list);
+		buttons.Controls.AddRange(new Control[] { _refresh, _fixSelected, _fixAll, _copyReport });
 
 		_info = new Label { Dock = DockStyle.Top, Height = 22, Text = "Ready" };
 
@@ -62,26 +70,6 @@ public sealed class PrerequisitesPage : TabPage
 		Controls.Add(buttons);
 
 		HandleCreated += async (_, _) => await ReloadAsync().ConfigureAwait(true);
-	}
-
-	/// <summary>Resizes the last (Detail) column so the four columns together exactly fill the list's
-	/// client width, leaving no empty trailing area that GridLines would render as a phantom column.</summary>
-	private void StretchDetailColumn()
-	{
-		if (_list.Columns.Count == 0)
-		{
-			return;
-		}
-
-		int used = 0;
-		for (int i = 0; i < _list.Columns.Count - 1; i++)
-		{
-			used += _list.Columns[i].Width;
-		}
-
-		int remaining = _list.ClientSize.Width - used;
-		ColumnHeader last = _list.Columns[_list.Columns.Count - 1];
-		last.Width = remaining > 120 ? remaining : 120;
 	}
 
 	private async Task ReloadAsync()

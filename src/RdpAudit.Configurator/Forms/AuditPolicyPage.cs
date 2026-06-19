@@ -3,14 +3,18 @@
 // Purpose: Displays the canonical audit policy rows and offers Apply / Configure SACL buttons.
 //          Calls into AuditPolicyManager and SaclManager directly — no PowerShell stub.
 // Extends: System.Windows.Forms.TabPage
+//          v1.1.0 — GUID moved to the last column and stretched to the window edge (removes the phantom
+//          trailing column); added a themed right-click clipboard menu and a Copy Report button.
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.1.0
 
 using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.Versioning;
 using System.Text;
 using RdpAudit.Core.Events;
+using RdpAudit.Configurator.Theming;
 
 using static RdpAudit.Configurator.Theming.DarkTheme;
 
@@ -47,6 +51,7 @@ public sealed class AuditPolicyPage : TabPage
 	private readonly Button _apply;
 	private readonly Button _applySacl;
 	private readonly Button _refresh;
+	private readonly Button _copyReport;
 	private readonly Label _status;
 	private readonly TextBox _help;
 	private readonly AuditPolicyManager _policy = new();
@@ -63,9 +68,14 @@ public sealed class AuditPolicyPage : TabPage
 		};
 		_list.Columns.Add("Category", 200);
 		_list.Columns.Add("Subcategory", 280);
-		_list.Columns.Add("GUID", 280);
 		_list.Columns.Add("Required", 110);
 		_list.Columns.Add("Current", 110);
+		// GUID is the widest, least-scanned value, so it sits last and stretches to the window edge. This
+		// also removes the empty trailing area that GridLines would otherwise render as a phantom column.
+		_list.Columns.Add("GUID", 320);
+		ListViewColumnSizer.EnableLastColumnFill(_list);
+		// Themed right-click menu: Copy Cell / Copy Row / Copy All (report).
+		ListViewClipboardMenu.Attach(_list);
 
 		FlowLayoutPanel buttons = new() { Dock = DockStyle.Top, Height = 40, FlowDirection = FlowDirection.LeftToRight };
 		_apply = new Button { Text = "Apply audit policy", Width = 180 };
@@ -74,9 +84,12 @@ public sealed class AuditPolicyPage : TabPage
 		_applySacl.Click += BtnApplySacl_Click;
 		_refresh = new Button { Text = "Refresh", Width = 100 };
 		_refresh.Click += BtnRefresh_Click;
+		_copyReport = new Button { Text = "Copy Report", Width = 120 };
+		_copyReport.Click += (_, _) => ListViewClipboardMenu.CopyAll(_list);
 		buttons.Controls.Add(_apply);
 		buttons.Controls.Add(_applySacl);
 		buttons.Controls.Add(_refresh);
+		buttons.Controls.Add(_copyReport);
 
 		_status = new Label { Dock = DockStyle.Top, Height = 24, Text = "Ready" };
 
@@ -207,13 +220,13 @@ public sealed class AuditPolicyPage : TabPage
 			{
 				ListViewItem item = new(row.Category);
 				item.SubItems.Add(row.Subcategory);
-				item.SubItems.Add(row.SubcategoryGuid);
 				item.SubItems.Add(string.Format(CultureInfo.InvariantCulture, "S={0} F={1}",
 					row.Success ? "Y" : "N", row.Failure ? "Y" : "N"));
 				item.SubItems.Add(state is null
 					? "?"
 					: string.Format(CultureInfo.InvariantCulture, "S={0} F={1}",
 						state.Success ? "Y" : "N", state.Failure ? "Y" : "N"));
+				item.SubItems.Add(row.SubcategoryGuid);
 				if (state is not null && state.Success == row.Success && state.Failure == row.Failure)
 				{
 					item.BackColor = RowSuccessBack;

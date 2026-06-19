@@ -9,10 +9,12 @@
 //          v2.2.0 — the outer tab strip uses the classic (Normal) appearance with an explicit dark
 //          band paint so the light system band no longer shows behind / under the tab row.
 //          v2.3.0 — version aligned with DarkTheme v2.3.0 (shared tab-strip band paint behaviour).
+//          v2.4.0 — the outer tab strip is themed via DarkTabStripPainter (Win32 subclass) so the light
+//                   band right of Settings / above Firewall and the wrapped-row tail are painted dark.
 // Extends: System.Windows.Forms.Form
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
-// Version: 2.3.0
+// Version: 2.4.0
 
 using System.Globalization;
 using System.Reflection;
@@ -55,8 +57,8 @@ public sealed class MainForm : Form
 			DrawMode = TabDrawMode.OwnerDrawFixed,
 			// Classic (Normal) appearance: FlatButtons fills the whole tab-strip band with the light system
 			// colour (the grey band reported by the user behind / under the tab row). In Normal mode the band
-			// takes the control BackColor and we additionally paint it dark in OnPaintTabBand so no light
-			// strip remains.
+			// takes the control BackColor and DarkTabStripPainter (attached below) repaints the strip dark
+			// so no light system band remains.
 			Appearance = TabAppearance.Normal,
 			SizeMode = TabSizeMode.Fixed,
 			Multiline = true,
@@ -78,9 +80,10 @@ public sealed class MainForm : Form
 		}
 
 		_tabs.DrawItem += OnDrawTab;
-		// Paint the strip band dark before the tab headers are drawn so the light system band never shows
-		// behind or under the tab row.
-		_tabs.Paint += OnPaintTabBand;
+		// The tab-strip header band (and its empty tail right of the last tab / wrapped-row gaps) is drawn
+		// by WinForms in the light system colour and never raises a managed Paint event, so a Win32
+		// subclass repaints it dark while leaving the owner-drawn tab glyphs intact.
+		DarkTabStripPainter.AttachTo(_tabs, DarkTheme.PageBack);
 
 		Controls.Add(_tabs);
 
@@ -147,14 +150,6 @@ public sealed class MainForm : Form
 		"\U0001F9EA Tools Diag",
 		"\U0001F527 Settings",
 	};
-
-	/// <summary>Fills the outer tab-strip band with the dark page colour before the owner-drawn tab
-	/// headers paint on top, so WinForms' light system band never shows behind or under the tab row.</summary>
-	private void OnPaintTabBand(object? sender, PaintEventArgs e)
-	{
-		using SolidBrush back = new(DarkTheme.PageBack);
-		e.Graphics.FillRectangle(back, _tabs.ClientRectangle);
-	}
 
 	/// <summary>Owner-draws a single tab header: emoji-prefixed label, with the selected tab rendered
 	/// bold on a highlighted background so the active page stands out. Falls back gracefully if the

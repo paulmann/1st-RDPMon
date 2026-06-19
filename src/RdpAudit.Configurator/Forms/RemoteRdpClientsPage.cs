@@ -19,7 +19,7 @@
 //          the _menu construction block and gate it in OnMenuOpening.
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
-// Version: 2.0.0
+// Version: 2.1.0
 
 using System.ComponentModel;
 using System.Drawing;
@@ -34,6 +34,7 @@ using RdpAudit.Core.Ipc.Contracts;
 using RdpAudit.Core.Models;
 using RdpAudit.Core.Util;
 
+using RdpAudit.Configurator.Theming;
 using static RdpAudit.Configurator.Theming.DarkTheme;
 
 namespace RdpAudit.Configurator.Forms;
@@ -236,6 +237,7 @@ public sealed class RemoteRdpClientsPage : TabPage
 		_menu.Items.Add(_menuExportFacts);
 		_menu.Opening += OnMenuOpening;
 		_grid.ContextMenuStrip = _menu;
+		DataGridClipboardMenu.AppendTo(_menu, _grid);
 
 		_statusStrip = new StatusStrip
 		{
