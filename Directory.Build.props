@@ -17,7 +17,7 @@
 		<!-- Central version surface. publish.ps1 -p:VersionPrefix overrides this for releases;
 		     the default below ensures the assembly version embedded in the binary is something
 		     other than the implicit 1.0.0.0 placeholder so the Service tab can distinguish
-		     runtime / installed / distribution binaries by version. Pinned to 1.3.9 for the
+		     runtime / installed / distribution binaries by version. Pinned to 1.4.0 for the
 		     current release stream — see RdpAuditVersionMetadataTests for the gate. The 1.3.9
 		     release finishes the live firewall matcher integration: the production scanner / parser /
 		     reconciler / FirewallPage / Repair paths now all route ownership through the pure
@@ -99,7 +99,16 @@
 		     large database. Two append-only IPC commands (QueryOperationLogs=58, GetOverviewProgress=59)
 		     back these. It carries forward the 1.3.2 guarded cleanup operations, the 1.3.1 firewall
 		     Remove / Repair / diagnostics stabilization and the 1.3.0 IPC reliability overhaul. -->
-		<VersionPrefix Condition="'$(VersionPrefix)' == ''">1.3.9</VersionPrefix>
+		<!-- 1.4.0: Firewall whitelist gains CIDR-range support. A new family-aware CidrRange type
+		     (RdpAudit.Core.Util) parses and matches both IPv4 and IPv6 prefixes via a bitwise
+		     prefix mask, and the auto-block worker now skips any source IP that falls inside a
+		     whitelisted range (not just exact-string matches). The Configurator Firewall tab adds
+		     an "Add local network IPs" button that whitelists the standard private / unique-local
+		     ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7, fd00::/8) in one click, and
+		     the manual whitelist add now accepts CIDR input. The enforcement-health line is rendered
+		     as a full-width status band (yellow neutral / green healthy / red error) with a dark,
+		     high-contrast foreground so it is always legible on the dark theme. -->
+		<VersionPrefix Condition="'$(VersionPrefix)' == ''">1.4.0</VersionPrefix>
 		<FileVersion>$(VersionPrefix).0</FileVersion>
 		<AssemblyVersion>$(VersionPrefix).0</AssemblyVersion>
 		<!-- Build SHA surface: when the build/publish pipeline passes -p:SourceRevisionId=<short-sha>

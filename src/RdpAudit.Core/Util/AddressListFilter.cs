@@ -6,6 +6,7 @@
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.4.0
 
 using System.Globalization;
 using System.Net;
@@ -69,6 +70,36 @@ public sealed class AddressListFilter
 				"Value '{0}' is not a valid IPv4 / IPv6 address.", trimmed));
 		}
 		return parsed.ToString();
+	}
+
+	/// <summary>Returns true when <paramref name="value"/> parses as either an IPv4 / IPv6 literal or an
+	/// IPv4 / IPv6 CIDR network (e.g. "10.0.0.0/8", "fc00::/7"). Used by the whitelist add path, which
+	/// accepts ranges; the blocklist path keeps the stricter single-IP <see cref="IsValidIp"/>.</summary>
+	public static bool IsValidIpOrCidr(string? value)
+	{
+		if (string.IsNullOrWhiteSpace(value))
+		{
+			return false;
+		}
+
+		string trimmed = value.Trim();
+		return CidrRange.LooksLikeCidr(trimmed)
+			? CidrRange.TryParse(trimmed, out _)
+			: IPAddress.TryParse(trimmed, out _);
+	}
+
+	/// <summary>Normalises an IP literal or CIDR network to its canonical textual form (host bits beyond
+	/// the prefix are masked to zero for CIDR), throwing on failure.</summary>
+	public static string NormalizeIpOrCidr(string value)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(value);
+		string trimmed = value.Trim();
+		if (CidrRange.LooksLikeCidr(trimmed))
+		{
+			return CidrRange.Parse(trimmed).ToString();
+		}
+
+		return NormalizeIp(trimmed);
 	}
 
 	/// <summary>Normalises a login (trim, lower-case invariant) for case-insensitive comparison.</summary>
