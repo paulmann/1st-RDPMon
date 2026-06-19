@@ -23,6 +23,8 @@ using RdpAudit.Core.Ipc.Contracts;
 using RdpAudit.Core.Models;
 using RdpAudit.Core.Util;
 
+using static RdpAudit.Configurator.Theming.DarkTheme;
+
 namespace RdpAudit.Configurator.Forms;
 
 /// <summary>Stage 8 AbuseIPDB Configurator tab.</summary>
@@ -233,7 +235,7 @@ public sealed class AbuseIpDbPage : TabPage
 				+ "the source IP and attack metadata.",
 			Dock = DockStyle.Fill,
 			TextAlign = ContentAlignment.MiddleLeft,
-			ForeColor = Color.DarkRed,
+			ForeColor = StatusDanger,
 			AutoSize = false,
 		};
 		layout.Controls.Add(warning, 0, 4);

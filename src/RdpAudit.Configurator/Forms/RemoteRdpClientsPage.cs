@@ -34,6 +34,8 @@ using RdpAudit.Core.Ipc.Contracts;
 using RdpAudit.Core.Models;
 using RdpAudit.Core.Util;
 
+using static RdpAudit.Configurator.Theming.DarkTheme;
+
 namespace RdpAudit.Configurator.Forms;
 
 // v2.0.0 — dark UI redesign
@@ -51,31 +53,10 @@ public sealed class RemoteRdpClientsPage : TabPage
 	private const int HardLogoffDelayMs = 120_000;
 
 	// ── Dark palette (mirrors MikroTikPage benchmark) ────────────────────────────
-	private static readonly Color PageBack = Color.FromArgb(30, 30, 30);
-	private static readonly Color CardBack = Color.FromArgb(45, 45, 45);
-	private static readonly Color CardBorder = Color.FromArgb(70, 70, 70);
-	private static readonly Color TextPrimary = Color.FromArgb(220, 220, 220);
-	private static readonly Color TextSecondary = Color.FromArgb(150, 150, 150);
-	private static readonly Color InputBack = Color.FromArgb(55, 55, 55);
-	private static readonly Color AccentHeader = Color.FromArgb(180, 200, 255);
-	private static readonly Color ButtonNormal = Color.FromArgb(60, 100, 180);
-	private static readonly Color ButtonHover = Color.FromArgb(80, 120, 200);
-	private static readonly Color DangerButton = Color.FromArgb(160, 50, 50);
-	private static readonly Color DangerHover = Color.FromArgb(190, 70, 70);
 	private static readonly Color BulkInactiveButton = Color.FromArgb(140, 90, 30);
 	private static readonly Color BulkInactiveHover = Color.FromArgb(170, 115, 45);
 	private static readonly Color BulkExceptCurrentButton = Color.FromArgb(140, 50, 50);
 	private static readonly Color BulkExceptCurrentHover = Color.FromArgb(175, 70, 70);
-	private static readonly Color GridBack = Color.FromArgb(30, 30, 30);
-	private static readonly Color GridLines = Color.FromArgb(60, 60, 60);
-	private static readonly Color CellBack = Color.FromArgb(40, 40, 40);
-	private static readonly Color AltRowBack = Color.FromArgb(45, 45, 45);
-	private static readonly Color SelectionBack = Color.FromArgb(60, 100, 180);
-	private static readonly Color HeaderBack = Color.FromArgb(50, 50, 50);
-	private static readonly Color HeaderFore = Color.FromArgb(180, 200, 255);
-	private static readonly Color ToolbarBack = Color.FromArgb(38, 38, 38);
-	private static readonly Color StatusBack = Color.FromArgb(35, 35, 35);
-	private static readonly Color StatusFore = Color.FromArgb(180, 180, 180);
 	private static readonly Color CurrentSessionAccent = Color.FromArgb(60, 100, 180);
 
 	// Row tint colors adapted to the dark palette.

@@ -24,6 +24,8 @@ using RdpAudit.Core.Ipc.Contracts;
 using RdpAudit.Core.Models;
 using RdpAudit.Core.Util;
 
+using static RdpAudit.Configurator.Theming.DarkTheme;
+
 namespace RdpAudit.Configurator.Forms;
 
 /// <summary>
@@ -50,9 +52,9 @@ public sealed class AttackStatisticsPage : TabPage
 
 	private static readonly int[] LimitChoices = { 100, 250, 500, 1000, 2000 };
 
-	private static readonly Color RowColorGreen = Color.FromArgb(220, 245, 220);
-	private static readonly Color RowColorYellow = Color.FromArgb(255, 248, 200);
-	private static readonly Color RowColorRed = Color.FromArgb(255, 220, 220);
+	private static readonly Color RowColorGreen = RowSuccessBack;
+	private static readonly Color RowColorYellow = RowWarningBack;
+	private static readonly Color RowColorRed = RowDangerBack;
 
 	private readonly IpcClient _ipc;
 	private readonly DataGridView _grid;

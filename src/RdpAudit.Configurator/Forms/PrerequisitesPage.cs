@@ -8,6 +8,8 @@
 using System.Runtime.Versioning;
 using RdpAudit.Configurator.Services;
 
+using static RdpAudit.Configurator.Theming.DarkTheme;
+
 namespace RdpAudit.Configurator.Forms;
 
 /// <summary>Lists prerequisite probes with pass/fail status, refresh, and per-row Fix buttons.</summary>
@@ -70,7 +72,8 @@ public sealed class PrerequisitesPage : TabPage
 				row.SubItems.Add(result.IsOk ? "OK" : "Fail");
 				row.SubItems.Add(result.Fix is null ? "-" : "Fix");
 				row.SubItems.Add(result.Detail);
-				row.BackColor = result.IsOk ? Color.FromArgb(220, 245, 220) : Color.FromArgb(255, 220, 220);
+				row.BackColor = result.IsOk ? RowSuccessBack : RowDangerBack;
+				row.ForeColor = TextPrimary;
 				_list.Items.Add(row);
 			}
 

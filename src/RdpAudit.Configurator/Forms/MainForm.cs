@@ -1,15 +1,21 @@
 // File:    src/RdpAudit.Configurator/Forms/MainForm.cs
 // Module:  RdpAudit.Configurator.Forms
-// Purpose: Top-level WinForms shell with tab navigation across the 5 configuration pages.
+// Purpose: Top-level WinForms shell with tab navigation across all configuration pages.
 //          Async event handlers use ConfigureAwait(true) so continuations stay on the UI thread.
+//
+//          v2.0.0 — dark UI redesign. The shell, the owner-drawn tab strip and the status bar are
+//          restyled with the shared DarkTheme palette, and every page has DarkTheme.Apply invoked on
+//          it after construction so the whole Configurator matches the MikroTik tab's styling.
 // Extends: System.Windows.Forms.Form
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 2.0.0
 
 using System.Globalization;
 using System.Reflection;
 using System.Runtime.Versioning;
 using RdpAudit.Configurator.Ipc;
+using RdpAudit.Configurator.Theming;
 using RdpAudit.Core.Ipc;
 
 namespace RdpAudit.Configurator.Forms;
@@ -30,6 +36,8 @@ public sealed class MainForm : Form
 		Width = 1200;
 		Height = 820;
 		StartPosition = FormStartPosition.CenterScreen;
+		BackColor = DarkTheme.PageBack;
+		ForeColor = DarkTheme.TextPrimary;
 
 		// Owner-drawn tabs: each page label is prefixed with a glyph for fast visual scanning, and the
 		// selected tab is rendered bold on a highlighted background with an accent bar so the active page
@@ -52,8 +60,12 @@ public sealed class MainForm : Form
 		// built from a single explicit list (see BuildOrderedPages) so it cannot drift accidentally and is
 		// covered by a unit test. The tab strip may *wrap* onto multiple rows when narrow (Multiline=true)
 		// but the page sequence never changes.
+		_tabs.BackColor = DarkTheme.PageBack;
+		_tabs.ForeColor = DarkTheme.TextPrimary;
 		foreach (TabPage page in BuildOrderedPages())
 		{
+			// Theme each page's full control tree once, after it is fully constructed.
+			DarkTheme.Apply(page);
 			_tabs.TabPages.Add(page);
 		}
 
@@ -61,8 +73,12 @@ public sealed class MainForm : Form
 
 		Controls.Add(_tabs);
 
-		_statusStrip = new StatusStrip();
-		_statusLabel = new ToolStripStatusLabel("Initializing...");
+		_statusStrip = new StatusStrip
+		{
+			BackColor = DarkTheme.StatusBack,
+			ForeColor = DarkTheme.StatusFore,
+		};
+		_statusLabel = new ToolStripStatusLabel("Initializing...") { ForeColor = DarkTheme.StatusFore };
 		_statusStrip.Items.Add(_statusLabel);
 		Controls.Add(_statusStrip);
 
@@ -135,8 +151,10 @@ public sealed class MainForm : Form
 		bool selected = e.Index == _tabs.SelectedIndex;
 		Rectangle bounds = e.Bounds;
 
-		Color back = selected ? SystemColors.Highlight : SystemColors.Control;
-		Color fore = selected ? SystemColors.HighlightText : SystemColors.ControlText;
+		// v2.0.0 — dark tab strip: unselected tabs sit on the page background, the selected tab is
+		// raised onto a lighter surface with a bright accent bar so the active page is obvious.
+		Color back = selected ? DarkTheme.TabSelectedBack : DarkTheme.TabBack;
+		Color fore = selected ? DarkTheme.AccentHeader : DarkTheme.TextPrimary;
 
 		using (SolidBrush backBrush = new(back))
 		{
@@ -144,10 +162,10 @@ public sealed class MainForm : Form
 		}
 
 		// A thick accent bar along the top edge of the selected tab gives the active page a strong,
-		// glanceable cue that survives high-contrast themes where Highlight/Control differ only subtly.
+		// glanceable cue on the dark surface.
 		if (selected)
 		{
-			using SolidBrush accentBrush = new(SystemColors.HotTrack);
+			using SolidBrush accentBrush = new(DarkTheme.TabAccent);
 			e.Graphics.FillRectangle(accentBrush, bounds.Left, bounds.Top, bounds.Width, 4);
 		}
 
@@ -159,11 +177,6 @@ public sealed class MainForm : Form
 			bounds,
 			fore,
 			TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-
-		if (selected)
-		{
-			e.DrawFocusRectangle();
-		}
 	}
 
 	private async Task RefreshServiceStatusAsync()
@@ -184,19 +197,19 @@ public sealed class MainForm : Form
 				// freshly built Configurator against a stale installed service that was never re-published.
 				string mismatch = DescribeVersionMismatch(status.Version);
 				_statusLabel.Text = mismatch.Length == 0 ? baseLine : baseLine + "  ⚠ " + mismatch;
-				_statusLabel.ForeColor = mismatch.Length == 0 ? SystemColors.ControlText : Color.Firebrick;
+				_statusLabel.ForeColor = mismatch.Length == 0 ? DarkTheme.StatusFore : DarkTheme.StatusDanger;
 			}
 			else
 			{
 				// Distinguish a stopped service from a busy one rather than the blanket "not reachable".
 				_statusLabel.Text = "Service: " + call.Headline();
-				_statusLabel.ForeColor = call.ServiceLikelyReachable ? SystemColors.ControlText : Color.Firebrick;
+				_statusLabel.ForeColor = call.ServiceLikelyReachable ? DarkTheme.StatusFore : DarkTheme.StatusDanger;
 			}
 		}
 		catch (Exception ex)
 		{
 			_statusLabel.Text = $"Service: error — {ex.GetType().Name}";
-			_statusLabel.ForeColor = Color.Firebrick;
+			_statusLabel.ForeColor = DarkTheme.StatusDanger;
 		}
 	}
 

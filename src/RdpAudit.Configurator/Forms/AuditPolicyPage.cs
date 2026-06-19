@@ -12,6 +12,8 @@ using System.Runtime.Versioning;
 using System.Text;
 using RdpAudit.Core.Events;
 
+using static RdpAudit.Configurator.Theming.DarkTheme;
+
 namespace RdpAudit.Configurator.Forms;
 
 /// <summary>Displays the canonical audit policy rows and applies them via AuditPolicyManager.</summary>
@@ -214,11 +216,11 @@ public sealed class AuditPolicyPage : TabPage
 						state.Success ? "Y" : "N", state.Failure ? "Y" : "N"));
 				if (state is not null && state.Success == row.Success && state.Failure == row.Failure)
 				{
-					item.BackColor = Color.FromArgb(220, 245, 220);
+					item.BackColor = RowSuccessBack;
 				}
 				else
 				{
-					item.BackColor = Color.FromArgb(255, 240, 200);
+					item.BackColor = RowWarningBack;
 				}
 
 				_list.Items.Add(item);

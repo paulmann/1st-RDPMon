@@ -24,6 +24,8 @@ using RdpAudit.Core.Ipc;
 using RdpAudit.Core.Ipc.Contracts;
 using RdpAudit.Core.Util;
 
+using static RdpAudit.Configurator.Theming.DarkTheme;
+
 namespace RdpAudit.Configurator.Forms;
 
 /// <summary>Stage 5 Firewall tab: provider status, auto-block policy, lists, active blocks.</summary>
@@ -796,7 +798,7 @@ public sealed class FirewallPage : TabPage
 		{
 			case FirewallEnforcementHealth.Healthy:
 				_enforcementHealthLabel.Text = "Enforcement: HEALTHY" + detail;
-				_enforcementHealthLabel.ForeColor = Color.DarkGreen;
+				_enforcementHealthLabel.ForeColor = StatusSuccess;
 				break;
 			case FirewallEnforcementHealth.Idle:
 				_enforcementHealthLabel.Text = "Enforcement: idle — no enabled blocklist rows" + detail;
@@ -807,14 +809,14 @@ public sealed class FirewallPage : TabPage
 					"Enforcement: MISSING RULE — blocks intended but no firewall rule was verified. "
 					+ "Open the Active blocks tab and use 'Repair selected', then 'Verify all'."
 					+ detail;
-				_enforcementHealthLabel.ForeColor = Color.DarkRed;
+				_enforcementHealthLabel.ForeColor = StatusDanger;
 				break;
 			case FirewallEnforcementHealth.Failed:
 				_enforcementHealthLabel.Text =
 					"Enforcement: INCOMPLETE — some blocks unenforced. "
 					+ "Open the Active blocks tab and use 'Repair selected' on the gaps, then 'Verify all'."
 					+ detail;
-				_enforcementHealthLabel.ForeColor = Color.DarkRed;
+				_enforcementHealthLabel.ForeColor = StatusDanger;
 				break;
 			default:
 				_enforcementHealthLabel.Text = "Enforcement: unknown (could not verify)" + detail;
