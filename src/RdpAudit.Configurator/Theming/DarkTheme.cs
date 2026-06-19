@@ -269,12 +269,11 @@ public static class DarkTheme
 				form.ForeColor = TextPrimary;
 				break;
 
+			// Panel covers FlowLayoutPanel, TableLayoutPanel and SplitterPanel (all derive from Panel),
+			// so listing those separately would be unreachable (CS8120).
 			case TabPage:
 			case Panel:
-			case FlowLayoutPanel:
-			case TableLayoutPanel:
 			case SplitContainer:
-			case SplitterPanel:
 				ThemeContainerSurface(c);
 				break;
 
