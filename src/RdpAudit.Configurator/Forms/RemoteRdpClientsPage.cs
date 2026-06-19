@@ -19,7 +19,7 @@
 //          the _menu construction block and gate it in OnMenuOpening.
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
-// Version: 2.1.0
+// Version: 2.1.1
 
 using System.ComponentModel;
 using System.Drawing;
@@ -289,6 +289,8 @@ public sealed class RemoteRdpClientsPage : TabPage
 		ApplyDarkGridStyle(_shadowGrid);
 		ConfigureShadowGrid(_shadowGrid);
 		_shadowGrid.DataSource = _shadowBinding;
+		// Right-click clipboard menu (Copy Cell / Copy Row / Copy All) for the Registry Keys grid.
+		DataGridClipboardMenu.Attach(_shadowGrid);
 
 		_enableAllButton = NewButton("Enable all permissions…", DangerButton, DangerHover);
 		_enableAllButton.Click += async (_, _) => await OnEnableAllAsync().ConfigureAwait(true);
@@ -634,7 +636,9 @@ public sealed class RemoteRdpClientsPage : TabPage
 		{
 			HeaderText = "Registry key",
 			DataPropertyName = nameof(ShadowValueRow.KeyPath),
-			AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+			// Size to the widest content (header + cells) so the key column is exactly as wide
+			// as its longest value and never stretches across the whole row.
+			AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells,
 		});
 		grid.Columns.Add(new DataGridViewTextBoxColumn
 		{
@@ -658,7 +662,9 @@ public sealed class RemoteRdpClientsPage : TabPage
 		{
 			HeaderText = "Description",
 			DataPropertyName = nameof(ShadowValueRow.Description),
-			Width = 240,
+			// Last column absorbs all remaining horizontal space in the window.
+			AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+			MinimumWidth = 240,
 		});
 	}
 

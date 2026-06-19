@@ -1,16 +1,17 @@
 // File:    src/RdpAudit.Configurator/Services/LicenseStore.cs
 // Module:  RdpAudit.Configurator.Services
-// Purpose: Local persistence and (stub) activation of the product license key. The current build
-//          accepts ANY non-empty key offline and stores it under HKCU so it survives restarts; the
-//          production activation path (an HTTP POST to the activation endpoint expecting "1"/"0") is
-//          provided as a ready-to-enable, fully documented method.
-// Depends: Microsoft.Win32.Registry (HKCU persistence), System.Net.Http (production activation path)
-// Extends: To switch from the offline stub to server-side activation, call ActivateOnlineAsync from
-//          OverviewPage.LicensePanel instead of ActivateOffline, and remove the stub. To relocate the
-//          stored key (e.g. to a file under %ProgramData%), change RegistrySubKey / Load / Save only.
+// Purpose: Local persistence and server-side activation of the product license key. Activation POSTs
+//          key=[key] to the activation endpoint and treats a plain "1" body as success and "0" as an
+//          invalid key; any other body, an empty body, an HTTP error or a network failure is reported
+//          distinctly so the UI can tell the user what happened. A successful key is stored under HKCU
+//          so it survives restarts. The legacy offline stub remains for reference / offline testing.
+// Depends: Microsoft.Win32.Registry (HKCU persistence), System.Net.Http (server activation)
+// Extends: To change the activation protocol, edit ActivateOnlineAsync and the ActivationResult enum.
+//          To relocate the stored key (e.g. to a file under %ProgramData%), change RegistrySubKey /
+//          Load / Save only. To change the endpoint, edit ActivationEndpoint.
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
-// Version: 1.4.2
+// Version: 1.4.4
 
 using System.Runtime.Versioning;
 using Microsoft.Win32;
@@ -73,11 +74,10 @@ public sealed class LicenseStore
 		}
 	}
 
-	// ── Core Logic ───────────────────────────────────────────────────────────────
+	// ── Offline Stub (reference / offline testing) ──────────────────────────────────
 
-	/// <summary>STUB activation for the current build: accepts any non-empty key and persists it.
-	/// Always succeeds for a non-empty key. Replace the call site with <see cref="ActivateOnlineAsync"/>
-	/// to enforce server-side activation.</summary>
+	/// <summary>Legacy offline stub: accepts any non-empty key and persists it without contacting the
+	/// server. Retained for offline testing only; the live UI uses <see cref="ActivateOnlineAsync"/>.</summary>
 	public bool ActivateOffline(string licenseKey)
 	{
 		if (string.IsNullOrWhiteSpace(licenseKey))
@@ -89,40 +89,73 @@ public sealed class LicenseStore
 		return true;
 	}
 
-	// ── Production Activation (ready to enable) ──────────────────────────────────
+	// ── Server Activation ─────────────────────────────────────────────────────────
 
-	/// <summary>PRODUCTION activation path (currently unused while the offline stub is active). Sends a
-	/// form-encoded POST of <c>key=[key]</c> to the activation endpoint and treats a response body of
-	/// "1" as success and "0" (or anything else) as failure. On success the key is persisted locally so
-	/// subsequent launches start activated. Honors the supplied <paramref name="ct"/>.</summary>
-	public async Task<bool> ActivateOnlineAsync(string licenseKey, CancellationToken ct = default)
+	/// <summary>Server-side activation. Sends a form-encoded POST of <c>key=[key]</c> to the activation
+	/// endpoint and classifies the outcome: a "1" body is <see cref="ActivationResult.Activated"/> (and
+	/// the key is persisted locally), a "0" body is <see cref="ActivationResult.InvalidKey"/>, an empty
+	/// or unrecognised body is <see cref="ActivationResult.EmptyResponse"/>, and any HTTP / network
+	/// failure (including timeout and cancellation) is <see cref="ActivationResult.NetworkError"/>.
+	/// Honors the supplied <paramref name="ct"/>.</summary>
+	public async Task<ActivationResult> ActivateOnlineAsync(string licenseKey, CancellationToken ct = default)
 	{
 		if (string.IsNullOrWhiteSpace(licenseKey))
 		{
-			return false;
+			return ActivationResult.InvalidKey;
 		}
 
-		using HttpClient http = new()
+		try
 		{
-			Timeout = TimeSpan.FromSeconds(15),
-		};
+			using HttpClient http = new()
+			{
+				Timeout = TimeSpan.FromSeconds(15),
+			};
 
-		using FormUrlEncodedContent content = new(new[]
-		{
-			new KeyValuePair<string, string>("key", licenseKey.Trim()),
-		});
+			using FormUrlEncodedContent content = new(new[]
+			{
+				new KeyValuePair<string, string>("key", licenseKey.Trim()),
+			});
 
-		using HttpResponseMessage response =
-			await http.PostAsync(new Uri(ActivationEndpoint), content, ct).ConfigureAwait(false);
-		response.EnsureSuccessStatusCode();
+			using HttpResponseMessage response =
+				await http.PostAsync(new Uri(ActivationEndpoint), content, ct).ConfigureAwait(false);
+			response.EnsureSuccessStatusCode();
 
-		string body = (await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false)).Trim();
-		bool activated = string.Equals(body, "1", StringComparison.Ordinal);
-		if (activated)
-		{
-			Save(licenseKey);
+			string body = (await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false)).Trim();
+
+			if (string.Equals(body, "1", StringComparison.Ordinal))
+			{
+				Save(licenseKey);
+				return ActivationResult.Activated;
+			}
+
+			if (string.Equals(body, "0", StringComparison.Ordinal))
+			{
+				return ActivationResult.InvalidKey;
+			}
+
+			// Reachable server but unexpected / empty payload ─ cannot trust either verdict.
+			return ActivationResult.EmptyResponse;
 		}
-
-		return activated;
+		catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or OperationCanceledException or InvalidOperationException or UriFormatException)
+		{
+			_ = ex;
+			return ActivationResult.NetworkError;
+		}
 	}
+}
+
+/// <summary>Outcome of a server-side activation attempt.</summary>
+public enum ActivationResult
+{
+	/// <summary>Server returned "1": the key is valid and has been persisted.</summary>
+	Activated,
+
+	/// <summary>Server returned "0": the key was rejected as invalid.</summary>
+	InvalidKey,
+
+	/// <summary>Server was reached but returned nothing usable (empty or unrecognised body).</summary>
+	EmptyResponse,
+
+	/// <summary>The activation server could not be reached (timeout, DNS / TLS / HTTP error, cancellation).</summary>
+	NetworkError,
 }
