@@ -21,7 +21,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Logging;
-using RdpAudit.Core.Mikrotik;
+using RdpAudit.Core.MikroTik;
 using RdpAudit.Mikrotik.Helpers;
 using RdpAudit.Mikrotik.Pki;
 

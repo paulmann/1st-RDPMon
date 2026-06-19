@@ -6,7 +6,7 @@
  *          persisted MikrotikConfig. Each step reads what earlier steps produced and writes its own
  *          output here, so panels stay decoupled and the host form only wires events.
  * Depends: ConnectionEndpoint, ConnectionProbeSummary, MikrotikSystemInfo, BootstrapResult,
- *          RdpAudit.Core.Mikrotik.MikrotikConfig
+ *          RdpAudit.Core.MikroTik.MikrotikConfig
  * Extends: When a step produces a new artifact later steps consume, add a property here rather than
  *          passing it through constructors; keep all cross-step state in this single object.
  *
@@ -14,7 +14,7 @@
  * Version: 1.0.0
  */
 
-using RdpAudit.Core.Mikrotik;
+using RdpAudit.Core.MikroTik;
 using RdpAudit.Mikrotik.Core;
 
 namespace RdpAudit.Mikrotik.Ui;

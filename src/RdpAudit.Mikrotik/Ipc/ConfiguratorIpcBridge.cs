@@ -9,7 +9,7 @@
  *          JsonOptions.Default — but depends only on RdpAudit.Core so the module stays independent of
  *          the Configurator assembly.
  * Depends: System.IO.Pipes.NamedPipeClientStream, MessagePack, RdpAudit.Core.Ipc.*,
- *          RdpAudit.Core.Mikrotik.*, RdpAudit.Core.Util.JsonOptions
+ *          RdpAudit.Core.MikroTik.*, RdpAudit.Core.Util.JsonOptions
  * Extends: To call a new Service command, add a typed method that serializes the request payload and
  *          deserializes the reply; reuse ExchangeAsync for the framing so the wire stays canonical.
  *
@@ -21,7 +21,7 @@ using System.IO.Pipes;
 using System.Text.Json;
 using MessagePack;
 using RdpAudit.Core.Ipc;
-using RdpAudit.Core.Mikrotik;
+using RdpAudit.Core.MikroTik;
 using RdpAudit.Core.Util;
 
 namespace RdpAudit.Mikrotik.Ipc;

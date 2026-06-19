@@ -17,7 +17,7 @@
 
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.Extensions.Logging;
-using RdpAudit.Core.Mikrotik;
+using RdpAudit.Core.MikroTik;
 using RdpAudit.Mikrotik.Core;
 using RdpAudit.Mikrotik.Helpers;
 using RdpAudit.Mikrotik.Ipc;

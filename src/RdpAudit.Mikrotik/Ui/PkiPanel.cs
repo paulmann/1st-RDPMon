@@ -14,7 +14,7 @@
  */
 
 using System.Security.Cryptography.X509Certificates;
-using RdpAudit.Core.Mikrotik;
+using RdpAudit.Core.MikroTik;
 using RdpAudit.Mikrotik.Pki;
 
 namespace RdpAudit.Mikrotik.Ui;

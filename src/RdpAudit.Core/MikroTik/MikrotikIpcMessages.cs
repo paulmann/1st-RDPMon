@@ -1,6 +1,6 @@
 /*
  * File   : MikrotikIpcMessages.cs
- * Project: RdpAudit.Core (RdpAudit.Core.Mikrotik)
+ * Project: RdpAudit.Core (RdpAudit.Core.MikroTik)
  * Purpose: JSON-serialized IPC payload contracts exchanged between the RdpAudit.Mikrotik wizard and
  *          the Service for the api-ssl/mTLS channel: the bootstrap push (PushMikroTikConfig = 61) and
  *          the mTLS status query reply (GetMikroTikMtlsStatus = 62). These payloads are serialized to
@@ -13,10 +13,10 @@
  *          (MikroTikStatusDto / MikroTikTestResult) to avoid collisions.
  *
  * Author : Mikhail Deynekin — https://Deynekin.com
- * Version: 1.0.0
+ * Version: 1.0.1
  */
 
-namespace RdpAudit.Core.Mikrotik;
+namespace RdpAudit.Core.MikroTik;
 
 /// <summary>
 /// Payload for <c>IpcCommand.PushMikroTikConfig</c>: the completed api-ssl/mTLS bootstrap result the
