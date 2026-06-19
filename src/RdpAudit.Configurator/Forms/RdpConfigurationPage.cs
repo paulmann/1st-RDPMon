@@ -48,13 +48,11 @@ public sealed class RdpConfigurationPage : TabPage
 {
 	// ── Dark palette (mirrors MikroTikPage benchmark) ────────────────────────────
 	private static readonly Color PageBack = Color.FromArgb(30, 30, 30);
-	private static readonly Color PanelBack = Color.FromArgb(40, 40, 40);
 	private static readonly Color CardBack = Color.FromArgb(45, 45, 45);
 	private static readonly Color CardBorder = Color.FromArgb(70, 70, 70);
 	private static readonly Color TextPrimary = Color.FromArgb(220, 220, 220);
 	private static readonly Color TextSecondary = Color.FromArgb(150, 150, 150);
 	private static readonly Color InputBack = Color.FromArgb(55, 55, 55);
-	private static readonly Color InputBorder = Color.FromArgb(80, 80, 80);
 	private static readonly Color AccentHeader = Color.FromArgb(180, 200, 255);
 	private static readonly Color ButtonNormal = Color.FromArgb(60, 100, 180);
 	private static readonly Color ButtonHover = Color.FromArgb(80, 120, 200);
@@ -341,7 +339,7 @@ public sealed class RdpConfigurationPage : TabPage
 		return WrapCard("Session Shadowing", body);
 	}
 
-	private Panel BuildButtonsRow()
+	private FlowLayoutPanel BuildButtonsRow()
 	{
 		FlowLayoutPanel buttons = new()
 		{
