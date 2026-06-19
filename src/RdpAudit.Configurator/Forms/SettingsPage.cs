@@ -10,7 +10,7 @@
 //          array editing), extend LeafRef / BeginInlineEdit / CommitInlineEdit and ParseScalar below.
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
-// Version: 1.4.2
+// Version: 1.4.3
 
 using System.Globalization;
 using System.Runtime.Versioning;
@@ -439,7 +439,7 @@ public sealed class SettingsPage : TabPage
 				return;
 			}
 
-			JsonNode parsed = ParseScalar(typed, currentValue);
+			JsonValue parsed = ParseScalar(typed, currentValue);
 			categoryObj[leaf.Key] = parsed;
 
 			JsonObject wrapped = new()
@@ -460,7 +460,7 @@ public sealed class SettingsPage : TabPage
 	/// <summary>Parses inline-editor text into a JSON scalar, preferring the kind of the original value:
 	/// a boolean stays boolean, an integer stays integral, a number stays numeric; anything else (or a
 	/// failed numeric parse for a previously numeric field) falls back to a JSON string.</summary>
-	private static JsonNode ParseScalar(string text, JsonValue original)
+	private static JsonValue ParseScalar(string text, JsonValue original)
 	{
 		string trimmed = text.Trim();
 
@@ -469,7 +469,7 @@ public sealed class SettingsPage : TabPage
 		{
 			if (bool.TryParse(trimmed, out bool b))
 			{
-				return JsonValue.Create(b);
+				return JsonValue.Create(b)!;
 			}
 		}
 
@@ -483,12 +483,12 @@ public sealed class SettingsPage : TabPage
 		{
 			if (long.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out long l))
 			{
-				return JsonValue.Create(l);
+				return JsonValue.Create(l)!;
 			}
 
 			if (double.TryParse(trimmed, NumberStyles.Float, CultureInfo.InvariantCulture, out double d))
 			{
-				return JsonValue.Create(d);
+				return JsonValue.Create(d)!;
 			}
 		}
 

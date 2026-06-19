@@ -18,11 +18,11 @@ using Xunit;
 
 namespace RdpAudit.Service.Tests;
 
-/// <summary>Pins the Service runtime version at exactly 1.4.2, blocking both the prior 1.0.0
+/// <summary>Pins the Service runtime version at exactly 1.4.3, blocking both the prior 1.0.0
 /// placeholder default and the previous 1.2.x release stream from regressing.</summary>
 public class RuntimeVersionResolverPinTests
 {
-	private const string ExpectedSemVer = "1.4.2";
+	private const string ExpectedSemVer = "1.4.3";
 	private const string ForbiddenLegacy = "1.0.0";
 	private const string ForbiddenPrev = "1.2.";
 
