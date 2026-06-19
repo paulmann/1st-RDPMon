@@ -211,4 +211,19 @@ public enum IpcCommand
 	/// the post-rebuild AttackStats total. Used by the RDP Activity tab's DEBUG "Rebuild RDP Activity
 	/// statistics" action to recover from a stale projection without restarting the service.</summary>
 	RebuildAttackStats = 60,
+
+	// --- v1.4.0 RdpAudit.Mikrotik module additions (append-only). ---
+
+	/// <summary>Pushes a completed MikroTik api-ssl/mTLS bootstrap result from the RdpAudit.Mikrotik
+	/// setup wizard into the running Service so the Service can adopt the mutual-TLS production channel
+	/// (router IP, api-ssl port, DPAPI-wrapped service credentials, CA / client certificate thumbprints,
+	/// address-list name and default ban timeout). The payload never carries plaintext secrets; the
+	/// password travels as a DPAPI envelope and the certificates are referenced by thumbprint only.</summary>
+	PushMikroTikConfig = 61,
+
+	/// <summary>Returns the Service's current view of the MikroTik mutual-TLS channel health (configured
+	/// router IP, api-ssl port, whether the firewall contour rules are installed, CA / client certificate
+	/// thumbprints and a last-probe result). Polled by the RdpAudit.Mikrotik wizard's Apply &amp; Sync step
+	/// to confirm the Service adopted the bootstrap. Never returns plaintext credentials.</summary>
+	GetMikroTikMtlsStatus = 62,
 }
