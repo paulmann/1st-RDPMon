@@ -8,6 +8,7 @@
 // Extends: RdpAudit.Core.Firewall.IFirewallProvider
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.4.1
 
 using System.Globalization;
 using System.Net;
@@ -211,7 +212,13 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 
 		// Idempotency: best-effort delete first so we do not stack multiple identical rules in
 		// the firewall store. Errors here are non-fatal — the add below is the real success.
-		await _runner.RunAsync(NetshCommandBuilder.BuildDeleteRuleArgs(ruleName), ct).ConfigureAwait(false);
+		IReadOnlyList<string> deleteArgs = NetshCommandBuilder.BuildDeleteRuleArgs(ruleName);
+		// v1.4.1: DEBUG trace of the exact netsh invocation so an operator running with LogLevel=Debug
+		// can see precisely which command the provider executed when a block does not appear to take.
+		_logger.LogDebug("Firewall block: pre-delete netsh {Args} (rule={RuleName}, ip={Ip})",
+			string.Join(' ', deleteArgs), ruleName, canonicalIp);
+		NetshResult deleteResult = await _runner.RunAsync(deleteArgs, ct).ConfigureAwait(false);
+		_logger.LogDebug("Firewall block: pre-delete netsh exit={Exit} (rule={RuleName})", deleteResult.ExitCode, ruleName);
 
 		// Create the rule. Prefer the PowerShell New-NetFirewallRule path when a PowerShell runner is
 		// available, because only it can stamp -Group RdpAudit (netsh's add rule rejects group=). When
@@ -228,9 +235,13 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 		}
 		else
 		{
+			_logger.LogDebug("Firewall block: add netsh {Args} (rule={RuleName}, ip={Ip})",
+				string.Join(' ', addArgs), ruleName, canonicalIp);
 			NetshResult addResult = await _runner.RunAsync(addArgs, ct).ConfigureAwait(false);
 			addAttempt = BuildAttempt(addResult, addArgs);
 			createdOk = addResult.Success;
+			_logger.LogDebug("Firewall block: add netsh exit={Exit} success={Success} (rule={RuleName})",
+				addResult.ExitCode, createdOk, ruleName);
 
 			if (!createdOk)
 			{
@@ -523,9 +534,11 @@ public sealed class WindowsFirewallProvider : IFirewallProvider
 		string canonicalIp = address.ToString();
 		string fullRuleName = NetshCommandBuilder.BuildRuleName(ruleName, canonicalIp);
 
-		NetshResult delResult = await _runner.RunAsync(
-			NetshCommandBuilder.BuildDeleteRuleArgs(fullRuleName),
-			ct).ConfigureAwait(false);
+		IReadOnlyList<string> unblockArgs = NetshCommandBuilder.BuildDeleteRuleArgs(fullRuleName);
+		// v1.4.1: DEBUG trace of the exact unblock netsh invocation for LogLevel=Debug diagnostics.
+		_logger.LogDebug("Firewall unblock: netsh {Args} (rule={RuleName}, ip={Ip})",
+			string.Join(' ', unblockArgs), fullRuleName, canonicalIp);
+		NetshResult delResult = await _runner.RunAsync(unblockArgs, ct).ConfigureAwait(false);
 
 		if (!delResult.Success)
 		{

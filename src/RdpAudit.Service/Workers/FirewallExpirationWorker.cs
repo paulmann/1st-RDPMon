@@ -7,6 +7,7 @@
 // Extends: Microsoft.Extensions.Hosting.BackgroundService
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.4.1
 
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
@@ -96,6 +97,17 @@ public sealed class FirewallExpirationWorker : BackgroundService
 			.Take(100)
 			.ToListAsync(ct).ConfigureAwait(false);
 
+		// v1.4.1: DEBUG trace of the per-tick due set so an operator can see how many blocks the
+		// expiration sweep picked up and which IPs are about to be removed when LogLevel=Debug.
+		if (_logger.IsEnabled(LogLevel.Debug))
+		{
+			_logger.LogDebug(
+				"Expiration tick at {NowUtc:o}: {DueCount} due block(s) [{Ips}]",
+				nowUtc,
+				due.Count,
+				string.Join(", ", due.Select(b => b.Ip)));
+		}
+
 		foreach (ActiveBlock block in due)
 		{
 			ct.ThrowIfCancellationRequested();
@@ -115,6 +127,7 @@ public sealed class FirewallExpirationWorker : BackgroundService
 
 		if (nextDue is null)
 		{
+			_logger.LogDebug("Expiration sweep idle: no future-dated active blocks; sleeping {Seconds}s", FallbackDelay.TotalSeconds);
 			return FallbackDelay;
 		}
 
@@ -127,6 +140,8 @@ public sealed class FirewallExpirationWorker : BackgroundService
 		{
 			delay = FallbackDelay;
 		}
+
+		_logger.LogDebug("Next expiration due at {NextDue:o}; sleeping {Seconds:0.###}s", nextDue.Value, delay.TotalSeconds);
 		return delay;
 	}
 
@@ -135,6 +150,16 @@ public sealed class FirewallExpirationWorker : BackgroundService
 		string ruleName = string.IsNullOrWhiteSpace(_options.CurrentValue.Firewall.BlockRuleName)
 			? "RdpAudit-Block"
 			: _options.CurrentValue.Firewall.BlockRuleName;
+
+		// v1.4.1: DEBUG trace of the expiry attempt - provider kind, backend, rule name, and
+		// expiry timestamp - so a stuck or no-op removal can be diagnosed from the log alone.
+		_logger.LogDebug(
+			"Expiring block for {Ip}: provider={Provider} backend={Backend} rule={RuleName} expiresUtc={ExpiresUtc:o}",
+			block.Ip,
+			block.Provider,
+			_options.CurrentValue.Firewall.EnforcementBackend,
+			ruleName,
+			block.ExpiresUtc);
 
 		if (block.Provider == FirewallProviderKind.None || block.Status == ActiveBlockStatus.AuditOnly)
 		{

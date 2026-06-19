@@ -10,6 +10,7 @@
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.4.1
 
 using System.Diagnostics;
 using System.IO.Pipes;
@@ -116,7 +117,9 @@ public sealed class IpcClient
 			}
 
 			T? value = JsonSerializer.Deserialize<T>(response.Payload, JsonOptions.Default);
-			return new IpcCallResult<T>(command, IpcCallOutcome.Success, value, null, null, startUtc, sw.ElapsedMilliseconds, timeoutMs, connected, true);
+			IpcCallResult<T> ok = new(command, IpcCallOutcome.Success, value, null, null, startUtc, sw.ElapsedMilliseconds, timeoutMs, connected, true);
+			TraceRoundTrip(ok);
+			return ok;
 		}
 		catch (OperationCanceledException)
 		{
@@ -175,7 +178,19 @@ public sealed class IpcClient
 	private static IpcCallResult<T> Fail<T>(
 		IpcCommand command, IpcCallOutcome outcome, string message, string errorType, DateTime startUtc,
 		Stopwatch sw, int timeoutMs, bool connected, bool responseReceived)
-		=> new(command, outcome, default, message, errorType, startUtc, sw.ElapsedMilliseconds, timeoutMs, connected, responseReceived);
+	{
+		IpcCallResult<T> result = new(command, outcome, default, message, errorType, startUtc, sw.ElapsedMilliseconds, timeoutMs, connected, responseReceived);
+		TraceRoundTrip(result);
+		return result;
+	}
+
+	// v1.4.1: Emit a per-command round-trip trace to the debugger output for an attached-debugger
+	// session (see SKILL "Debug Conventions"). This is in addition to the server-side OperationLog
+	// DEBUG entries written by IpcDispatcher when Diagnostics.DebugMode is enabled; the client side
+	// has no access to that runtime flag, so [Conditional("DEBUG")] keeps this free in Release builds.
+	[Conditional("DEBUG")]
+	private static void TraceRoundTrip<T>(IpcCallResult<T> result)
+		=> Debug.WriteLine("[IpcClient] " + result.TraceLine);
 
 	public async Task<bool> PingAsync(CancellationToken ct = default)
 	{

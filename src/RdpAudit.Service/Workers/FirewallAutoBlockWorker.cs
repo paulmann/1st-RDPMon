@@ -11,7 +11,7 @@
 // Extends: Microsoft.Extensions.Hosting.BackgroundService
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
-// Version: 1.4.0
+// Version: 1.4.1
 
 using System.Collections.Concurrent;
 using System.Globalization;
@@ -221,6 +221,17 @@ public sealed class FirewallAutoBlockWorker : BackgroundService
 	{
 		string ip = decision.NormalizedIp!;
 		FirewallProviderKind providerKind = cfg.Provider;
+
+		// v1.4.1: DEBUG trace of the resolved decision so an operator running with LogLevel=Debug can see
+		// exactly which rule fired, the resolved action / reason tag, the target provider kind and backend.
+		_logger.LogDebug(
+			"Auto-block applying for {Ip}: action={Action} reasonTag={ReasonTag} alert={AlertId} providerKind={ProviderKind} backend={Backend}",
+			ip,
+			decision.Action,
+			decision.ReasonTag,
+			alert.Id,
+			providerKind,
+			cfg.EnforcementBackend);
 
 		// Active block guard: if any provider already has an active block we keep it and skip.
 		bool alreadyActive = await db.ActiveBlocks
