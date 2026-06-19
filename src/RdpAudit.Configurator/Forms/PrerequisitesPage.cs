@@ -2,8 +2,11 @@
 // Module:  RdpAudit.Configurator.Forms
 // Purpose: Lists prerequisite probes with pass/fail status, refresh, and per-row Fix buttons.
 // Extends: System.Windows.Forms.TabPage
+//          v1.1.0 — the Detail column now stretches to fill the remaining list width so GridLines no
+//          longer paint an empty trailing area that looked like a spurious 5th column.
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.1.0
 
 using System.Runtime.Versioning;
 using RdpAudit.Configurator.Services;
@@ -37,6 +40,10 @@ public sealed class PrerequisitesPage : TabPage
 		_list.Columns.Add("Status", 80);
 		_list.Columns.Add("Fix", 60);
 		_list.Columns.Add("Detail", 600);
+		// Stretch the last (Detail) column to consume any leftover client width. Without this the
+		// fixed 600px column leaves an empty gap on the right which, with GridLines enabled, reads as a
+		// spurious extra (5th) column.
+		_list.Resize += (_, _) => StretchDetailColumn();
 		_list.MouseDoubleClick += async (_, _) => await ApplyFixForSelectedAsync().ConfigureAwait(true);
 
 		FlowLayoutPanel buttons = new() { Dock = DockStyle.Top, Height = 36, FlowDirection = FlowDirection.LeftToRight };
@@ -55,6 +62,26 @@ public sealed class PrerequisitesPage : TabPage
 		Controls.Add(buttons);
 
 		HandleCreated += async (_, _) => await ReloadAsync().ConfigureAwait(true);
+	}
+
+	/// <summary>Resizes the last (Detail) column so the four columns together exactly fill the list's
+	/// client width, leaving no empty trailing area that GridLines would render as a phantom column.</summary>
+	private void StretchDetailColumn()
+	{
+		if (_list.Columns.Count == 0)
+		{
+			return;
+		}
+
+		int used = 0;
+		for (int i = 0; i < _list.Columns.Count - 1; i++)
+		{
+			used += _list.Columns[i].Width;
+		}
+
+		int remaining = _list.ClientSize.Width - used;
+		ColumnHeader last = _list.Columns[_list.Columns.Count - 1];
+		last.Width = remaining > 120 ? remaining : 120;
 	}
 
 	private async Task ReloadAsync()
