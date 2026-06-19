@@ -9,6 +9,7 @@
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.4.1
 
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -36,6 +37,8 @@ public sealed class DbOperationLogWriter : IOperationLogWriter
 	}
 
 	private bool DebugEnabled => _options.CurrentValue.Diagnostics.DebugMode;
+
+	public bool IsDebugEnabled => DebugEnabled;
 
 	public async Task WriteAsync(OperationLogEntry entry, CancellationToken ct = default)
 	{
@@ -108,6 +111,27 @@ public sealed class DbOperationLogWriter : IOperationLogWriter
 			Message = message,
 			Exception = exception,
 		}, ct);
+
+	public Task DebugAsync(string source, string operation, string message, Func<string?>? detailsBuilder = null, string? correlationId = null, CancellationToken ct = default)
+	{
+		// No-op (and zero allocation) when DEBUG mode is off: verbose traces must not cost anything in
+		// normal operation. The details payload is built lazily, so an expensive diagnostic string is
+		// only materialised when an operator is actually troubleshooting.
+		if (!DebugEnabled)
+		{
+			return Task.CompletedTask;
+		}
+
+		return WriteAsync(new OperationLogEntry
+		{
+			Severity = OperationLogSeverity.Information,
+			Source = source,
+			Operation = operation,
+			Message = message,
+			DetailsJson = detailsBuilder?.Invoke(),
+			CorrelationId = correlationId,
+		}, ct);
+	}
 
 	private static string? Truncate(string? value, int max)
 		=> value is null ? null : (value.Length <= max ? value : value[..max]);

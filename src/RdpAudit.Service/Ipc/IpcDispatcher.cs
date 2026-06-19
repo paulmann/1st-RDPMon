@@ -6,6 +6,7 @@
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.4.1
 
 using System.Diagnostics;
 using System.Globalization;
@@ -168,6 +169,23 @@ public sealed class IpcDispatcher
 			Message = message,
 			Actor = "Configurator",
 		});
+	}
+
+	/// <summary>v1.4.1: DEBUG-only structured trace for a Firewall-related IPC operation (whitelist /
+	/// blocklist mutation, status query, reconcile, repair, unblock). Emitted only when
+	/// <c>Diagnostics.DebugMode</c> is on so an operator can see exactly which inputs were supplied,
+	/// which decision branch was taken, and what the outcome was when an action reports a failure.
+	/// The optional <paramref name="detailsBuilder"/> is invoked lazily (only when DEBUG is on) so we
+	/// never pay the cost of building a details string on the hot path when diagnostics are off.
+	/// Best-effort: never throws and never blocks the action.</summary>
+	private void LogFirewallDebug(string operation, string message, Func<string?>? detailsBuilder = null)
+	{
+		if (_opLog is null || !_options.CurrentValue.Diagnostics.DebugMode)
+		{
+			return;
+		}
+
+		_ = _opLog.DebugAsync("Firewall", operation, message, detailsBuilder);
 	}
 
 	public async Task<IpcResponse> DispatchAsync(IpcRequest request, CancellationToken ct)
@@ -596,10 +614,16 @@ public sealed class IpcDispatcher
 			catch (Exception ex)
 			{
 				_logger.LogWarning(ex, "Failed to query provider {ProviderId}", provider.ProviderId);
+				LogFirewallDebug("GetFirewallStatus.ProviderQueryFailed",
+					string.Format(CultureInfo.InvariantCulture, "Provider '{0}' status query threw: {1}", provider.ProviderId, ex.Message),
+					() => ex.ToString());
 				continue;
 			}
 
 			bool available = report.Status == FirewallProviderStatus.Available;
+			LogFirewallDebug("GetFirewallStatus.Provider",
+				string.Format(CultureInfo.InvariantCulture, "Provider '{0}' status={1} (available={2}).", provider.ProviderId, report.Status, available),
+				() => report.Message);
 			if (string.Equals(provider.ProviderId, "Windows", StringComparison.OrdinalIgnoreCase))
 			{
 				dto.WindowsAvailable = available;
@@ -646,6 +670,11 @@ public sealed class IpcDispatcher
 		}
 
 		dto.Message = EnforcementReconciler.DescribeHealth(dto.EnforcementHealth, enabledBlocklistRows, dto.VerifiedEnforcedCount);
+		LogFirewallDebug("GetFirewallStatus.Done",
+			string.Format(CultureInfo.InvariantCulture,
+				"Status summary: provider={0}; windowsAvailable={1}; mikrotikAvailable={2}; activeBlocks={3}; enabledBlocklistRows={4}; verifiedEnforced={5}; health={6}.",
+				dto.ConfiguredProvider, dto.WindowsAvailable, dto.MikroTikAvailable, dto.ActiveBlockCount,
+				enabledBlocklistRows, dto.VerifiedEnforcedCount, dto.EnforcementHealth));
 		return dto;
 	}
 
@@ -1063,6 +1092,10 @@ public sealed class IpcDispatcher
 	private async Task<object?> AddToBlocklistAsync(string? payload, CancellationToken ct)
 	{
 		AddressListMutationRequest req = DeserializeMutation(payload, "AddToBlocklist");
+		LogFirewallDebug("AddToBlocklist.Begin",
+			string.Format(CultureInfo.InvariantCulture, "AddToBlocklist requested for raw address '{0}'.", req.Address),
+			() => string.Format(CultureInfo.InvariantCulture, "RawAddress='{0}'; DurationMinutes={1}; Note='{2}'.",
+				req.Address, req.DurationMinutes, req.Note ?? "(none)"));
 		string ip = NormalizeAndValidateAddress(req.Address);
 
 		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
@@ -1071,6 +1104,8 @@ public sealed class IpcDispatcher
 		bool whitelisted = await db.WhitelistEntries.AnyAsync(w => w.Ip == ip, ct).ConfigureAwait(false);
 		if (whitelisted)
 		{
+			LogFirewallDebug("AddToBlocklist.RefusedWhitelisted",
+				string.Format(CultureInfo.InvariantCulture, "Refused to blocklist '{0}': an active whitelist entry exists for the exact value.", ip));
 			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
 				"Cannot add {0} to blocklist: it is whitelisted.", ip));
 		}
@@ -1293,7 +1328,16 @@ public sealed class IpcDispatcher
 	private async Task<object?> AddToWhitelistAsync(string? payload, CancellationToken ct)
 	{
 		AddressListMutationRequest req = DeserializeMutation(payload, "AddToWhitelist");
-		string ip = NormalizeAndValidateAddress(req.Address);
+		LogFirewallDebug("AddToWhitelist.Begin",
+			string.Format(CultureInfo.InvariantCulture, "AddToWhitelist requested for raw address '{0}'.", req.Address),
+			() => string.Format(CultureInfo.InvariantCulture, "RawAddress='{0}'; Note='{1}'.", req.Address, req.Note ?? "(none)"));
+
+		// v1.4.1: accept either a single IPv4 / IPv6 address or a CIDR range (e.g. 10.0.0.0/8, fc00::/7)
+		// so the "Add local networks" action — which submits private-range CIDRs — no longer fails the
+		// strict single-IP IPAddress.TryParse check that previously produced "N failed" with no detail.
+		string ip = NormalizeAndValidateAddressOrCidr(req.Address);
+		LogFirewallDebug("AddToWhitelist.Normalized",
+			string.Format(CultureInfo.InvariantCulture, "Normalized whitelist entry '{0}' -> '{1}'.", req.Address, ip));
 
 		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
 
@@ -1315,6 +1359,10 @@ public sealed class IpcDispatcher
 		}
 
 		// Whitelist precedence: disable any active blocklist rows that reference this IP.
+		// NOTE (v1.4.1): this exact-match disable only catches a blocklist row whose stored value equals
+		// the normalized whitelist value. When the whitelist entry is a CIDR range it will NOT disable a
+		// blocklist row for an individual member IP inside that range; the FirewallAutoBlockWorker is
+		// responsible for honouring the whitelisted range going forward and skipping member IPs.
 		List<BlocklistEntry> conflicting = await db.BlocklistEntries
 			.Where(b => b.Ip == ip && b.IsEnabled).ToListAsync(ct).ConfigureAwait(false);
 		foreach (BlocklistEntry row in conflicting)
@@ -1323,13 +1371,21 @@ public sealed class IpcDispatcher
 		}
 
 		await db.SaveChangesAsync(ct).ConfigureAwait(false);
+		LogFirewallDebug("AddToWhitelist.Done",
+			string.Format(CultureInfo.InvariantCulture, "Whitelist entry '{0}' persisted (existing={1}, conflictingBlocklistDisabled={2}).",
+				ip, existing is not null, conflicting.Count));
 		return new { status = IpcResultStatus.Success.ToString(), address = ip };
 	}
 
 	private async Task<object?> RemoveFromWhitelistAsync(string? payload, CancellationToken ct)
 	{
 		AddressListMutationRequest req = DeserializeMutation(payload, "RemoveFromWhitelist");
-		string ip = NormalizeAndValidateAddress(req.Address);
+		LogFirewallDebug("RemoveFromWhitelist.Begin",
+			string.Format(CultureInfo.InvariantCulture, "RemoveFromWhitelist requested for raw address '{0}'.", req.Address));
+
+		// v1.4.1: mirror the add path — a CIDR range must be removable using the same canonical form it was
+		// stored under, so normalise via the CIDR-aware path before the exact-match lookup.
+		string ip = NormalizeAndValidateAddressOrCidr(req.Address);
 
 		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
 		WhitelistEntry? existing = await db.WhitelistEntries
@@ -1341,6 +1397,8 @@ public sealed class IpcDispatcher
 			await db.SaveChangesAsync(ct).ConfigureAwait(false);
 		}
 
+		LogFirewallDebug("RemoveFromWhitelist.Done",
+			string.Format(CultureInfo.InvariantCulture, "RemoveFromWhitelist '{0}' completed (removed={1}).", ip, existing is not null));
 		return new { status = IpcResultStatus.Success.ToString(), address = ip, removed = existing is not null };
 	}
 
@@ -1403,6 +1461,35 @@ public sealed class IpcDispatcher
 				"Address '{0}' is not a valid IPv4 / IPv6 address.", trimmed));
 		}
 		return parsed.ToString();
+	}
+
+	/// <summary>
+	/// Validates and normalises a whitelist entry that may be either a single IPv4 / IPv6 address or
+	/// a CIDR range (e.g. 10.0.0.0/8, fc00::/7). CIDR ranges are canonicalised to network/prefix form
+	/// via <see cref="CidrRange"/> so the stored value is stable regardless of supplied host bits, and
+	/// the auto-block worker matches source IPs against the range family-aware. Single addresses fall
+	/// through to the strict single-IP path. Throws <see cref="IpcException"/> with a precise reason on
+	/// invalid input so the operator sees exactly why an entry was rejected.
+	/// </summary>
+	private static string NormalizeAndValidateAddressOrCidr(string address)
+	{
+		if (string.IsNullOrWhiteSpace(address))
+		{
+			throw new IpcException("Address must not be empty.");
+		}
+
+		string trimmed = address.Trim();
+		if (CidrRange.LooksLikeCidr(trimmed))
+		{
+			if (!CidrRange.TryParse(trimmed, out CidrRange? range) || range is null)
+			{
+				throw new IpcException(string.Format(CultureInfo.InvariantCulture,
+					"Address '{0}' is not a valid IPv4 / IPv6 CIDR range (expected e.g. 192.168.0.0/16 or fd00::/8).", trimmed));
+			}
+			return range.ToString();
+		}
+
+		return NormalizeAndValidateAddress(trimmed);
 	}
 
 	// ----------------------------------------------------------------------------------------------
@@ -1691,7 +1778,10 @@ public sealed class IpcDispatcher
 			throw new IpcException("Enforcement reconciliation service is not available in this build.");
 		}
 
-		return await _reconciliation.RemoveAllEnforcementAsync(ct).ConfigureAwait(false);
+		return await RunWithDebugTraceAsync(
+			"FirewallRemoveAllEnforcement",
+			"remove all live firewall enforcement",
+			() => _reconciliation.RemoveAllEnforcementAsync(ct)).ConfigureAwait(false);
 	}
 
 	/// <summary>Server-side guard phrase for the destructive full application-data purge. The client must
@@ -1771,10 +1861,15 @@ public sealed class IpcDispatcher
 			throw new IpcException("UnblockActiveBlock requires a positive Id.");
 		}
 
+		LogFirewallDebug("UnblockActiveBlock.Begin",
+			string.Format(CultureInfo.InvariantCulture, "UnblockActiveBlock requested for ActiveBlock id={0}.", id));
+
 		await using AuditDbContext db = await _factory.CreateDbContextAsync(ct).ConfigureAwait(false);
 		ActiveBlock? row = await db.ActiveBlocks.FirstOrDefaultAsync(b => b.Id == id, ct).ConfigureAwait(false);
 		if (row is null)
 		{
+			LogFirewallDebug("UnblockActiveBlock.NotFound",
+				string.Format(CultureInfo.InvariantCulture, "ActiveBlock id={0} not found.", id));
 			throw new IpcException(string.Format(CultureInfo.InvariantCulture,
 				"ActiveBlock {0} not found.", id));
 		}
@@ -1800,11 +1895,17 @@ public sealed class IpcDispatcher
 				providerOk = false;
 				providerError = ex.GetType().Name;
 				_logger.LogWarning(ex, "Provider unblock failed for {Ip}", ip);
+				LogFirewallDebug("UnblockActiveBlock.ProviderFailed",
+					string.Format(CultureInfo.InvariantCulture, "Provider unblock for '{0}' threw: {1}", ip, ex.Message),
+					() => ex.ToString());
 			}
 		}
 
 		row.Status = providerOk ? ActiveBlockStatus.Removed : ActiveBlockStatus.Failed;
 		row.LastError = providerError;
+		LogFirewallDebug("UnblockActiveBlock.ProviderOutcome",
+			string.Format(CultureInfo.InvariantCulture, "Provider unblock for '{0}' providerOk={1} (error={2}); ActiveBlock status set to {3}.",
+				ip, providerOk, providerError ?? "(none)", row.Status));
 
 		List<BlocklistEntry> related = await db.BlocklistEntries
 			.Where(b => b.Ip == ip && b.IsEnabled).ToListAsync(ct).ConfigureAwait(false);
@@ -1814,6 +1915,9 @@ public sealed class IpcDispatcher
 		}
 
 		await db.SaveChangesAsync(ct).ConfigureAwait(false);
+		LogFirewallDebug("UnblockActiveBlock.Done",
+			string.Format(CultureInfo.InvariantCulture, "UnblockActiveBlock id={0} ('{1}') done (providerOk={2}, blocklistDisabled={3}).",
+				row.Id, ip, providerOk, related.Count));
 		return new
 		{
 			status = (providerOk ? IpcResultStatus.Success : IpcResultStatus.Unavailable).ToString(),

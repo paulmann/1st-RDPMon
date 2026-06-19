@@ -9,6 +9,7 @@
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.4.1
 
 using RdpAudit.Core.Models;
 
@@ -30,6 +31,21 @@ public interface IOperationLogWriter
 	/// <summary>Convenience overload for a failure entry carrying an exception. Stack trace is
 	/// stored only when DEBUG mode is enabled.</summary>
 	Task ErrorAsync(string source, string operation, string message, Exception? exception, OperationLogSeverity severity = OperationLogSeverity.Error, CancellationToken ct = default);
+
+	/// <summary>
+	/// Verbose DEBUG-only trace. Writes an Information-severity entry (flagged IsDebug, so it is hidden
+	/// from the default Logs view and surfaced only when the operator turns DEBUG mode on) ONLY when
+	/// DEBUG mode is currently enabled; otherwise it is a cheap no-op that allocates nothing. Use this
+	/// liberally to record the full "what and why" of an operation — inputs, intermediate decisions,
+	/// and outcomes — without bloating the log in normal operation. The optional <paramref name="detailsBuilder"/>
+	/// is invoked lazily only when DEBUG is on, so building an expensive details payload costs nothing
+	/// in normal mode.
+	/// </summary>
+	Task DebugAsync(string source, string operation, string message, Func<string?>? detailsBuilder = null, string? correlationId = null, CancellationToken ct = default);
+
+	/// <summary>True when DEBUG mode is currently enabled. Callers can gate the construction of
+	/// expensive diagnostic strings on this without invoking <see cref="DebugAsync"/>.</summary>
+	bool IsDebugEnabled { get; }
 }
 
 /// <summary>Immutable payload describing one operation-log entry to persist. The writer fills in

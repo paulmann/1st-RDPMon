@@ -9,7 +9,7 @@
 // Extends: System.Windows.Forms.TabPage
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
-// Version: 1.4.0
+// Version: 1.4.1
 
 using System.ComponentModel;
 using System.Globalization;
@@ -1128,9 +1128,11 @@ public sealed class FirewallPage : TabPage
 			DurationMinutes = ComputeDurationMinutes(),
 		};
 
-		bool ok = await SendMutationAsync(IpcCommand.AddToBlocklist, payload).ConfigureAwait(true);
+		IpcCallResult<JsonElement?> result = await SendMutationDetailedAsync(IpcCommand.AddToBlocklist, payload)
+			.ConfigureAwait(true);
+		bool ok = result.IsSuccess;
 		SetStatus(string.Format(CultureInfo.InvariantCulture,
-			"AddToBlocklist {0}: {1}", ip, ok ? "OK" : "FAILED"));
+			"AddToBlocklist {0}: {1}", ip, ok ? "OK" : result.Headline()));
 		if (ok)
 		{
 			_blocklistInput.Text = string.Empty;
@@ -1682,7 +1684,14 @@ public sealed class FirewallPage : TabPage
 			Note = "Configurator Firewall tab manual add",
 		};
 
-		bool wlOk = await SendMutationAsync(IpcCommand.AddToWhitelist, payload).ConfigureAwait(true);
+		IpcCallResult<JsonElement?> wlResult = await SendMutationDetailedAsync(IpcCommand.AddToWhitelist, payload)
+			.ConfigureAwait(true);
+		bool wlOk = wlResult.IsSuccess;
+		if (!wlOk)
+		{
+			SetStatus(string.Format(CultureInfo.InvariantCulture, "AddToWhitelist {0} failed: {1}", ip, wlResult.Headline()));
+			return;
+		}
 
 		bool unblockOk = true;
 		if (wlOk)
@@ -1743,11 +1752,17 @@ public sealed class FirewallPage : TabPage
 	{
 		int added = 0;
 		int failed = 0;
+
+		// Collect per-range failure reasons so the operator sees exactly WHY a range was rejected instead
+		// of an opaque "N failed" count (the original defect this fix addresses).
+		List<string> failures = new();
 		foreach (string range in LocalNetworkRanges)
 		{
 			if (!AddressListFilter.IsValidIpOrCidr(range))
 			{
 				failed++;
+				failures.Add(string.Format(CultureInfo.InvariantCulture,
+					"{0}: rejected client-side (not a valid IP/CIDR).", range));
 				continue;
 			}
 
@@ -1758,20 +1773,35 @@ public sealed class FirewallPage : TabPage
 				Note = "Configurator local-network range",
 			};
 
-			bool ok = await SendMutationAsync(IpcCommand.AddToWhitelist, payload).ConfigureAwait(true);
-			if (ok)
+			IpcCallResult<JsonElement?> result = await SendMutationDetailedAsync(IpcCommand.AddToWhitelist, payload)
+				.ConfigureAwait(true);
+			if (result.IsSuccess)
 			{
 				added++;
 			}
 			else
 			{
 				failed++;
+				failures.Add(string.Format(CultureInfo.InvariantCulture, "{0}: {1}", normalized, result.Headline()));
 			}
 		}
 
-		SetStatus(string.Format(CultureInfo.InvariantCulture,
+		string summary = string.Format(CultureInfo.InvariantCulture,
 			"Add local network IPs: {0} added, {1} failed (of {2} ranges).",
-			added, failed, LocalNetworkRanges.Length));
+			added, failed, LocalNetworkRanges.Length);
+		if (failures.Count > 0)
+		{
+			// Append the first concrete reason to the one-line status; the full set is shown in a dialog so
+			// the operator gets the actionable detail without it being truncated in the status bar.
+			summary += " Reason: " + failures[0];
+			MessageBox.Show(
+				string.Join(Environment.NewLine, failures),
+				"Add local network IPs",
+				MessageBoxButtons.OK,
+				MessageBoxIcon.Warning);
+		}
+
+		SetStatus(summary);
 
 		if (added > 0)
 		{
@@ -1799,9 +1829,11 @@ public sealed class FirewallPage : TabPage
 		}
 
 		AddressListMutationRequest payload = new() { Address = ip };
-		bool ok = await SendMutationAsync(IpcCommand.RemoveFromWhitelist, payload).ConfigureAwait(true);
+		IpcCallResult<JsonElement?> result = await SendMutationDetailedAsync(IpcCommand.RemoveFromWhitelist, payload)
+			.ConfigureAwait(true);
+		bool ok = result.IsSuccess;
 		SetStatus(string.Format(CultureInfo.InvariantCulture,
-			"RemoveFromWhitelist {0}: {1}", ip, ok ? "OK" : "FAILED"));
+			"RemoveFromWhitelist {0}: {1}", ip, ok ? "OK" : result.Headline()));
 		if (ok)
 		{
 			await RefreshAllAsync().ConfigureAwait(true);
@@ -1838,9 +1870,11 @@ public sealed class FirewallPage : TabPage
 			Note = "Configurator Firewall tab manual add",
 			Enabled = true,
 		};
-		bool ok = await SendMutationAsync(IpcCommand.AddLoginRule, payload).ConfigureAwait(true);
+		IpcCallResult<JsonElement?> result = await SendMutationDetailedAsync(IpcCommand.AddLoginRule, payload)
+			.ConfigureAwait(true);
+		bool ok = result.IsSuccess;
 		SetStatus(string.Format(CultureInfo.InvariantCulture,
-			"AddLoginRule '{0}': {1}", login, ok ? "OK" : "FAILED"));
+			"AddLoginRule '{0}': {1}", login, ok ? "OK" : result.Headline()));
 		if (ok)
 		{
 			_loginRuleInput.Text = string.Empty;
@@ -1868,9 +1902,11 @@ public sealed class FirewallPage : TabPage
 		}
 
 		LoginRuleMutationRequest payload = new() { Id = row.Id, Login = row.Login };
-		bool ok = await SendMutationAsync(IpcCommand.RemoveLoginRule, payload).ConfigureAwait(true);
+		IpcCallResult<JsonElement?> result = await SendMutationDetailedAsync(IpcCommand.RemoveLoginRule, payload)
+			.ConfigureAwait(true);
+		bool ok = result.IsSuccess;
 		SetStatus(string.Format(CultureInfo.InvariantCulture,
-			"RemoveLoginRule '{0}': {1}", row.Login, ok ? "OK" : "FAILED"));
+			"RemoveLoginRule '{0}': {1}", row.Login, ok ? "OK" : result.Headline()));
 		if (ok)
 		{
 			await RefreshAllAsync().ConfigureAwait(true);
@@ -1892,10 +1928,12 @@ public sealed class FirewallPage : TabPage
 			Login = row.Login,
 			Enabled = !row.Enabled,
 		};
-		bool ok = await SendMutationAsync(IpcCommand.SetLoginRuleEnabled, payload).ConfigureAwait(true);
+		IpcCallResult<JsonElement?> result = await SendMutationDetailedAsync(IpcCommand.SetLoginRuleEnabled, payload)
+			.ConfigureAwait(true);
+		bool ok = result.IsSuccess;
 		SetStatus(string.Format(CultureInfo.InvariantCulture,
 			"SetLoginRuleEnabled '{0}' → {1}: {2}",
-			row.Login, payload.Enabled, ok ? "OK" : "FAILED"));
+			row.Login, payload.Enabled, ok ? "OK" : result.Headline()));
 		if (ok)
 		{
 			await RefreshAllAsync().ConfigureAwait(true);
@@ -2268,18 +2306,16 @@ public sealed class FirewallPage : TabPage
 	// IPC plumbing helpers
 	// ---------------------------------------------------------------------------------------------
 
-	private async Task<bool> SendMutationAsync(IpcCommand command, object payload)
-	{
-		try
-		{
-			JsonElement? response = await _ipc.SendAsync<JsonElement?>(command, payload).ConfigureAwait(true);
-			return response is not null;
-		}
-		catch
-		{
-			return false;
-		}
-	}
+	/// <summary>
+	/// Sends a mutation IPC command and returns the full structured outcome so the caller can surface
+	/// the real failure reason. Previously this method collapsed every failure (controlled service
+	/// error, timeout, transport fault) to <c>false</c> and swallowed the message, which is why the
+	/// "Add local network IPs" action reported "N failed" with no clue as to WHY. The detailed result
+	/// carries the service-supplied error text and outcome category; the bool convenience wrapper below
+	/// keeps existing call-sites simple while the new callers render <see cref="IpcCallResult{T}.Headline"/>.
+	/// </summary>
+	private Task<IpcCallResult<JsonElement?>> SendMutationDetailedAsync(IpcCommand command, object payload)
+		=> _ipc.SendDetailedAsync<JsonElement?>(command, payload);
 
 	// ---------------------------------------------------------------------------------------------
 	// UI helpers
