@@ -12,6 +12,7 @@
 // Extends: System.Object
 // Author:  Mikhail Deynekin
 // Site:    https://Deynekin.com
+// Version: 1.2.2
 
 using System.Net;
 using System.Net.Sockets;
@@ -29,6 +30,10 @@ namespace RdpAudit.Core.Util;
 /// </remarks>
 public static class IpNormalizer
 {
+	// Mirrors AttackStatsAggregator.SentinelUnresolvedIp. Declared locally to keep RdpAudit.Core.Util
+	// free of a RdpAudit.Core.Models dependency (Util must not reference the entity layer).
+	private const string SentinelUnresolvedIp = "0.0.0.0";
+
 	// Wrapping punctuation that can safely be stripped from BOTH ends of the raw input without
 	// ever damaging a valid IPv4 / IPv6 literal. Crucially this set does NOT contain '.' or ':'
 	// because each of those is part of every literal — stripping them blindly would destroy
@@ -55,7 +60,23 @@ public static class IpNormalizer
 		}
 
 		string cleaned = Sanitize(raw);
-		if (cleaned.Length == 0 || IpClassifier.IsLocalSentinel(cleaned))
+		if (cleaned.Length == 0)
+		{
+			return null;
+		}
+
+		// v1.2.2: the unresolved-attacker sentinel (0.0.0.0) is written verbatim by
+		// AttackStatsRefreshWorker for failures whose IpAddress field Windows stripped. It is also a
+		// member of IpClassifier.LocalSentinels, so a naive IsLocalSentinel gate squashed it back to
+		// null on any read path that re-normalised an already-aggregated key — silently dropping the
+		// (unresolved) row. Preserve it here so the sentinel survives a Normalize round-trip while all
+		// other local sentinels (::1, 127.0.0.1, "-", LOCAL, localhost) still collapse to null.
+		if (string.Equals(cleaned, SentinelUnresolvedIp, StringComparison.Ordinal))
+		{
+			return SentinelUnresolvedIp;
+		}
+
+		if (IpClassifier.IsLocalSentinel(cleaned))
 		{
 			return null;
 		}
