@@ -25,7 +25,12 @@ namespace RdpAudit.Service.Tests;
 
 public class AttackStatsIpNormalizationTests
 {
-	private static DateTime Now => new(2026, 5, 26, 12, 0, 0, DateTimeKind.Utc);
+	// Anchor all seeded timestamps two days in the past so every fact stays inside the
+	// AttackStatsRefreshWorker 30-day look-back window (DateTime.UtcNow - 30d) while remaining
+	// strictly in the past. A fixed calendar date would silently expire 30 days after it was
+	// written, which is exactly the regression this constant prevents. Captured once at class
+	// load to guarantee a stable value across all reads within a single test run.
+	private static readonly DateTime Now = DateTime.UtcNow.AddDays(-2).Date.AddHours(12);
 
 	private static async Task<(IDbContextFactory<AuditDbContext>, SqliteConnection)> CreateDbAsync()
 	{
