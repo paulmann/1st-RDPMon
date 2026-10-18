@@ -2164,15 +2164,13 @@ git checkout -b feature/your-feature-name
 
 ### 18.1 License
 
-This project is licensed under the **MIT License**.
+This project is licensed under the **PolyForm Noncommercial License 1.0.0**.
 
-**MIT License Summary:**
-- ✅ Commercial use permitted
-- ✅ Modification allowed
-- ✅ Distribution permitted
-- ✅ Private use allowed
-- ⚠️ Include license in distributions
-- ⚠️ Include copyright notice
+**PolyForm Noncommercial License 1.0.0 — key points:**
+- ✅ Noncommercial use, modification and distribution permitted
+- ✅ Personal projects, study, research, charity, education, public safety and health
+- ⚠️ Commercial use requires a separate licence from the author
+- ⚠️ Include the licence text and copyright notice in distributions
 
 ### 18.2 Copyright
 
