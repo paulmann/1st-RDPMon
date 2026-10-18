@@ -1,7 +1,6 @@
 # 1st RDP Monitor Security Analyzer
 
 [![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/paulmann/1st-RDPMon)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![PowerShell](https://img.shields.io/badge/powershell-7.5%2B-blue.svg)](https://docs.microsoft.com/en-us/powershell/)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2B%2FServer-blue.svg)](https://www.microsoft.com/windows/)
 [![LiteDB](https://img.shields.io/badge/litedb-4.1.4-orange.svg)](https://www.nuget.org/packages/LiteDB)
